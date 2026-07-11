@@ -104,9 +104,18 @@ static int runHeadless(const QString& romDir, const QString& bin,
     if (!cgShot.isEmpty()) {
         CodeGraphWidget w(&board);
         w.resize(760, 560);
-        QPixmap pm = w.grab();
-        pm.save(cgShot);
+        w.grab().save(cgShot); // first grab also establishes the layout cache
         std::printf("headless: wrote codegraph %s\n", qPrintable(cgShot));
+        // Exercise zoom + scroll and capture a second image to verify them.
+        for (int k = 0; k < 5; ++k) {
+            QKeyEvent ke(QEvent::KeyPress, Qt::Key_Plus, Qt::NoModifier);
+            QApplication::sendEvent(&w, &ke);
+        }
+        QKeyEvent pd(QEvent::KeyPress, Qt::Key_PageDown, Qt::NoModifier);
+        QApplication::sendEvent(&w, &pd);
+        QString zoomPath = cgShot; zoomPath.replace(".png", "_zoom.png");
+        w.grab().save(zoomPath);
+        std::printf("headless: wrote zoomed codegraph %s\n", qPrintable(zoomPath));
     }
 
     // Report speaker sample activity (verifies the audio sample path).

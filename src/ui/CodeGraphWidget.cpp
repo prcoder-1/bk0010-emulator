@@ -3,6 +3,9 @@
 #include "Disasm.h"
 #include <QPainter>
 #include <QPainterPath>
+#include <QWheelEvent>
+#include <QMouseEvent>
+#include <QKeyEvent>
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
@@ -14,6 +17,75 @@ CodeGraphWidget::CodeGraphWidget(Board* board, QWidget* parent)
     : QWidget(parent), board_(board) {
     setWindowTitle("Граф кода и горячие точки");
     setMinimumSize(700, 520);
+    setFocusPolicy(Qt::StrongFocus);
+    setMouseTracking(false);
+}
+
+void CodeGraphWidget::clampPan() {
+    double visH = graphRect_.height() - 12;
+    if (contentH_ <= visH) { panY_ = 0.0; return; }
+    if (panY_ > 0.0) panY_ = 0.0;
+    if (panY_ < visH - contentH_) panY_ = visH - contentH_;
+}
+
+void CodeGraphWidget::zoomAt(double factor, double centerY) {
+    double top = graphRect_.top() + 6;
+    double visH = graphRect_.height() - 12;
+    double oldContent = std::max(1.0, visH * zoom_);
+    double f = (centerY - top - panY_) / oldContent; // content fraction under the point
+    double newZoom = std::min(80.0, std::max(1.0, zoom_ * factor));
+    if (newZoom == zoom_) return;
+    zoom_ = newZoom;
+    contentH_ = visH * zoom_;
+    panY_ = centerY - top - f * contentH_;            // keep that point fixed
+    clampPan();
+    update();
+}
+
+void CodeGraphWidget::wheelEvent(QWheelEvent* e) {
+    double dy = e->angleDelta().y();
+    if (e->modifiers() & Qt::ControlModifier) {
+        zoomAt(std::pow(1.2, dy / 120.0), e->position().y());
+    } else {
+        panY_ += dy * 0.5;                            // wheel scrolls vertically
+        clampPan();
+        update();
+    }
+    e->accept();
+}
+
+void CodeGraphWidget::mousePressEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton && graphRect_.contains(e->pos())) {
+        dragging_ = true;
+        lastDrag_ = e->pos();
+    }
+}
+
+void CodeGraphWidget::mouseMoveEvent(QMouseEvent* e) {
+    if (dragging_) {
+        panY_ += e->pos().y() - lastDrag_.y();
+        lastDrag_ = e->pos();
+        clampPan();
+        update();
+    }
+}
+
+void CodeGraphWidget::mouseReleaseEvent(QMouseEvent*) { dragging_ = false; }
+
+void CodeGraphWidget::keyPressEvent(QKeyEvent* e) {
+    double cy = graphRect_.center().y();
+    double page = graphRect_.height() * 0.8;
+    switch (e->key()) {
+    case Qt::Key_Plus: case Qt::Key_Equal:   zoomAt(1.25, cy); break;
+    case Qt::Key_Minus:                      zoomAt(1.0 / 1.25, cy); break;
+    case Qt::Key_Up:      panY_ += 40; clampPan(); update(); break;
+    case Qt::Key_Down:    panY_ -= 40; clampPan(); update(); break;
+    case Qt::Key_PageUp:  panY_ += page; clampPan(); update(); break;
+    case Qt::Key_PageDown:panY_ -= page; clampPan(); update(); break;
+    case Qt::Key_Home: case Qt::Key_0: zoom_ = 1.0; panY_ = 0.0; update(); break;
+    default: QWidget::keyPressEvent(e); return;
+    }
+    e->accept();
 }
 
 void CodeGraphWidget::paintEvent(QPaintEvent*) {
@@ -52,8 +124,15 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     QRect g(margin, headerY + 8, graphW - margin, height() - headerY - 8 - (lineH + 8));
     p.setPen(QColor(50, 60, 90)); p.drawRect(g);
 
-    // Node column: labels to the left of the lane, edge arcs bulge to the right.
-    const bool showLabels = (N > 0) && (g.height() / std::max(1, N) >= fm.height() - 1) && N <= 120;
+    // Cache layout for the wheel/mouse/key handlers, apply zoom/pan.
+    graphRect_ = g;
+    const double visH = g.height() - 12;
+    contentH_ = visH * zoom_;
+    clampPan();
+
+    // Vertical position of a node = its index spread over the (zoomed) content.
+    const double nodeSpacing = (N > 0) ? contentH_ / N : 0.0;
+    const bool showLabels = (N > 0) && (nodeSpacing >= fm.height() - 1);
     const int labelW = showLabels ? fm.horizontalAdvance("022010 BICB (SP)+,(R1)+ ") : 0;
     const double laneX = g.left() + 8 + labelW;
 
@@ -61,7 +140,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         auto it = indexOf.find(addr);
         int idx = (it != indexOf.end()) ? it->second : 0;
         if (N <= 1) return g.center().y();
-        return g.top() + 6 + (idx + 0.5) / N * (g.height() - 12);
+        return g.top() + 6 + panY_ + (idx + 0.5) / N * contentH_;
     };
     auto hotFrac = [&](uint32_t c) { return std::log2(double(c) + 1.0) / lmax; };
 
@@ -70,6 +149,10 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         p.drawText(g.adjusted(10, 10, 0, 0), Qt::AlignLeft | Qt::AlignTop,
                    "Нет данных. Запустите игру, чтобы собрать трассу.");
     }
+
+    // Clip graph drawing to the panel so zoomed content never spills over.
+    p.save();
+    p.setClipRect(g.adjusted(1, 1, -1, -1));
 
     // ---- Edges (behind nodes) ----
     std::vector<std::pair<uint32_t, uint32_t>> edges; // (count, key)
@@ -82,9 +165,11 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         uint16_t from = edges[i].second >> 16, to = edges[i].second & 0xFFFF;
         if (!indexOf.count(from) || !indexOf.count(to)) continue;
         double y0 = yOf(from), y1 = yOf(to);
+        if ((y0 < g.top() && y1 < g.top()) || (y0 > g.bottom() && y1 > g.bottom()))
+            continue;                                     // arc fully off-screen
         bool forward = to > from;                        // backward = loop
         double frac = double(edges[i].first) / eMax;     // 0..1 strength
-        double span = std::abs(y1 - y0) / std::max(1, g.height()); // 0..1
+        double span = std::min(1.0, std::abs(y1 - y0) / std::max(1.0, visH)); // 0..1
         double bulge = rightSpace * (0.15 + 0.8 * span); // longer jumps arc wider
         QPointF c0(laneX, y0), c1(laneX, y1);
         QPointF ctrl(laneX + bulge, (y0 + y1) / 2);
@@ -100,6 +185,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     for (int i = 0; i < N; ++i) {
         uint16_t addr = nodes[i].first;
         double y = yOf(addr);
+        if (y < g.top() - lineH || y > g.bottom() + lineH) continue; // off-screen
         double f = hotFrac(nodes[i].second);
         QColor dot(int(120 + 135 * f), int(70 + 90 * (1 - std::abs(f - 0.5) * 2)), int(60 * (1 - f)));
         double r = 2.5 + 3.5 * f;
@@ -117,6 +203,8 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
                        QString("%1 %2").arg(buf).arg(QString::fromStdString(d.text)));
         }
     }
+
+    p.restore(); // end graph clip
 
     // ---- Right: ranked hottest instructions ----
     std::vector<std::pair<uint32_t, uint16_t>> hot;
@@ -141,9 +229,10 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         y += lineH;
     }
 
-    // ---- Totals footer ----
+    // ---- Totals footer + controls hint ----
     p.setPen(QColor(150, 170, 210));
     p.drawText(margin, height() - 6,
-        QString("Уникальных адресов: %1    рёбер переходов: %2    макс. счётчик: %3")
-            .arg(N).arg(tr.edges().size()).arg(tr.execMax()));
+        QString("Адресов: %1  рёбер: %2  зум ×%3  |  колесо/перетаск.-скролл, "
+                "Ctrl+колесо или ± зум, Home-сброс")
+            .arg(N).arg(tr.edges().size()).arg(zoom_, 0, 'f', 1));
 }
