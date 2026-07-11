@@ -164,6 +164,54 @@ int main() {
         CHECK(b.cpu().psw == 017, "PSW restored");
     }
 
+    // ---- 1801VM1 programmable timer (0177706/0177710/0177712) ----
+    // Bits: CONTINUOUS=002 ENBEND=004 ONCE=010 START=020 DIV16=040 DIV4=0100 END=0200
+    {
+        Board b;
+        b.reset();
+        b.memory().pokeWord(01000, 000777);      // BR . (16 ticks/iter)
+        b.cpu().reset(01000);
+        // Continuous reload mode, event flag enabled, limit 100.
+        b.memory().writeWord(0177706, 100);
+        b.memory().writeWord(0177712, 020 | 004); // START | ENBEND
+        b.runTicks(50 * 128);                     // ~50 timer periods
+        uint16_t cnt = b.memory().readWord(0177710);
+        CHECK(cnt <= 60 && cnt >= 40, "timer counts down (~50 from 100)");
+        CHECK(!(b.memory().readWord(0177712) & 0200), "END flag not set before underflow");
+        b.runTicks(70 * 128);                     // pass zero
+        uint16_t csr = b.memory().readWord(0177712);
+        CHECK(csr & 0200, "END/FL flag set on underflow");
+        CHECK(csr & 020, "continuous mode keeps running (START still set)");
+        // Writing the CSR clears the FL flag.
+        b.memory().writeWord(0177712, 020 | 004);
+        CHECK(!(b.memory().readWord(0177712) & 0200), "writing CSR clears END flag");
+    }
+    {
+        // One-shot mode stops after underflow.
+        Board b;
+        b.reset();
+        b.memory().pokeWord(01000, 000777);
+        b.cpu().reset(01000);
+        b.memory().writeWord(0177706, 10);
+        b.memory().writeWord(0177712, 020 | 010 | 004); // START | ONCE | ENBEND
+        b.runTicks(40 * 128);
+        uint16_t csr = b.memory().readWord(0177712);
+        CHECK(!(csr & 020), "one-shot timer stops (START cleared)");
+        CHECK(csr & 0200, "one-shot sets END flag");
+    }
+    {
+        // DIV4 makes the timer 4x slower.
+        Board b;
+        b.reset();
+        b.memory().pokeWord(01000, 000777);
+        b.cpu().reset(01000);
+        b.memory().writeWord(0177706, 1000);
+        b.memory().writeWord(0177712, 020 | 0100);      // START | DIV4
+        b.runTicks(100 * 128);                          // 100 base periods = 25 with /4
+        uint16_t cnt = b.memory().readWord(0177710);
+        CHECK(cnt <= 1000 - 20 && cnt >= 1000 - 30, "DIV4 slows timer ~4x (~25 counts)");
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;
 }
