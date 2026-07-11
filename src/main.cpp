@@ -12,14 +12,41 @@
 #include "ui/DebuggerOverlay.h"
 #include "ui/MemVisWidget.h"
 #include "ui/CodeGraphWidget.h"
+#include "ui/BkKeymap.h"
 #include "Board.h"
+#include <QKeyEvent>
+
+// Self-test of the Qt-key -> BK-code translation (Cyrillic, РУС/ЛАТ, Ctrl, specials).
+static int runKeyTest() {
+    BkKeymap km;
+    struct Case { int key; Qt::KeyboardModifiers mods; const char* text; const char* label; };
+    const Case cases[] = {
+        {Qt::Key_A, Qt::NoModifier, "A", "Latin A"},
+        {Qt::Key_1, Qt::NoModifier, "1", "digit 1"},
+        {0,         Qt::NoModifier, "б", "Cyrillic б (switch to РУС)"},
+        {0,         Qt::NoModifier, "а", "Cyrillic а (stay РУС)"},
+        {Qt::Key_A, Qt::NoModifier, "A", "Latin A (switch to ЛАТ)"},
+        {Qt::Key_Left,  Qt::NoModifier, "",  "Left arrow"},
+        {Qt::Key_Return,Qt::NoModifier, "\r","Enter"},
+        {Qt::Key_C, Qt::ControlModifier, "\x03", "Ctrl+C"},
+    };
+    for (const auto& c : cases) {
+        QKeyEvent e(QEvent::KeyPress, c.key, c.mods, QString::fromUtf8(c.text));
+        auto codes = km.translate(&e);
+        std::printf("%-32s ->", c.label);
+        for (uint16_t x : codes) std::printf(" %04o", x);
+        std::printf("\n");
+    }
+    return 0;
+}
 
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
 static int runHeadless(const QString& romDir, const QString& bin,
                        int frames, bool color, const QString& shot,
                        int keyCode, int keyFrame, const QString& dbgShot,
-                       const QString& memvisShot, const QString& cgShot) {
+                       const QString& memvisShot, const QString& cgShot,
+                       const QString& typeStr) {
     bk::Board board;
     if (!board.loadRoms(romDir.toStdString())) {
         std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
@@ -35,8 +62,16 @@ static int runHeadless(const QString& romDir, const QString& bin,
         return 3;
     }
     board.screen().setColorMode(color);
+    // Optional: type a string, one character every few frames, through the same
+    // keyboard queue the GUI uses (verifies the key -> register -> ISR -> echo path).
+    int typeIdx = 0;
     for (int i = 0; i < frames; ++i) {
         if (keyCode >= 0 && i == keyFrame) board.pressKey(static_cast<uint16_t>(keyCode));
+        if (!typeStr.isEmpty() && i >= 30 && (i % 4) == 0 && typeIdx < typeStr.size()) {
+            QChar c = typeStr[typeIdx++];
+            uint16_t code = (c == '\n') ? 012 : static_cast<uint16_t>(c.unicode() & 0x7f);
+            board.pressKey(code);
+        }
         board.runFrame();
     }
     board.screen().render(board.memory());
@@ -121,7 +156,7 @@ int main(int argc, char** argv) {
     if (qEnvironmentVariableIsSet("BK_ROM_DIR"))
         romDir = qEnvironmentVariable("BK_ROM_DIR");
 
-    QString binToLoad, shot, dbgShot, memvisShot, cgShot;
+    QString binToLoad, shot, dbgShot, memvisShot, cgShot, typeStr;
     int frames = 0, keyCode = -1, keyFrame = 0;
     bool color = true, headless = false;
     const QStringList args = app.arguments();
@@ -135,12 +170,16 @@ int main(int argc, char** argv) {
         else if (args[i] == "--mono") color = false;
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
         else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
+        else if (args[i] == "--type" && i + 1 < args.size()) { typeStr = args[++i]; headless = true; }
         else if (!args[i].startsWith("--")) binToLoad = args[i];
     }
 
+    if (args.contains("--keytest"))
+        return runKeyTest();
+
     if (headless)
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
-                           dbgShot, memvisShot, cgShot);
+                           dbgShot, memvisShot, cgShot, typeStr);
 
     MainWindow w(romDir);
     w.show();

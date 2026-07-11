@@ -2,6 +2,7 @@
 #include <QMainWindow>
 #include <memory>
 #include "Board.h"
+#include "BkKeymap.h"
 
 class GlScreen;
 class DebuggerOverlay;
@@ -51,6 +52,7 @@ private:
     QTimer* timer_ = nullptr;
     QLabel* status_ = nullptr;
     QString lastBin_;
+    BkKeymap keymap_;
     bool colorMode_ = true;
     bool paused_ = false;
 };

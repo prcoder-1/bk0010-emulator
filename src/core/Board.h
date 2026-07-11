@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <set>
+#include <deque>
 #include "Memory.h"
 #include "Cpu.h"
 #include "Screen.h"
@@ -24,8 +25,11 @@ public:
     void runFrame();
     int  ticksPerFrame() const { return cpuFreqHz_ / frameHz_; }
 
-    // Queue a keypress (BK/KOI-7 code) to be delivered via the keyboard IRQ.
-    void pressKey(uint16_t bkCode) { keyCode_ = bkCode; keyPending_ = true; }
+    // Queue a raw BK key code to be delivered via the keyboard IRQ. Codes with
+    // bit 0200 set (function keys / АР2) use vector 0274; the rest use 060. The
+    // low 7 bits are placed in the data register 0177662.
+    void pressKey(uint16_t bkCode) { if (keyQueue_.size() < 64) keyQueue_.push_back(bkCode); }
+    void clearKeys() { keyQueue_.clear(); }
 
     // --- Breakpoints / debugger support ---
     void toggleBreakpoint(uint16_t addr) {
@@ -81,8 +85,7 @@ private:
     uint16_t timerLimit_ = 0, timerCount_ = 0, timerCsr_ = 0;
     uint8_t  speaker_   = 0;
 
-    bool     keyPending_ = false;
-    uint16_t keyCode_    = 0;
+    std::deque<uint16_t> keyQueue_; // pending raw BK key codes
 
     std::set<uint16_t> breakpoints_;
     bool     breakHit_ = false;
