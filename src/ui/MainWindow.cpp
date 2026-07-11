@@ -50,8 +50,8 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_); }, QKeySequence("F12"));
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
-    dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis);
-    dbg->addAction("&Граф кода / горячие точки…", this, &MainWindow::openCodeGraph);
+    dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
+    dbg->addAction("&Граф кода / горячие точки…", this, &MainWindow::openCodeGraph, QKeySequence("Ctrl+G"));
     dbg->addSeparator();
     dbg->addAction("&Сохранить состояние…", this, &MainWindow::saveState, QKeySequence("Ctrl+S"));
     dbg->addAction("В&осстановить состояние…", this, &MainWindow::loadState, QKeySequence("Ctrl+L"));
