@@ -1,0 +1,24 @@
+# Build output
+/build/
+build*/
+# Convenience symlink to build/bk0010-emulator
+/bk0010-emulator
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Editor / IDE
+*.user
+*.swp
+.vscode/
+.idea/
+.kdev4/
+*.kdev4
+
+# Emulator artifacts
+*.bkst
+*.o
+*.a
