@@ -77,12 +77,13 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     int W = width(), H = height();
 
     // ---- Registers panel (top strip) ----
-    QRect regRect(margin, margin, W - 2 * margin, lineH_ * 4 + fs);
+    // Title on its own line; three data rows below it (R0-3 / R4-7 / PSW).
+    QRect regRect(margin, margin, W - 2 * margin, lineH_ * 5);
     p.fillRect(regRect, panelBg);
     p.setPen(border); p.drawRect(regRect);
     p.setPen(title); p.drawText(regRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— РЕГИСТРЫ —");
     p.setPen(fg);
-    int rx = regRect.x() + 6, ry = regRect.y() + lineH_ + 4;
+    int rx = regRect.x() + 6, ry = regRect.y() + 2 * lineH_;
     for (int i = 0; i < 8; ++i) {
         static const char* nm[8] = {"R0", "R1", "R2", "R3", "R4", "R5", "SP", "PC"};
         QString s = QString("%1=%2").arg(nm[i]).arg(oct6(cpu.r[i]));
