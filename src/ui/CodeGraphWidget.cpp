@@ -13,12 +13,31 @@
 
 using bk::Board;
 
+// Format a large count with a K/M/G suffix, e.g. 1209 -> "1.2K", 184090 -> "184K".
+static QString fmtCount(uint32_t n) {
+    struct { double div; const char* suf; } units[] = {{1e9, "G"}, {1e6, "M"}, {1e3, "K"}};
+    for (auto& u : units) {
+        if (n >= u.div) {
+            double v = n / u.div;
+            return (v < 100.0) ? QString::number(v, 'f', 1) + u.suf
+                               : QString::number(int(v + 0.5)) + u.suf;
+        }
+    }
+    return QString::number(n);
+}
+
 CodeGraphWidget::CodeGraphWidget(Board* board, QWidget* parent)
     : QWidget(parent), board_(board) {
     setWindowTitle("Граф кода и горячие точки");
     setMinimumSize(700, 520);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(false);
+    sinceInteraction_.start();
+}
+
+void CodeGraphWidget::userInteracted() {
+    autoFollow_ = false;
+    sinceInteraction_.restart();
 }
 
 void CodeGraphWidget::clampPan() {
@@ -43,6 +62,7 @@ void CodeGraphWidget::zoomAt(double factor, double centerY) {
 }
 
 void CodeGraphWidget::wheelEvent(QWheelEvent* e) {
+    userInteracted();
     double dy = e->angleDelta().y();
     if (e->modifiers() & Qt::ControlModifier) {
         zoomAt(std::pow(1.2, dy / 120.0), e->position().y());
@@ -63,6 +83,7 @@ void CodeGraphWidget::mousePressEvent(QMouseEvent* e) {
 
 void CodeGraphWidget::mouseMoveEvent(QMouseEvent* e) {
     if (dragging_) {
+        userInteracted();
         panY_ += e->pos().y() - lastDrag_.y();
         lastDrag_ = e->pos();
         clampPan();
@@ -76,13 +97,14 @@ void CodeGraphWidget::keyPressEvent(QKeyEvent* e) {
     double cy = graphRect_.center().y();
     double page = graphRect_.height() * 0.8;
     switch (e->key()) {
-    case Qt::Key_Plus: case Qt::Key_Equal:   zoomAt(1.25, cy); break;
-    case Qt::Key_Minus:                      zoomAt(1.0 / 1.25, cy); break;
-    case Qt::Key_Up:      panY_ += 40; clampPan(); update(); break;
-    case Qt::Key_Down:    panY_ -= 40; clampPan(); update(); break;
-    case Qt::Key_PageUp:  panY_ += page; clampPan(); update(); break;
-    case Qt::Key_PageDown:panY_ -= page; clampPan(); update(); break;
-    case Qt::Key_Home: case Qt::Key_0: zoom_ = 1.0; panY_ = 0.0; update(); break;
+    case Qt::Key_Plus: case Qt::Key_Equal:   userInteracted(); zoomAt(1.25, cy); break;
+    case Qt::Key_Minus:                      userInteracted(); zoomAt(1.0 / 1.25, cy); break;
+    case Qt::Key_Up:      userInteracted(); panY_ += 40; clampPan(); update(); break;
+    case Qt::Key_Down:    userInteracted(); panY_ -= 40; clampPan(); update(); break;
+    case Qt::Key_PageUp:  userInteracted(); panY_ += page; clampPan(); update(); break;
+    case Qt::Key_PageDown:userInteracted(); panY_ -= page; clampPan(); update(); break;
+    // Home resumes auto-follow of the hot instructions.
+    case Qt::Key_Home: case Qt::Key_0: autoFollow_ = true; update(); break;
     default: QWidget::keyPressEvent(e); return;
     }
     e->accept();
@@ -127,6 +149,22 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // Cache layout for the wheel/mouse/key handlers, apply zoom/pan.
     graphRect_ = g;
     const double visH = g.height() - 12;
+
+    // Auto-follow: until the user moves the view (and again after ~4 s idle),
+    // glide the zoom/scroll so the hottest instructions stay centred and legible.
+    if (!autoFollow_ && sinceInteraction_.elapsed() > 4000) autoFollow_ = true;
+    if (autoFollow_ && N > 0) {
+        int hotIdx = 0; uint32_t hotMax = 0;
+        for (int i = 0; i < N; ++i)
+            if (nodes[i].second > hotMax) { hotMax = nodes[i].second; hotIdx = i; }
+        // Zoom so node spacing reaches label height (labels become readable).
+        double targetZoom = std::min(60.0, std::max(1.0, N * (fm.height() + 2.0) / std::max(1.0, visH)));
+        zoom_ += (targetZoom - zoom_) * 0.08;
+        double tContent = visH * zoom_;
+        double targetPanY = visH * 0.5 - 6.0 - (hotIdx + 0.5) / N * tContent;
+        panY_ += (targetPanY - panY_) * 0.08;
+    }
+
     contentH_ = visH * zoom_;
     clampPan();
 
@@ -229,7 +267,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         char buf[8]; std::snprintf(buf, sizeof(buf), "%06o", a);
         p.setPen(QColor(230, 230, 200));
         QString lineText = QString("%1 %2  ×%3")
-            .arg(buf).arg(QString::fromStdString(d.text)).arg(hot[i].first);
+            .arg(buf).arg(QString::fromStdString(d.text)).arg(fmtCount(hot[i].first));
         p.drawText(textX, y, fm.elidedText(lineText, Qt::ElideRight, textW));
         y += lineH;
     }
@@ -237,7 +275,8 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // ---- Totals footer + controls hint ----
     p.setPen(QColor(150, 170, 210));
     p.drawText(margin, height() - 6,
-        QString("Адресов: %1  рёбер: %2  зум ×%3  |  колесо/перетаск.-скролл, "
-                "Ctrl+колесо или ± зум, Home-сброс")
-            .arg(N).arg(tr.edges().size()).arg(zoom_, 0, 'f', 1));
+        QString("Адресов: %1  рёбер: %2  зум ×%3  [%4]  |  колесо/перетаск.-скролл, "
+                "Ctrl+колесо или ± зум, Home-авто")
+            .arg(N).arg(tr.edges().size()).arg(zoom_, 0, 'f', 1)
+            .arg(autoFollow_ ? "авто → горячие" : "ручной"));
 }
