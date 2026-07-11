@@ -118,7 +118,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // ---- Layout: left = control-flow graph, right = hot list ----
     const int margin = fs + 4;
     const int headerY = margin + fm.ascent();
-    const int graphW = width() * 58 / 100;
+    const int graphW = width() * 54 / 100;
     p.setPen(QColor(200, 210, 255));
     p.drawText(margin, headerY, "Граф исполнения  (cyan → вперёд,  orange → цикл)");
     QRect g(margin, headerY + 8, graphW - margin, height() - headerY - 8 - (lineH + 8));
@@ -215,7 +215,11 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     p.drawText(listX, headerY, "Горячие инструкции:");
     uint32_t top = hot.empty() ? 1 : hot[0].first;
     int y = headerY + lineH;
-    const int barMax = std::max(40, (width() - listX) * 30 / 100);
+    // Keep the same `margin` gap from the right edge as the graph has on the left.
+    const int listRight = width() - margin;
+    const int barMax = std::max(36, (listRight - listX) * 22 / 100);
+    const int textX = listX + barMax + 8;
+    const int textW = std::max(10, listRight - textX);
     for (size_t i = 0; i < hot.size() && y < height() - 6; ++i) {
         uint16_t a = hot[i].second;
         double frac = double(hot[i].first) / top;
@@ -224,8 +228,9 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         bk::DisasmLine d = bk::disasm(mem, a);
         char buf[8]; std::snprintf(buf, sizeof(buf), "%06o", a);
         p.setPen(QColor(230, 230, 200));
-        p.drawText(listX + barMax + 8, y, QString("%1 %2  ×%3")
-            .arg(buf).arg(QString::fromStdString(d.text)).arg(hot[i].first));
+        QString lineText = QString("%1 %2  ×%3")
+            .arg(buf).arg(QString::fromStdString(d.text)).arg(hot[i].first);
+        p.drawText(textX, y, fm.elidedText(lineText, Qt::ElideRight, textW));
         y += lineH;
     }
 
