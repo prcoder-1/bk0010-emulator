@@ -46,11 +46,20 @@ void Board::timerCheck() {
     if ((timerCsr_ & TIM_ONCE) && !(timerCsr_ & TIM_CONTINUOUS)) {
         timerCount_ = 0;
         timerCsr_ &= ~TIM_START;   // one-shot: stop
+    } else if (timerCsr_ & TIM_CONTINUOUS) {
+        // Free-running: the counter wraps through zero (mod 2^16), no reload.
+        timerCount_ = static_cast<uint16_t>(static_cast<uint32_t>(timerCount_)
+                                            - static_cast<uint32_t>(delta));
+        timerStart_ += delta * timerPeriod_;
     } else {
-        if (timerCsr_ & TIM_CONTINUOUS)
-            timerCount_ = static_cast<uint16_t>(-static_cast<int64_t>(delta)); // free-running wrap
-        else
-            timerCount_ = static_cast<uint16_t>(timerLimit_ - delta);          // reload from limit
+        // Reload mode: on each underflow the counter reloads from the limit.
+        // `delta` may span many periods (e.g. a long busy loop between register
+        // reads), so fold it modulo one full period — otherwise `limit - delta`
+        // would underflow to a huge value and the next poll loop would appear to
+        // hang for seconds.
+        uint32_t period = static_cast<uint32_t>(timerLimit_) + 1;   // limit..0 inclusive
+        uint32_t rem = static_cast<uint32_t>((delta - timerCount_) % period);
+        timerCount_ = static_cast<uint16_t>(timerLimit_ - rem);
         timerStart_ += delta * timerPeriod_;
     }
 }

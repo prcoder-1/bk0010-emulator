@@ -200,6 +200,21 @@ int main() {
         CHECK(csr & 0200, "one-shot sets END flag");
     }
     {
+        // Regression (Digger freeze): a long gap between reads — delta spanning
+        // many periods — must NOT wrap the reload counter to a huge value, else
+        // the game's "while (FL==0)" frame-pacing loop hangs for seconds.
+        Board b;
+        b.reset();
+        b.memory().pokeWord(01000, 000777);
+        b.cpu().reset(01000);
+        b.memory().writeWord(0177706, 100);             // limit
+        b.memory().writeWord(0177712, 020 | 004);       // START | ENBEND (reload mode)
+        b.runTicks(10000 * 128);                        // ~100 full periods, no reads between
+        uint16_t cnt = b.memory().readWord(0177710);
+        CHECK(cnt <= 100, "timer reload stays bounded after a long gap (no huge wrap)");
+        CHECK(b.memory().readWord(0177712) & 0200, "timer FL set after a long gap");
+    }
+    {
         // DIV4 makes the timer 4x slower.
         Board b;
         b.reset();
