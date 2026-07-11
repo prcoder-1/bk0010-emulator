@@ -96,14 +96,20 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         QString(cpu.halted() ? "СОСТ: ОСТАНОВ (HALT)" : "СОСТ: ПАУЗА"));
 
     // ---- Disassembly panel (left) ----
+    // Reserve a band at the bottom for the help line and size the panels snugly
+    // to their content, so the gap after the frame is larger than the padding
+    // left inside it after the last line.
     int dTop = regRect.bottom() + margin;
-    int dH = H - dTop - margin;
+    int helpTop = (H - 4) - lineH_;             // top of the help-line band
+    int panelBottomMax = helpTop - margin;      // panels end >= margin above the help line
+    disasmLines_ = (panelBottomMax - dTop - 8) / lineH_ - 1;
+    if (disasmLines_ < 1) disasmLines_ = 1;
+    int dH = (disasmLines_ + 1) * lineH_ + 8;   // snug: title + lines + small pad
     disasmRect_ = QRect(margin, dTop, (W - 3 * margin) * 3 / 5, dH);
     p.fillRect(disasmRect_, panelBg);
     p.setPen(border); p.drawRect(disasmRect_);
     p.setPen(title); p.drawText(disasmRect_.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— ДИЗАССЕМБЛЕР —");
 
-    disasmLines_ = (disasmRect_.height() - lineH_ - 6) / lineH_;
     uint16_t a = disasmTop_;
     int y = disasmRect_.y() + lineH_ + lineH_;
     for (int i = 0; i < disasmLines_; ++i) {
@@ -139,14 +145,18 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     p.setPen(title); p.drawText(memRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— ПАМЯТЬ —");
     p.setPen(fg);
     int rows = (memRect.height() - lineH_ - 6) / lineH_;
+    // Only as many words per row as fit; each column ("001000:" / " 010706") is
+    // 7 monospace characters wide.
+    int wpr = (memRect.width() - 12 - cw * 7) / (cw * 7);
+    if (wpr < 1) wpr = 1; else if (wpr > 8) wpr = 8;
     uint16_t ma = memAddr_;
     int my = memRect.y() + lineH_ + lineH_;
     for (int r = 0; r < rows; ++r) {
         QString line = oct6(ma) + ":";
-        for (int c = 0; c < 8; ++c) line += " " + oct6(mem.peekWord(ma + c * 2));
+        for (int c = 0; c < wpr; ++c) line += " " + oct6(mem.peekWord(ma + c * 2));
         p.drawText(memRect.x() + 6, my, line);
         my += lineH_;
-        ma += 16;
+        ma += static_cast<uint16_t>(wpr * 2);
     }
 
     // ---- Stack panel (right-bottom) ----
