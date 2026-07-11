@@ -111,9 +111,11 @@ static int runHeadless(const QString& romDir, const QString& bin,
     if (!cgShot.isEmpty()) {
         CodeGraphWidget w(&board);
         w.resize(760, 560);
-        w.grab().save(cgShot); // first grab also establishes the layout cache
-        std::printf("headless: wrote codegraph %s\n", qPrintable(cgShot));
-        // Exercise zoom + scroll and capture a second image to verify them.
+        // Let the auto-follow glide converge onto the hottest instructions.
+        for (int k = 0; k < 120; ++k) w.grab();
+        w.grab().save(cgShot);
+        std::printf("headless: wrote codegraph (auto-follow) %s\n", qPrintable(cgShot));
+        // Exercise manual zoom + scroll and capture a second image.
         for (int k = 0; k < 5; ++k) {
             QKeyEvent ke(QEvent::KeyPress, Qt::Key_Plus, Qt::NoModifier);
             QApplication::sendEvent(&w, &ke);
@@ -122,7 +124,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
         QApplication::sendEvent(&w, &pd);
         QString zoomPath = cgShot; zoomPath.replace(".png", "_zoom.png");
         w.grab().save(zoomPath);
-        std::printf("headless: wrote zoomed codegraph %s\n", qPrintable(zoomPath));
+        std::printf("headless: wrote manual codegraph %s\n", qPrintable(zoomPath));
     }
 
     // Report speaker sample activity (verifies the audio sample path).

@@ -2,6 +2,7 @@
 #include <QWidget>
 #include <QRect>
 #include <QPoint>
+#include <QElapsedTimer>
 #include <cstdint>
 
 namespace bk { class Board; }
@@ -27,6 +28,7 @@ protected:
 private:
     void zoomAt(double factor, double centerY);
     void clampPan();
+    void userInteracted();   // switch to manual mode, restart the idle timer
 
     bk::Board* board_;
 
@@ -35,6 +37,11 @@ private:
     double panY_ = 0.0;      // vertical scroll offset (px, <= 0)
     bool   dragging_ = false;
     QPoint lastDrag_;
+
+    // Auto-follow: glide to the hottest instructions until the user moves the
+    // view; resume automatically after an idle period.
+    bool          autoFollow_ = true;
+    QElapsedTimer sinceInteraction_;
 
     // Cached layout from the last paint (used by the event handlers).
     QRect  graphRect_;
