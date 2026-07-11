@@ -122,6 +122,7 @@ void Board::reset() {
     timerStart_ = 0;
     timerPeriod_ = TIMER_BASE_PERIOD;
     speaker_ = 0;
+    framesSinceReset_ = 0;
     screen_.setScroll(scroll_);
     trace_.reset();
 }
@@ -209,6 +210,7 @@ void Board::runFrame() {
     deliverFrameInterrupts();
     runTicks(ticksPerFrame());
     trace_.tick();
+    ++framesSinceReset_;
 }
 
 // Delivered once per 50 Hz frame. On BK-0010 the video controller raises IRQ2
