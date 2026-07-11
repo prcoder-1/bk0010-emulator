@@ -713,7 +713,15 @@ int Cpu::step() {
     case R_TRAP: service(VEC_TRAP); break;
     case R_IOT:  service(VEC_IOT);  break;
     case R_BPT:  service(VEC_TBIT); break; // BPT vector = 000014
-    case R_HALT: halted_ = true;    break;
+    case R_HALT:
+        // BK-0010: HALT is not a permanent stop — it traps through the STOP
+        // vector 0004, where the monitor (or the program's own handler) services
+        // it. Games use HALT this way; treating it as a hard stop hangs them.
+        // Only stop for real if no handler is installed (avoids a HALT->0->HALT
+        // loop).
+        if (mem_.peekWord(VEC_BUS_ERROR) != 0) service(VEC_BUS_ERROR);
+        else halted_ = true;
+        break;
     case R_WAIT: waiting_ = true;    break;
     }
     return ticks;

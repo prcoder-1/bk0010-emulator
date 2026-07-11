@@ -164,6 +164,27 @@ int main() {
         CHECK(b.cpu().psw == 017, "PSW restored");
     }
 
+    // ---- HALT traps through vector 0004 (BK-0010), not a permanent stop ----
+    {
+        Memory m; Cpu c(m);
+        m.pokeWord(0004, 03000);   // STOP vector -> handler
+        m.pokeWord(0006, 0);
+        m.pokeWord(01000, 000000); // HALT
+        c.reset(01000); c.r[6] = 02000;
+        c.step();
+        CHECK(!c.halted(), "HALT is not a permanent stop when vector 0004 is set");
+        CHECK(c.pc() == 03000, "HALT traps to the vector-0004 handler");
+        CHECK(m.peekWord(01774) == 01002, "HALT pushes return PC on the stack");
+    }
+    {
+        Memory m; Cpu c(m);
+        m.pokeWord(0004, 0);       // no handler
+        m.pokeWord(01000, 000000); // HALT
+        c.reset(01000); c.r[6] = 02000;
+        c.step();
+        CHECK(c.halted(), "HALT with no vector-0004 handler stops the CPU (no loop)");
+    }
+
     // ---- 1801VM1 programmable timer (0177706/0177710/0177712) ----
     // Bits: CONTINUOUS=002 ENBEND=004 ONCE=010 START=020 DIV16=040 DIV4=0100 END=0200
     {
