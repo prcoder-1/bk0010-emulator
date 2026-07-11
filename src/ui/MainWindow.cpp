@@ -5,6 +5,7 @@
 #include "CodeGraphWidget.h"
 #include "AudioOut.h"
 #include "Disasm.h"
+#include <vector>
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
@@ -29,6 +30,9 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
 
     screen_ = new GlScreen(this);
     setCentralWidget(screen_);
+    // Keyboard goes to the main window; the GL widget must not steal focus.
+    screen_->setFocusPolicy(Qt::NoFocus);
+    setFocusPolicy(Qt::StrongFocus);
 
     overlay_ = new DebuggerOverlay(board_.get(), screen_);
     overlay_->setGeometry(screen_->rect());
@@ -168,6 +172,7 @@ bool MainWindow::loadBinFromPath(const QString& path) {
 
 void MainWindow::resetMachine() {
     board_->reset();
+    keymap_.reset();
     if (!lastBin_.isEmpty()) loadBinFromPath(lastBin_);
     status_->setText("Сброс");
 }
@@ -177,34 +182,12 @@ void MainWindow::toggleColorMode() {
     status_->setText(colorMode_ ? "Режим: 256×256 цвет" : "Режим: 512×256 ч/б");
 }
 
-// Translate a Qt key event to a BK-0010 (KOI-7) key code. Returns -1 if unmapped.
-static int translateKey(QKeyEvent* e) {
-    switch (e->key()) {
-    case Qt::Key_Return:
-    case Qt::Key_Enter:     return 012;   // ВВОД
-    case Qt::Key_Backspace: return 030;   // ЗАБ
-    case Qt::Key_Tab:       return 011;
-    case Qt::Key_Escape:    return 033;
-    case Qt::Key_Left:      return 010;
-    case Qt::Key_Right:     return 031;
-    case Qt::Key_Up:        return 032;
-    case Qt::Key_Down:      return 033;
-    case Qt::Key_Delete:    return 0177;
-    default: break;
-    }
-    const QString t = e->text();
-    if (!t.isEmpty()) {
-        ushort u = t[0].unicode();
-        if (u >= 0x20 && u < 0x7f) return u; // printable ASCII maps to KOI-7
-    }
-    return -1;
-}
-
 void MainWindow::keyPressEvent(QKeyEvent* e) {
     // F12 toggles the debugger regardless of state.
     if (e->key() == Qt::Key_F12) { setPaused(!paused_); e->accept(); return; }
 
     if (paused_) {
+        // --- Debugger controls (SoftICE overlay is visible) ---
         switch (e->key()) {
         case Qt::Key_F7:       stepInto(); return;
         case Qt::Key_F8:       stepOver(); return;
@@ -218,8 +201,13 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         }
     }
 
-    int code = translateKey(e);
-    if (code >= 0) { board_->pressKey(static_cast<uint16_t>(code)); e->accept(); return; }
+    // --- SoftICE off: feed the BK-0010 keyboard ---
+    std::vector<uint16_t> codes = keymap_.translate(e);
+    if (!codes.empty()) {
+        for (uint16_t c : codes) board_->pressKey(c);
+        e->accept();
+        return;
+    }
     QMainWindow::keyPressEvent(e);
 }
 

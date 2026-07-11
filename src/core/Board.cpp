@@ -52,7 +52,9 @@ void Board::reset() {
     // priority itself once it has installed its interrupt vectors.
     cpu_.reset(START_VECTOR, 0340);
     scroll_ = 0330;
-    kbdStatus_ = kbdData_ = 0;
+    kbdStatus_ = 0100; // keyboard interrupt enabled (bit 6), no key ready
+    kbdData_ = 0;
+    keyQueue_.clear();
     timerLimit_ = timerCount_ = timerCsr_ = 0;
     speaker_ = 0;
     screen_.setScroll(scroll_);
@@ -143,16 +145,20 @@ void Board::runFrame() {
 void Board::deliverFrameInterrupts() {
     if (cpu_.halted()) return;
     if (cpu_.psw & 0200) return; // interrupts masked
-    if (keyPending_) {
-        // Only deliver if a handler vector is installed (avoids jumping to 0).
-        if (mem_.peekWord(Cpu::VEC_KEYBOARD) != 0) {
-            kbdData_ = keyCode_;
-            kbdStatus_ |= 0200;  // data-ready flag
-            keyPending_ = false;
-            cpu_.interrupt(Cpu::VEC_KEYBOARD); // 0060
-            return;
-        }
+
+    // Keyboard: deliver the next queued key only once the previous one has been
+    // read (ready bit 0200 clear), so the data register value is never lost.
+    if (!(kbdStatus_ & 0200) && !keyQueue_.empty()) {
+        uint16_t raw = keyQueue_.front();
+        keyQueue_.pop_front();
+        kbdData_ = raw & 0177;                 // low 7 bits go to 0177662
+        kbdStatus_ |= 0200;                    // "key ready"
+        // Function keys / АР2 (bit 0200 set) vector through 0274, others 060.
+        uint16_t vec = (raw & 0200) ? 0274 : Cpu::VEC_KEYBOARD;
+        if (mem_.peekWord(vec) != 0) cpu_.interrupt(vec);
+        return;
     }
+
     if (mem_.peekWord(Cpu::VEC_IRQ2) != 0)
         cpu_.interrupt(Cpu::VEC_IRQ2);         // 0100 (50 Hz)
 }
@@ -196,10 +202,14 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
     case REG_TIMER_CNT:  value = timerCount_; return true;
     case REG_TIMER_CSR:  value = timerCsr_; return true;
     case REG_PORT:       value = 0; return true;
-    case REG_SYS:
-        // BK-0010: bit15 set, high byte 0200 (serial idle), no key/tape/stop.
-        value = 0100000 | 0200;
+    case REG_SYS: {
+        // BK-0010: bit15 set, high byte 0200 (serial idle). Bit 6 (0100) is the
+        // "key pressed" indicator, active-low: 0 while a key is waiting.
+        uint16_t v = 0100000 | 0200;
+        if (!(kbdStatus_ & 0200)) v |= 0100; // no key pending -> bit 6 high
+        value = v;
         return true;
+    }
     default:
         // Any other address in the I/O page: read as 0 (handled).
         if (addr >= ADDR_IO_PAGE) { value = 0; return true; }
