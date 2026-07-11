@@ -126,16 +126,24 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     QFontMetrics fm(mono);
     const int lineH = fm.height() + 2;
 
-    // ---- Collect executed instructions (nodes), sorted by address ----
+    // ---- Collect recently-executed instructions (nodes), sorted by address ----
+    // Instructions not executed within GRAPH_WINDOW frames drop out of the graph,
+    // so it tracks the currently-active code rather than everything ever run.
+    const int GRAPH_WINDOW = 300; // frames (~6 s at 50 Hz) since last execution
     std::vector<std::pair<uint16_t, uint32_t>> nodes; // (addr, count)
+    uint32_t localMax = 1;        // max exec count among the visible nodes
     for (int a = 0; a < 0x10000; a += 2) {
-        uint32_t c = tr.execCount(static_cast<uint16_t>(a));
-        if (c) nodes.push_back({static_cast<uint16_t>(a), c});
+        uint16_t a16 = static_cast<uint16_t>(a);
+        uint32_t c = tr.execCount(a16);
+        if (c && tr.fade(tr.lastExec(a16), GRAPH_WINDOW) > 0.0) {
+            nodes.push_back({a16, c});
+            if (c > localMax) localMax = c;
+        }
     }
     std::unordered_map<uint16_t, int> indexOf;
     for (int i = 0; i < (int)nodes.size(); ++i) indexOf[nodes[i].first] = i;
     const int N = (int)nodes.size();
-    const double lmax = std::log2(double(tr.execMax()) + 1.0) + 1e-6;
+    const double lmax = std::log2(double(localMax) + 1.0) + 1e-6;
 
     // ---- Layout: left = control-flow graph, right = hot list ----
     const int margin = fs + 4;
