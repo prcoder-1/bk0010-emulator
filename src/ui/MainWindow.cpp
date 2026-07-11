@@ -163,6 +163,10 @@ void MainWindow::openBin() {
 
 bool MainWindow::loadBinFromPath(const QString& path) {
     uint16_t addr = 0, len = 0;
+    // The monitor ROM must have initialised before a game is started; when a bin
+    // is passed on the command line this happens before the 50 Hz timer has run
+    // a single frame, so boot it here first.
+    board_->ensureMonitorBooted();
     if (!board_->loadBin(path.toStdString(), true, &addr, &len)) {
         QMessageBox::warning(this, "BK-0010", QString("Не удалось загрузить %1").arg(path));
         return false;

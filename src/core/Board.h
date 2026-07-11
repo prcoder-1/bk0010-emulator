@@ -24,6 +24,13 @@ public:
     void runFrame();
     int  ticksPerFrame() const { return cpuFreqHz_ / frameHz_; }
 
+    // Run enough frames for the monitor ROM to initialise (vectors, stack,
+    // display driver) if it hasn't yet. A game must not be started before this,
+    // or it will jump into an uninitialised system and crash. Idempotent.
+    void ensureMonitorBooted(int bootFrames = 25) {
+        while (framesSinceReset_ < bootFrames) runFrame();
+    }
+
     // Present a raw BK key code to the keyboard controller, exactly like the
     // real BK-0010: the code register (0177662) holds a SINGLE code. A new code
     // is latched only while the "ready" flag (0177660 bit 7) is clear — i.e. the
@@ -81,6 +88,7 @@ private:
 
     int cpuFreqHz_ = 3000000;
     int frameHz_   = 50;
+    int framesSinceReset_ = 0;   // for ensureMonitorBooted()
 
     // Internal register state
     uint16_t scroll_    = 0330;

@@ -14,6 +14,7 @@
 #include "ui/CodeGraphWidget.h"
 #include "ui/BkKeymap.h"
 #include "Board.h"
+#include "Disasm.h"
 #include <QKeyEvent>
 
 // Self-test of the Qt-key -> BK-code translation (Cyrillic, РУС/ЛАТ, Ctrl, specials).
@@ -46,7 +47,13 @@ static int runHeadless(const QString& romDir, const QString& bin,
                        int frames, bool color, const QString& shot,
                        int keyCode, int keyFrame, const QString& dbgShot,
                        const QString& memvisShot, const QString& cgShot,
-                       const QString& typeStr) {
+                       const QString& typeStr, const QString& keysList) {
+    // Parse "frame:code,frame:code,..." into precisely-timed key injections.
+    std::vector<std::pair<int,int>> keys;
+    for (const QString& part : keysList.split(',', Qt::SkipEmptyParts)) {
+        const auto fc = part.split(':');
+        if (fc.size() == 2) keys.push_back({fc[0].toInt(), fc[1].toInt(nullptr, 0)});
+    }
     bk::Board board;
     if (!board.loadRoms(romDir.toStdString())) {
         std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
@@ -67,6 +74,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     int typeIdx = 0;
     for (int i = 0; i < frames; ++i) {
         if (keyCode >= 0 && i == keyFrame) board.pressKey(static_cast<uint16_t>(keyCode));
+        for (const auto& kv : keys) if (kv.first == i) board.pressKey(static_cast<uint16_t>(kv.second));
         if (!typeStr.isEmpty() && i >= 60 && typeIdx < typeStr.size() && !board.keyReady()) {
             QChar c = typeStr[typeIdx++];
             uint16_t code = (c == '\n') ? 012 : static_cast<uint16_t>(c.unicode() & 0x7f);
@@ -174,7 +182,7 @@ int main(int argc, char** argv) {
     if (qEnvironmentVariableIsSet("BK_ROM_DIR"))
         romDir = qEnvironmentVariable("BK_ROM_DIR");
 
-    QString binToLoad, shot, dbgShot, memvisShot, cgShot, typeStr;
+    QString binToLoad, shot, dbgShot, memvisShot, cgShot, typeStr, keysList;
     int frames = 0, keyCode = -1, keyFrame = 0;
     bool color = true, headless = false;
     const QStringList args = app.arguments();
@@ -189,6 +197,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
         else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
         else if (args[i] == "--type" && i + 1 < args.size()) { typeStr = args[++i]; headless = true; }
+        else if (args[i] == "--keys" && i + 1 < args.size()) { keysList = args[++i]; headless = true; }
         else if (!args[i].startsWith("--")) binToLoad = args[i];
     }
 
@@ -197,7 +206,7 @@ int main(int argc, char** argv) {
 
     if (headless)
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
-                           dbgShot, memvisShot, cgShot, typeStr);
+                           dbgShot, memvisShot, cgShot, typeStr, keysList);
 
     MainWindow w(romDir);
     w.show();
@@ -205,3 +214,4 @@ int main(int argc, char** argv) {
 
     return app.exec();
 }
+
