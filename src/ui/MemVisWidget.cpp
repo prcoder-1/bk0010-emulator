@@ -1,4 +1,6 @@
 #include "MemVisWidget.h"
+#include <algorithm>
+#include <cmath>
 #include "Board.h"
 #include <QPainter>
 #include <QImage>
@@ -36,7 +38,12 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     int pxPerByte = (bpp == 1) ? 8 : (bpp == 4 ? 2 : 1);
     int imgW = bytesPerRow * pxPerByte;
     if (imgW <= 0) return;
-    int rows = (0x10000 - startAddr + bytesPerRow - 1) / bytesPerRow;
+    // With ROM hidden, only RAM (0..0100000) is drawn and fills the whole window;
+    // with ROM shown, the full 64 KB is drawn (so everything appears smaller).
+    const int romStart = 0100000;
+    int endAddr = (hideRom && startAddr < romStart) ? romStart : 0x10000;
+    int rows = (endAddr - startAddr + bytesPerRow - 1) / bytesPerRow;
+    if (rows < 1) rows = 1;
     int imgH = rows;
     QImage img(imgW, imgH, QImage::Format_RGB32);
 
@@ -44,16 +51,44 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         for (int bx = 0; bx < bytesPerRow; ++bx) {
             int addr = startAddr + row * bytesPerRow + bx;
             if (addr >= 0x10000) { addr = 0xFFFF; }
-            uint8_t byte = mem.peekByte(static_cast<uint16_t>(addr));
-            uint8_t hw = heatmap ? tr.heat(static_cast<uint16_t>(addr), true) : 0;
-            uint8_t hr = heatmap ? tr.heat(static_cast<uint16_t>(addr), false) : 0;
+            uint16_t a16 = static_cast<uint16_t>(addr);
+
+            // Optionally blank out the ROM region so only RAM activity is shown.
+            if (hideRom && mem.isRom(a16)) {
+                int px0 = bx * pxPerByte;
+                for (int k = 0; k < pxPerByte; ++k) img.setPixel(px0 + k, row, qRgb(0, 0, 0));
+                continue;
+            }
+
+            uint8_t byte = mem.peekByte(a16);
+
+            // Recency of read / write / execute for this byte (1 = just now).
+            // sqrt curve keeps a just-accessed byte bright, then it fades away.
+            const int FADE = 150; // frames (~3 s) to fade to "barely visible"
+            double hr = 0, hw = 0, he = 0, act = 0;
+            if (heatmap) {
+                hr = std::sqrt(tr.fade(tr.lastRead(a16),  FADE));
+                hw = std::sqrt(tr.fade(tr.lastWrite(a16), FADE));
+                he = std::sqrt(tr.fade(tr.lastExec(a16),  FADE));
+                // An instruction fetch also registers a read; don't let that show
+                // as a data-read (green) — code should read as execution (blue).
+                if (tr.lastExec(a16) != 0 && tr.lastExec(a16) >= tr.lastRead(a16)) hr = 0;
+                act = std::max(he, std::max(hr, hw));
+            }
 
             auto tint = [&](QRgb base) -> QRgb {
-                if (!heatmap || (hw == 0 && hr == 0)) return base;
-                int r = qMin(255, qRed(base)   + hw);
-                int g = qMin(255, qGreen(base) + (hr > hw ? hr - hw : 0));
-                int b = qBlue(base);
-                return qRgb(r, g, b);
+                if (!heatmap) return base;
+                // Unused memory is shown a bit dimmer so that recently-accessed
+                // bytes stand out: a fresh access brightens the byte and flashes a
+                // colour (green/red/blue) that fades over time.
+                double bright = 0.5 + 0.5 * act;
+                int R = int(qRed(base)   * bright);
+                int G = int(qGreen(base) * bright);
+                int B = int(qBlue(base)  * bright);
+                R = qMin(255, R + int(235 * hw));  // write -> red
+                G = qMin(255, G + int(235 * hr));  // read  -> green
+                B = qMin(255, B + int(235 * he));  // exec  -> blue
+                return qRgb(R, G, B);
             };
 
             int px = bx * pxPerByte;
@@ -93,6 +128,7 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     auto* bpp = new QComboBox; bpp->addItems({"1 бит", "4 бита", "8 бит"}); bpp->setCurrentIndex(1);
     auto* mode = new QComboBox; mode->addItems({"Ч/Б", "Цвет"}); mode->setCurrentIndex(1);
     auto* heat = new QCheckBox("Тепловая карта"); heat->setChecked(true);
+    auto* showRom = new QCheckBox("Показать ПЗУ"); // ROM hidden by default
     auto* addr = new QSpinBox; addr->setRange(0, 0xFFFF); addr->setDisplayIntegerBase(8);
     addr->setPrefix("адрес 0"); addr->setSingleStep(0100); addr->setValue(0);
     auto* row = new QSpinBox; row->setRange(8, 512); row->setValue(64); row->setPrefix("шир ");
@@ -101,6 +137,7 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
         canvas_->bpp = (bpp->currentIndex() == 0) ? 1 : (bpp->currentIndex() == 1 ? 4 : 8);
         canvas_->color = (mode->currentIndex() == 1);
         canvas_->heatmap = heat->isChecked();
+        canvas_->hideRom = !showRom->isChecked();
         canvas_->startAddr = addr->value();
         canvas_->bytesPerRow = row->value();
         canvas_->update();
@@ -108,12 +145,13 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     connect(bpp,  QOverload<int>::of(&QComboBox::currentIndexChanged), this, [=](int){ apply(); });
     connect(mode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [=](int){ apply(); });
     connect(heat, &QCheckBox::toggled, this, [=](bool){ apply(); });
+    connect(showRom, &QCheckBox::toggled, this, [=](bool){ apply(); });
     connect(addr, QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
     connect(row,  QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
 
     auto* controls = new QHBoxLayout;
     controls->addWidget(new QLabel("бит/пиксель:")); controls->addWidget(bpp);
-    controls->addWidget(mode); controls->addWidget(heat);
+    controls->addWidget(mode); controls->addWidget(heat); controls->addWidget(showRom);
     controls->addWidget(addr); controls->addWidget(row);
     controls->addStretch();
 

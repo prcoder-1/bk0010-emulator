@@ -69,7 +69,7 @@ void Board::timerSetMode(uint8_t mode) {
 Board::Board() {
     mem_.setIoBus(this);
     // Feed the access heatmap (no-op unless the trace is enabled).
-    mem_.setAccessHook([this](uint16_t a, bool w, bool /*b*/) { trace_.access(a, w); });
+    mem_.setAccessHook([this](uint16_t a, bool w, bool b) { trace_.access(a, w, b); });
 }
 
 // Execute one instruction with sound + trace bookkeeping. Returns ticks.

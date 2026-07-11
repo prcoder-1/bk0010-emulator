@@ -17,6 +17,7 @@ public:
     int bpp = 4;
     bool color = true;
     bool heatmap = true;
+    bool hideRom = true;    // hide the ROM region (0100000..0177777); RAM only by default
     int startAddr = 0;
     int bytesPerRow = 64;
 protected:

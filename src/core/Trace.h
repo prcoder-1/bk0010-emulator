@@ -6,14 +6,15 @@
 namespace bk {
 
 // Records runtime activity for the debugger visualisations:
-//  * per-byte last-access timestamps (for the memory heatmap with fade),
+//  * per-byte last read / write / execute timestamps (memory heatmap with fade:
+//    green = read, red = write, blue = code execution),
 //  * per-address execution counts (hot-code highlighting),
 //  * branch/jump/call edges (control-flow graph).
 class Trace {
 public:
     void reset() {
         now_ = 1; execMax_ = 0;
-        lastAccess_.fill(0); lastWrite_.fill(0); execCount_.fill(0);
+        lastRead_.fill(0); lastWrite_.fill(0); lastExec_.fill(0); execCount_.fill(0);
         edges_.clear();
     }
 
@@ -24,23 +25,35 @@ public:
     void tick() { ++now_; }
     uint32_t now() const { return now_; }
 
-    // Memory access hook (byte address). Marks read and/or write times.
-    void access(uint16_t addr, bool write) {
+    // CPU memory-access hook (byte address). Records read or write time; for a
+    // word access also marks the high byte.
+    void access(uint16_t addr, bool write, bool isByte) {
         if (!enabled_) return;
-        lastAccess_[addr] = now_;
-        if (write) lastWrite_[addr] = now_;
+        auto& arr = write ? lastWrite_ : lastRead_;
+        arr[addr] = now_;
+        if (!isByte) arr[static_cast<uint16_t>(addr + 1)] = now_;
     }
 
-    void exec(uint16_t pc) { if (enabled_) { ++execCount_[pc]; if (execCount_[pc] > execMax_) execMax_ = execCount_[pc]; } }
+    // Instruction executed at `pc` — records exec time (opcode word) + count.
+    void exec(uint16_t pc) {
+        if (!enabled_) return;
+        lastExec_[pc] = now_;
+        lastExec_[static_cast<uint16_t>(pc + 1)] = now_;
+        if (++execCount_[pc] > execMax_) execMax_ = execCount_[pc];
+    }
     void edge(uint16_t from, uint16_t to) { if (enabled_) ++edges_[(uint32_t(from) << 16) | to]; }
 
-    // Heat 0..255: 255 = accessed this frame, fading to 0 over `fadeFrames`.
-    uint8_t heat(uint16_t addr, bool write = false, int fadeFrames = 60) const {
-        uint32_t t = write ? lastWrite_[addr] : lastAccess_[addr];
-        if (t == 0) return 0;
+    // Raw last-access timestamps (0 = never).
+    uint32_t lastRead(uint16_t a)  const { return lastRead_[a]; }
+    uint32_t lastWrite(uint16_t a) const { return lastWrite_[a]; }
+    uint32_t lastExec(uint16_t a)  const { return lastExec_[a]; }
+
+    // Fade factor 0..1 for a timestamp: 1 = this frame, 0 after `frames`.
+    double fade(uint32_t t, int frames) const {
+        if (t == 0) return 0.0;
         uint32_t age = now_ - t;
-        if (age >= (uint32_t)fadeFrames) return 0;
-        return static_cast<uint8_t>(255 - (age * 255) / fadeFrames);
+        if (age >= static_cast<uint32_t>(frames)) return 0.0;
+        return 1.0 - static_cast<double>(age) / frames;
     }
 
     uint32_t execCount(uint16_t pc) const { return execCount_[pc]; }
@@ -51,8 +64,9 @@ private:
     bool enabled_ = false;
     uint32_t now_ = 1;
     uint32_t execMax_ = 0;
-    std::array<uint32_t, 0x10000> lastAccess_{};
+    std::array<uint32_t, 0x10000> lastRead_{};
     std::array<uint32_t, 0x10000> lastWrite_{};
+    std::array<uint32_t, 0x10000> lastExec_{};
     std::array<uint32_t, 0x10000> execCount_{};
     std::unordered_map<uint32_t, uint32_t> edges_; // (from<<16|to) -> count
 };

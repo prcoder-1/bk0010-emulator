@@ -98,8 +98,15 @@ static int runHeadless(const QString& romDir, const QString& bin,
         w.resize(560, 640);
         w.refresh();
         QPixmap pm = w.grab();
-        pm.save(memvisShot);
-        std::printf("headless: wrote memvis %s\n", qPrintable(memvisShot));
+        pm.save(memvisShot); // default: ROM hidden, RAM fills the window
+        std::printf("headless: wrote memvis (RAM only) %s\n", qPrintable(memvisShot));
+        // Verification: the same view with ROM shown (full 64 KB, smaller scale).
+        MemCanvas cv(&board);
+        cv.resize(560, 560);
+        cv.hideRom = false;
+        QString withRomPath = memvisShot; withRomPath.replace(".png", "_withrom.png");
+        cv.grab().save(withRomPath);
+        std::printf("headless: wrote memvis (RAM+ROM) %s\n", qPrintable(withRomPath));
     }
     if (!cgShot.isEmpty()) {
         CodeGraphWidget w(&board);
