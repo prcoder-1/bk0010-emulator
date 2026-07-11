@@ -14,8 +14,8 @@ class MemCanvas : public QWidget {
     Q_OBJECT
 public:
     explicit MemCanvas(bk::Board* board, QWidget* parent = nullptr);
-    int bpp = 8;
-    bool color = false;
+    int bpp = 4;
+    bool color = true;
     bool heatmap = true;
     int startAddr = 0;
     int bytesPerRow = 64;
