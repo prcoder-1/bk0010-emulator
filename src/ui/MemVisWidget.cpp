@@ -90,8 +90,8 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     setWindowTitle("Визуализация памяти БК-0010");
     canvas_ = new MemCanvas(board, this);
 
-    auto* bpp = new QComboBox; bpp->addItems({"1 бит", "4 бита", "8 бит"}); bpp->setCurrentIndex(2);
-    auto* mode = new QComboBox; mode->addItems({"Ч/Б", "Цвет"});
+    auto* bpp = new QComboBox; bpp->addItems({"1 бит", "4 бита", "8 бит"}); bpp->setCurrentIndex(1);
+    auto* mode = new QComboBox; mode->addItems({"Ч/Б", "Цвет"}); mode->setCurrentIndex(1);
     auto* heat = new QCheckBox("Тепловая карта"); heat->setChecked(true);
     auto* addr = new QSpinBox; addr->setRange(0, 0xFFFF); addr->setDisplayIntegerBase(8);
     addr->setPrefix("адрес 0"); addr->setSingleStep(0100); addr->setValue(0);
