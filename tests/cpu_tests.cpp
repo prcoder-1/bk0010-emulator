@@ -212,6 +212,23 @@ int main() {
         CHECK(cnt <= 1000 - 20 && cnt >= 1000 - 30, "DIV4 slows timer ~4x (~25 counts)");
     }
 
+    // ---- Keyboard: single-code register with ready/drop semantics ----
+    {
+        Board b;
+        b.reset();
+        CHECK(!b.keyReady(), "keyboard: no key ready initially");
+        CHECK(b.pressKey(0101), "keyboard: first key (A) latched");   // 'A'
+        CHECK(b.keyReady(), "keyboard: ready flag set after keypress");
+        // Register 0177716 bit 6 (key-pressed, active-low) is 0 while a key waits.
+        CHECK(!(b.memory().readWord(0177716) & 0100), "keyboard: 0177716 key-pressed bit low");
+        CHECK(!b.pressKey(0102), "keyboard: second key dropped while register busy");
+        CHECK((b.memory().readWord(0177662) & 0177) == 0101, "keyboard: register holds first code");
+        CHECK(!b.keyReady(), "keyboard: ready flag cleared on read");
+        CHECK(b.memory().readWord(0177716) & 0100, "keyboard: 0177716 key-pressed bit high again");
+        CHECK(b.pressKey(0102), "keyboard: next key latched after previous was read");
+        CHECK((b.memory().readWord(0177662) & 0177) == 0102, "keyboard: register holds second code");
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;
 }

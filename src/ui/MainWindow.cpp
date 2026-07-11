@@ -85,6 +85,12 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::onTick() {
     if (!paused_) {
+        // Feed one buffered key into the register once it is free, so the BK
+        // controller sees a stream of single codes just like real hardware.
+        if (!keyFeed_.empty() && !board_->keyReady()) {
+            board_->pressKey(keyFeed_.front());
+            keyFeed_.pop_front();
+        }
         board_->runFrame();
         if (board_->breakHit()) {          // stopped at a breakpoint
             board_->clearBreakHit();
@@ -173,6 +179,7 @@ bool MainWindow::loadBinFromPath(const QString& path) {
 void MainWindow::resetMachine() {
     board_->reset();
     keymap_.reset();
+    keyFeed_.clear();
     if (!lastBin_.isEmpty()) loadBinFromPath(lastBin_);
     status_->setText("Сброс");
 }
@@ -204,7 +211,14 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     // --- SoftICE off: feed the BK-0010 keyboard ---
     std::vector<uint16_t> codes = keymap_.translate(e);
     if (!codes.empty()) {
-        for (uint16_t c : codes) board_->pressKey(c);
+        for (uint16_t c : codes) {
+            // Drop pile-ups from auto-repeat (a duplicate of the last queued code)
+            // and cap the buffer, mirroring the fact that the real controller
+            // keeps only one pending code.
+            if (keyFeed_.size() >= 16) break;
+            if (!keyFeed_.empty() && keyFeed_.back() == c) continue;
+            keyFeed_.push_back(c);
+        }
         e->accept();
         return;
     }

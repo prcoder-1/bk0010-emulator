@@ -1,6 +1,7 @@
 #pragma once
 #include <QMainWindow>
 #include <memory>
+#include <deque>
 #include "Board.h"
 #include "BkKeymap.h"
 
@@ -53,6 +54,10 @@ private:
     QLabel* status_ = nullptr;
     QString lastBin_;
     BkKeymap keymap_;
+    // Host-side typing buffer: a keypress may translate to more than one BK code
+    // (e.g. a РУС/ЛАТ switch + the character). Because the BK register holds only
+    // one code at a time, we feed codes one per frame as the register frees up.
+    std::deque<uint16_t> keyFeed_;
     bool colorMode_ = true;
     bool paused_ = false;
 };

@@ -1,7 +1,6 @@
 #pragma once
 #include <string>
 #include <set>
-#include <deque>
 #include "Memory.h"
 #include "Cpu.h"
 #include "Screen.h"
@@ -25,11 +24,16 @@ public:
     void runFrame();
     int  ticksPerFrame() const { return cpuFreqHz_ / frameHz_; }
 
-    // Queue a raw BK key code to be delivered via the keyboard IRQ. Codes with
-    // bit 0200 set (function keys / АР2) use vector 0274; the rest use 060. The
-    // low 7 bits are placed in the data register 0177662.
-    void pressKey(uint16_t bkCode) { if (keyQueue_.size() < 64) keyQueue_.push_back(bkCode); }
-    void clearKeys() { keyQueue_.clear(); }
+    // Present a raw BK key code to the keyboard controller, exactly like the
+    // real BK-0010: the code register (0177662) holds a SINGLE code. A new code
+    // is latched only while the "ready" flag (0177660 bit 7) is clear — i.e. the
+    // previous code has been read; otherwise the keypress is lost. The interrupt
+    // (vector 060, or 0274 for codes with bit 0200) fires only if enabled
+    // (0177660 bit 6). Returns true if the code was latched, false if dropped.
+    bool pressKey(uint16_t bkCode);
+
+    // True while an unread code sits in the register (ready flag set).
+    bool keyReady() const { return (kbdStatus_ & 0200) != 0; }
 
     // --- Breakpoints / debugger support ---
     void toggleBreakpoint(uint16_t addr) {
@@ -80,8 +84,10 @@ private:
 
     // Internal register state
     uint16_t scroll_    = 0330;
-    uint16_t kbdStatus_ = 0;
-    uint16_t kbdData_   = 0;
+    uint16_t kbdStatus_ = 0;    // 0177660: bit7 = code ready, bit6 = IRQ enable
+    uint16_t kbdData_   = 0;    // 0177662: the single latched key code (7 bits)
+    bool     keyIntPending_ = false;
+    uint16_t keyIntVec_ = 060;
     uint8_t  speaker_   = 0;
 
     // 1801VM1 programmable interval timer (0177706 limit / 0177710 counter /
@@ -94,8 +100,6 @@ private:
     uint32_t timerPeriod_ = 128;    // CPU ticks per timer decrement
     void timerCheck();              // lazily advance the counter to "now"
     void timerSetMode(uint8_t mode);
-
-    std::deque<uint16_t> keyQueue_; // pending raw BK key codes
 
     std::set<uint16_t> breakpoints_;
     bool     breakHit_ = false;

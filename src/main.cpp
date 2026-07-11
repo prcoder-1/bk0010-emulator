@@ -67,7 +67,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     int typeIdx = 0;
     for (int i = 0; i < frames; ++i) {
         if (keyCode >= 0 && i == keyFrame) board.pressKey(static_cast<uint16_t>(keyCode));
-        if (!typeStr.isEmpty() && i >= 30 && (i % 4) == 0 && typeIdx < typeStr.size()) {
+        if (!typeStr.isEmpty() && i >= 60 && typeIdx < typeStr.size() && !board.keyReady()) {
             QChar c = typeStr[typeIdx++];
             uint16_t code = (c == '\n') ? 012 : static_cast<uint16_t>(c.unicode() & 0x7f);
             board.pressKey(code);

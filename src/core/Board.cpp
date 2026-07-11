@@ -103,7 +103,8 @@ void Board::reset() {
     scroll_ = 0330;
     kbdStatus_ = 0100; // keyboard interrupt enabled (bit 6), no key ready
     kbdData_ = 0;
-    keyQueue_.clear();
+    keyIntPending_ = false;
+    keyIntVec_ = 060;
     // Timer power-on state (matches bk/timer.c timer_init: stopped).
     timerCsr_ = 0;
     timerCount_ = 0177777;
@@ -147,6 +148,7 @@ bool Board::loadState(const std::string& path) {
     std::fread(dev, sizeof(uint16_t), 7, f);
     std::fclose(f);
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
+    keyIntPending_ = false;
     timerLimit_ = dev[3]; timerCount_ = dev[4];
     timerCsr_ = static_cast<uint8_t>(dev[5]);
     speaker_ = static_cast<uint8_t>(dev[6]);
@@ -203,20 +205,29 @@ void Board::runFrame() {
 // Delivered once per 50 Hz frame. On BK-0010 the video controller raises IRQ2
 // (vector 0100) every frame and the keyboard raises IRQ (vector 0060). Both are
 // blocked when the processor priority bit (PSW bit 7, 0200) is set.
+bool Board::pressKey(uint16_t bkCode) {
+    // Real BK-0010: the register holds one code. A new code is accepted only
+    // while the previous one has been read (ready flag clear); else it's lost.
+    if (kbdStatus_ & 0200) return false;
+    kbdData_ = bkCode & 0177;                 // 7-bit code -> 0177662
+    kbdStatus_ |= 0200;                       // set "code ready"
+    // Raise the keyboard interrupt. Function keys / АР2 (bit 0200 set) vector
+    // through 0274, ordinary keys through 060. (The monitor keeps the register
+    // interrupt-enabled; gating on bit 6 here is unreliable, so we always queue
+    // it and let the CPU priority / vector gate delivery.)
+    keyIntVec_ = (bkCode & 0200) ? 0274 : Cpu::VEC_KEYBOARD;
+    keyIntPending_ = true;
+    return true;
+}
+
 void Board::deliverFrameInterrupts() {
     if (cpu_.halted()) return;
     if (cpu_.psw & 0200) return; // interrupts masked
 
-    // Keyboard: deliver the next queued key only once the previous one has been
-    // read (ready bit 0200 clear), so the data register value is never lost.
-    if (!(kbdStatus_ & 0200) && !keyQueue_.empty()) {
-        uint16_t raw = keyQueue_.front();
-        keyQueue_.pop_front();
-        kbdData_ = raw & 0177;                 // low 7 bits go to 0177662
-        kbdStatus_ |= 0200;                    // "key ready"
-        // Function keys / АР2 (bit 0200 set) vector through 0274, others 060.
-        uint16_t vec = (raw & 0200) ? 0274 : Cpu::VEC_KEYBOARD;
-        if (mem_.peekWord(vec) != 0) cpu_.interrupt(vec);
+    // A latched, not-yet-serviced key raises its interrupt first.
+    if (keyIntPending_) {
+        keyIntPending_ = false;
+        if (mem_.peekWord(keyIntVec_) != 0) cpu_.interrupt(keyIntVec_);
         return;
     }
 
