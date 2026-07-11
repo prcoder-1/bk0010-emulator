@@ -82,8 +82,18 @@ private:
     uint16_t scroll_    = 0330;
     uint16_t kbdStatus_ = 0;
     uint16_t kbdData_   = 0;
-    uint16_t timerLimit_ = 0, timerCount_ = 0, timerCsr_ = 0;
     uint8_t  speaker_   = 0;
+
+    // 1801VM1 programmable interval timer (0177706 limit / 0177710 counter /
+    // 0177712 control). Decrements at f/128 (optionally /4, /16); sets the FL
+    // event flag on underflow. Polled by software (no interrupt on BK-0010).
+    uint16_t timerLimit_ = 0, timerCount_ = 0;
+    uint8_t  timerCsr_   = 0;       // control/status (low 8 bits, incl. FL flag)
+    uint64_t totalTicks_ = 0;       // running CPU-tick counter
+    uint64_t timerStart_ = 0;       // tick at which the current count began
+    uint32_t timerPeriod_ = 128;    // CPU ticks per timer decrement
+    void timerCheck();              // lazily advance the counter to "now"
+    void timerSetMode(uint8_t mode);
 
     std::deque<uint16_t> keyQueue_; // pending raw BK key codes
 

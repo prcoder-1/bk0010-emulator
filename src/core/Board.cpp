@@ -18,6 +18,54 @@ enum : uint16_t {
     START_VECTOR   = 0100000,
 };
 
+// 1801VM1 timer control-register bits (ported from the reference bk/timer.c).
+enum : uint8_t {
+    TIM_CONTINUOUS = 0002, // CAP: free-running (count without reload)
+    TIM_ENBEND     = 0004, // MON: allow setting the FL/END event flag
+    TIM_ONCE       = 0010, // OS:  one-shot
+    TIM_START      = 0020, // RUN: counting enabled
+    TIM_DIV16      = 0040,
+    TIM_DIV4       = 0100,
+    TIM_END        = 0200, // FL:  event flag (set on underflow)
+};
+static constexpr uint32_t TIMER_BASE_PERIOD = 128; // f/128
+
+// Lazily advance the counter based on how many CPU ticks have elapsed. Mirrors
+// bk/timer.c: the counter is only recomputed when a register is read.
+void Board::timerCheck() {
+    if (!(timerCsr_ & TIM_START)) return;
+    uint64_t delta = (totalTicks_ - timerStart_) / timerPeriod_;
+    if (delta == 0) return;
+    if (timerCount_ > delta) {
+        timerCount_ -= static_cast<uint16_t>(delta);
+        timerStart_ += delta * timerPeriod_;
+        return;
+    }
+    // Counter reached / passed zero.
+    if (timerCsr_ & TIM_ENBEND) timerCsr_ |= TIM_END;
+    if ((timerCsr_ & TIM_ONCE) && !(timerCsr_ & TIM_CONTINUOUS)) {
+        timerCount_ = 0;
+        timerCsr_ &= ~TIM_START;   // one-shot: stop
+    } else {
+        if (timerCsr_ & TIM_CONTINUOUS)
+            timerCount_ = static_cast<uint16_t>(-static_cast<int64_t>(delta)); // free-running wrap
+        else
+            timerCount_ = static_cast<uint16_t>(timerLimit_ - delta);          // reload from limit
+        timerStart_ += delta * timerPeriod_;
+    }
+}
+
+void Board::timerSetMode(uint8_t mode) {
+    timerPeriod_ = TIMER_BASE_PERIOD;
+    if (mode & TIM_DIV16) timerPeriod_ *= 16;
+    if (mode & TIM_DIV4)  timerPeriod_ *= 4;
+    if (!(timerCsr_ & TIM_START) && (mode & TIM_START)) {
+        timerCount_ = timerLimit_;   // preload on start
+        timerStart_ = totalTicks_;
+    }
+    timerCsr_ = mode;
+}
+
 Board::Board() {
     mem_.setIoBus(this);
     // Feed the access heatmap (no-op unless the trace is enabled).
@@ -29,6 +77,7 @@ int Board::stepCore() {
     uint16_t pcBefore = cpu_.pc();
     trace_.exec(pcBefore);
     int t = cpu_.step();
+    totalTicks_ += static_cast<uint64_t>(t);
     sound_.feed(speaker_ & 1, t);
     if (trace_.enabled()) {
         uint16_t pcNow = cpu_.pc();
@@ -55,7 +104,13 @@ void Board::reset() {
     kbdStatus_ = 0100; // keyboard interrupt enabled (bit 6), no key ready
     kbdData_ = 0;
     keyQueue_.clear();
-    timerLimit_ = timerCount_ = timerCsr_ = 0;
+    // Timer power-on state (matches bk/timer.c timer_init: stopped).
+    timerCsr_ = 0;
+    timerCount_ = 0177777;
+    timerLimit_ = 0011000;
+    totalTicks_ = 0;
+    timerStart_ = 0;
+    timerPeriod_ = TIMER_BASE_PERIOD;
     speaker_ = 0;
     screen_.setScroll(scroll_);
     trace_.reset();
@@ -92,8 +147,14 @@ bool Board::loadState(const std::string& path) {
     std::fread(dev, sizeof(uint16_t), 7, f);
     std::fclose(f);
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
-    timerLimit_ = dev[3]; timerCount_ = dev[4]; timerCsr_ = dev[5];
+    timerLimit_ = dev[3]; timerCount_ = dev[4];
+    timerCsr_ = static_cast<uint8_t>(dev[5]);
     speaker_ = static_cast<uint8_t>(dev[6]);
+    // Re-derive the timer phase so timerCheck() doesn't see a huge stale delta.
+    timerPeriod_ = TIMER_BASE_PERIOD;
+    if (timerCsr_ & TIM_DIV16) timerPeriod_ *= 16;
+    if (timerCsr_ & TIM_DIV4)  timerPeriod_ *= 4;
+    timerStart_ = totalTicks_;
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
     return true;
@@ -199,8 +260,8 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
     case REG_KBD_DATA:   value = kbdData_; kbdStatus_ &= ~0200; return true;
     case REG_SCROLL:     value = scroll_; return true;
     case REG_TIMER_LIM:  value = timerLimit_; return true;
-    case REG_TIMER_CNT:  value = timerCount_; return true;
-    case REG_TIMER_CSR:  value = timerCsr_; return true;
+    case REG_TIMER_CNT:  timerCheck(); value = timerCount_; return true;
+    case REG_TIMER_CSR:  timerCheck(); value = 0177400 | timerCsr_; return true;
     case REG_PORT:       value = 0; return true;
     case REG_SYS: {
         // BK-0010: bit15 set, high byte 0200 (serial idle). Bit 6 (0100) is the
@@ -221,7 +282,8 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     switch (addr) {
     case REG_SCROLL:    scroll_ = value & 0777; return true;
     case REG_TIMER_LIM: timerLimit_ = value; return true;
-    case REG_TIMER_CSR: timerCsr_ = value; return true;
+    case REG_TIMER_CNT: return true;                       // counter is read-only
+    case REG_TIMER_CSR: timerSetMode(value & 0377); return true;
     case REG_SYS:
         speaker_ = (value >> 6) & 3; // bits 6,7: tape/speaker output
         return true;
