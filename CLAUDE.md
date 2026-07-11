@@ -50,6 +50,13 @@ Two layers, deliberately decoupled:
 - **`src/ui/`** — Qt6. `MainWindow` owns a `Board`, drives it from a 50 Hz `QTimer`
   (single-threaded — emulation runs in the GUI thread; one frame = ~60000 ticks is
   fast enough), and hosts `GlScreen` + the debugger widgets.
+- **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
+  as ~20 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON).
+  Owns its own `Board`, reuses only the `Board`/`Cpu`/`Memory`/`Screen`/`Trace`
+  public API + `bk::disasm`. Entered at the very top of `main()` before any GUI
+  setup; runs under an offscreen `QGuiApplication` so `bk_screenshot` can save PNGs.
+  Registered for Claude Code via `.mcp.json` (server name `bk0010`). Tool args accept
+  decimal / `0x` hex / leading-0 octal, and symbols loaded via `bk_symbols`.
 
 Key cross-cutting facts to know before editing the CPU or screen:
 

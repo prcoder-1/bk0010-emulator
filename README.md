@@ -90,12 +90,46 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 Доступны: `--frames N`, `--shot`, `--dbgshot`, `--memvis`, `--codegraph`,
 `--mono`, `--key <код>`, `--keyframe N`.
 
+## MCP-сервер (отладка через Claude)
+
+Эмулятор умеет работать как MCP-сервер (Model Context Protocol) — тогда Claude
+может загружать `.BIN`, шагать по коду, читать/писать память и регистры, ставить
+точки останова, снимать скриншоты и смотреть «горячие» инструкции сам.
+
+```sh
+./build/bk0010-emulator --server        # JSON-RPC 2.0 по stdio (по строкам)
+```
+
+Регистрация в Claude Code — файл [`.mcp.json`](.mcp.json) в корне проекта уже
+готов (сервер `bk0010`). После сборки запустите Claude Code из этого каталога и
+подтвердите подключение сервера.
+
+Инструменты (все адреса/значения принимают десятичное, `0x…` hex или восьмеричное
+с ведущим `0` — по соглашению БК):
+
+| Инструмент | Назначение |
+|------------|-----------|
+| `bk_load` | загрузить `.BIN` (сначала грузится монитор) и запустить |
+| `bk_reset` | сброс машины |
+| `bk_run` / `bk_run_until` | выполнять кадры / до адреса-символа |
+| `bk_step` / `bk_step_over` | шаг внутрь / через JSR·EMT |
+| `bk_regs` / `bk_set_reg` | чтение / запись R0–R7, SP, PC, PSW |
+| `bk_read_mem` / `bk_write_mem` | память словами или байтами |
+| `bk_disasm` | дизассемблирование |
+| `bk_break` / `bk_unbreak` / `bk_breakpoints` | точки останова |
+| `bk_key` | послать код клавиши (КОИ-7) |
+| `bk_screenshot` | PNG экрана БК |
+| `bk_state_save` / `bk_state_load` | сохранить / восстановить состояние |
+| `bk_symbols` | загрузить символы из `.map` (GNU ld) — адреса по имени |
+| `bk_hotspots` | самые часто исполняемые инструкции |
+
 ## Архитектура
 
 - `src/core/` — ядро эмуляции (без Qt): `Cpu`, `Memory`, `Disasm`, `Screen`,
   `Speaker`, `Trace`, `Board` (главный цикл, I/O-регистры, прерывания, save/restore).
 - `src/ui/` — Qt6: `MainWindow`, `GlScreen` (OpenGL), `DebuggerOverlay`,
   `MemVisWidget`, `CodeGraphWidget`.
+- `src/mcp/` — `McpServer`: MCP-сервер поверх ядра (JSON-RPC по stdio, QtCore JSON).
 
 Ядро исполняет инструкции по кадрам 50 Гц (3 МГц), UI-поток отображает текстуру
 экрана и панели отладчика.

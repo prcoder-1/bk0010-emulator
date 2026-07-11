@@ -36,6 +36,7 @@ set(APP_SOURCES
     src/ui/CodeGraphWidget.cpp
     src/ui/AudioOut.cpp
     src/ui/BkKeymap.cpp
+    src/mcp/McpServer.cpp
 )
 
 qt_add_executable(bk0010-emulator ${APP_SOURCES})
