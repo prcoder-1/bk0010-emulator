@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "bk0010": {
+      "command": "./build/bk0010-emulator",
+      "args": ["--server"],
+      "env": {}
+    }
+  }
+}

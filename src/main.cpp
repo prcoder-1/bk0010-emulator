@@ -13,9 +13,11 @@
 #include "ui/MemVisWidget.h"
 #include "ui/CodeGraphWidget.h"
 #include "ui/BkKeymap.h"
+#include "mcp/McpServer.h"
 #include "Board.h"
 #include "Disasm.h"
 #include <QKeyEvent>
+#include <QGuiApplication>
 
 // Self-test of the Qt-key -> BK-code translation (Cyrillic, РУС/ЛАТ, Ctrl, specials).
 static int runKeyTest() {
@@ -155,6 +157,25 @@ static int runHeadless(const QString& romDir, const QString& bin,
 }
 
 int main(int argc, char** argv) {
+    // MCP server mode: a headless JSON-RPC-over-stdio server for debugging BK
+    // programs from an MCP client (e.g. Claude Code). Handled before the GUI so
+    // no display/OpenGL is needed; offscreen QGuiApplication enables PNG output.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--server") {
+            qputenv("QT_QPA_PLATFORM", "offscreen");
+            QGuiApplication app(argc, argv);
+            QString romDir;
+#ifdef BK_DEFAULT_ROM_DIR
+            romDir = BK_DEFAULT_ROM_DIR;
+#endif
+            if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
+            for (int j = 1; j < argc; ++j)
+                if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
+            McpServer server(romDir.toStdString());
+            return server.run();
+        }
+    }
+
     // NVIDIA under a Wayland session: Qt6's default EGL/GLES path fails to create
     // GL contexts (both the QRhi backing store and our QOpenGLWidget) with
     // EGL_BAD_MATCH (3009). Route through XWayland/GLX, which is reliable, whenever
