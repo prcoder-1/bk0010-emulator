@@ -124,7 +124,7 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 | `bk_read_mem` / `bk_write_mem` | память словами или байтами |
 | `bk_disasm` | дизассемблирование |
 | `bk_break` / `bk_unbreak` / `bk_breakpoints` | точки останова |
-| `bk_key` | послать код клавиши (КОИ-7) |
+| `bk_key` | нажать клавишу (КОИ-7); `hold:true` — удерживать (для игр, опрашивающих 0177716, напр. движение в Digger), `hold:false` — отпустить |
 | `bk_screenshot` | PNG экрана БК |
 | `bk_state_save` / `bk_state_load` | сохранить / восстановить состояние |
 | `bk_symbols` | загрузить символы из `.map` (GNU ld) — адреса по имени |

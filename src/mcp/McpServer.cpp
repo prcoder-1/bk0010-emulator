@@ -169,8 +169,12 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_unbreak", "Remove a breakpoint (or all).",
         schema({{"addr", addrArg}, {"all", P("boolean", "Remove all breakpoints")}})));
     t.append(tool("bk_breakpoints", "List active breakpoints.", schema({})));
-    t.append(tool("bk_key", "Send a BK-0010 key code (KOI-7) to the keyboard.",
-        schema({{"code", P("integer", "BK key code, e.g. 012=Enter, 040=Space")}}, {"code"})));
+    t.append(tool("bk_key", "Press a BK-0010 key (KOI-7 code), optionally holding it down. "
+                  "Games that poll the physical key-held bit (0177716, e.g. Digger's movement) "
+                  "only register input while held: use hold=true then bk_run to drive them, and "
+                  "hold=false (code optional) to release.",
+        schema({{"code", P("integer", "BK key code, e.g. 012=Enter, 040=Space, 031=right, 010=left, 032=up, 033=down")},
+                {"hold", P("boolean", "Hold the key physically down across frames (default false = tap)")}}, {})));
     t.append(tool("bk_screenshot", "Render the BK screen to a PNG file.",
         schema({{"path", P("string", "Output PNG path")}, {"mono", P("boolean", "512x256 monochrome (default false=colour)")}}, {"path"})));
     t.append(tool("bk_state_save", "Save full emulator state to a file.", schema({{"path", P("string", "Path")}}, {"path"})));
@@ -404,9 +408,21 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         return textContent(out);
     }
     if (name == "bk_key") {
-        long code; if (!parseNumber(args.value("code"), code)) return fail("bad code");
-        board_.pressKey((uint16_t)code);
-        return textContent(QString("Queued key %1.").arg(oct6((uint16_t)code)));
+        long code = -1;
+        if (args.contains("code") && !parseNumber(args.value("code"), code)) return fail("bad code");
+        const bool hold = args.value("hold").toBool(false);
+        // Latch the scan code (0177662) and drive the physical key-held state
+        // (0177716 MAG_KEY, active-low). Games that poll the held bit — e.g. Digger,
+        // which requires both the code AND a held key — only register input while
+        // held, so `hold: true` lets bk_run drive movement; call again with
+        // hold:false (or omit code) to release.
+        if (code >= 0) board_.pressKey((uint16_t)code);
+        board_.setKeyHeld(hold);
+        QString msg;
+        if (code >= 0) msg = QString("Key %1 %2.").arg(oct6((uint16_t)code))
+                                 .arg(hold ? "pressed and held" : "tapped");
+        else           msg = hold ? "Key held." : "Key released.";
+        return textContent(msg);
     }
     if (name == "bk_screenshot") {
         board_.screen().setColorMode(!args.value("mono").toBool(false));
