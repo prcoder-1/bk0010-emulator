@@ -40,6 +40,18 @@ static int runKeyTest() {
         for (uint16_t x : codes) std::printf(" %04o", x);
         std::printf("\n");
     }
+    // РУС / ЛАТ mapped to the two Shift keys (told apart by the X keysym).
+    struct { quint32 vk; const char* label; } shifts[] = {
+        {0xffe1, "Left Shift  -> РУС (016)"},
+        {0xffe2, "Right Shift -> ЛАТ (017)"},
+    };
+    for (const auto& c : shifts) {
+        QKeyEvent e(QEvent::KeyPress, Qt::Key_Shift, Qt::ShiftModifier, 0, c.vk, 0);
+        auto codes = km.translate(&e);
+        std::printf("%-32s ->", c.label);
+        for (uint16_t x : codes) std::printf(" %04o", x);
+        std::printf("\n");
+    }
     return 0;
 }
 
