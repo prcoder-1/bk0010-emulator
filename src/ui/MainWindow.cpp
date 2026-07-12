@@ -121,6 +121,10 @@ void MainWindow::setPaused(bool paused) {
         overlay_->hide();
         status_->setText("Выполнение");
     }
+    // Entering/leaving the debugger drops any held keys so a game doesn't see a
+    // key stuck down across the pause.
+    heldKeys_.clear();
+    board_->setKeyHeld(false);
     renderScreen();
 }
 
@@ -184,6 +188,8 @@ void MainWindow::resetMachine() {
     board_->reset();
     keymap_.reset();
     keyFeed_.clear();
+    heldKeys_.clear();
+    board_->setKeyHeld(false);
     if (!lastBin_.isEmpty()) loadBinFromPath(lastBin_);
     status_->setText("Сброс");
 }
@@ -196,6 +202,13 @@ void MainWindow::toggleColorMode() {
 void MainWindow::keyPressEvent(QKeyEvent* e) {
     // F12 toggles the debugger regardless of state.
     if (e->key() == Qt::Key_F12) { setPaused(!paused_); e->accept(); return; }
+
+    // Track the physical key-down state (ignoring auto-repeat) so 0177716 bit 6
+    // stays low while a key is held — games poll it to detect input.
+    if (!paused_ && !e->isAutoRepeat()) {
+        heldKeys_.insert(e->key());
+        board_->setKeyHeld(true);
+    }
 
     if (paused_) {
         // --- Debugger controls (SoftICE overlay is visible) ---
@@ -227,6 +240,16 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         return;
     }
     QMainWindow::keyPressEvent(e);
+}
+
+void MainWindow::keyReleaseEvent(QKeyEvent* e) {
+    // Release the physical key-held state (0177716 bit 6) when the last game key
+    // is lifted. Auto-repeat generates spurious release events — ignore those.
+    if (!e->isAutoRepeat()) {
+        heldKeys_.erase(e->key());
+        if (heldKeys_.empty()) board_->setKeyHeld(false);
+    }
+    QMainWindow::keyReleaseEvent(e);
 }
 
 void MainWindow::openMemVis() {

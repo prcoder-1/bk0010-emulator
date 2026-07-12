@@ -2,6 +2,7 @@
 #include <QMainWindow>
 #include <memory>
 #include <deque>
+#include <set>
 #include "Board.h"
 #include "BkKeymap.h"
 
@@ -25,6 +26,7 @@ public:
 
 protected:
     void keyPressEvent(QKeyEvent* e) override;
+    void keyReleaseEvent(QKeyEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
 
 private slots:
@@ -58,6 +60,9 @@ private:
     // (e.g. a РУС/ЛАТ switch + the character). Because the BK register holds only
     // one code at a time, we feed codes one per frame as the register frees up.
     std::deque<uint16_t> keyFeed_;
+    // Qt key codes physically held down (auto-repeat ignored), so 0177716 bit 6
+    // stays low while any game key is held — polled by games like Digger.
+    std::set<int> heldKeys_;
     bool colorMode_ = true;
     bool paused_ = false;
 };
