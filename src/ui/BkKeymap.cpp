@@ -33,6 +33,17 @@ std::vector<uint16_t> BkKeymap::translate(QKeyEvent* e) {
     default: break;
     }
 
+    // ---- РУС / ЛАТ register keys, mapped to the two Shift keys ----
+    // Besides switching the BK letter register, games use them as fire-left /
+    // fire-right. Left Shift = РУС, right Shift = ЛАТ. Shift (not Ctrl) is used so
+    // the app's Ctrl-shortcuts don't emit a stray register code. The two sides are
+    // told apart by the X keysym (Shift_L=0xffe1, Shift_R=0xffe2) under the xcb
+    // platform; a bare modifier press has no e->text(), so handle it here.
+    if (e->key() == Qt::Key_Shift) {
+        if (e->nativeVirtualKey() == 0xffe2) { cyrillic_ = false; return {CODE_LAT}; }
+        cyrillic_ = true; return {CODE_RUS};
+    }
+
     const bool ctrl = e->modifiers() & Qt::ControlModifier;
 
     // ---- Ctrl (СУ): letter -> control code 001..032 ----
