@@ -63,17 +63,27 @@ void MemCanvas::paintEvent(QPaintEvent*) {
             uint8_t byte = mem.peekByte(a16);
 
             // Recency of read / write / execute for this byte (1 = just now).
-            // sqrt curve keeps a just-accessed byte bright, then it fades away.
-            const int FADE = 150; // frames (~3 s) to fade to "barely visible"
-            double hr = 0, hw = 0, he = 0, act = 0;
+            // The dim "recently touched" brightness glow lingers (long FADE, sqrt
+            // curve); the coloured flash fades much faster and more sharply so the
+            // green/red/blue trail clears quickly after an access.
+            const int FADE = 150;      // brightness glow: frames (~3 s)
+            const int FADE_COLOR = 30; // colour flash: frames (~0.6 s)
+            double hr = 0, hw = 0, he = 0, act = 0; // colour intensities
             if (heatmap) {
-                hr = std::sqrt(tr.fade(tr.lastRead(a16),  FADE));
-                hw = std::sqrt(tr.fade(tr.lastWrite(a16), FADE));
-                he = std::sqrt(tr.fade(tr.lastExec(a16),  FADE));
+                // Steeper-than-linear (square) curve on a short window: bright at
+                // the instant of access, then drops off rapidly.
+                auto flash = [&](uint32_t t) { double f = tr.fade(t, FADE_COLOR); return f * f; };
+                hr = flash(tr.lastRead(a16));
+                hw = flash(tr.lastWrite(a16));
+                he = flash(tr.lastExec(a16));
                 // An instruction fetch also registers a read; don't let that show
                 // as a data-read (green) — code should read as execution (blue).
                 if (tr.lastExec(a16) != 0 && tr.lastExec(a16) >= tr.lastRead(a16)) hr = 0;
-                act = std::max(he, std::max(hr, hw));
+                // Brightness glow uses the long fade so touched bytes stay a touch
+                // brighter than idle memory well after the colour has gone.
+                act = std::max({std::sqrt(tr.fade(tr.lastExec(a16),  FADE)),
+                                std::sqrt(tr.fade(tr.lastRead(a16),   FADE)),
+                                std::sqrt(tr.fade(tr.lastWrite(a16),  FADE))});
             }
 
             auto tint = [&](QRgb base) -> QRgb {
