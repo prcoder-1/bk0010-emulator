@@ -18,6 +18,22 @@ using bk::Board;
 // ---------------------------------------------------------------------------
 static QString oct6(uint16_t v) { return QString::asprintf("%06o", v); }
 
+// Write mono 16-bit PCM samples as a WAV file.
+static bool writeWav(const QString& path, const std::vector<int16_t>& s, int rate) {
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    auto u32 = [&](uint32_t v) { char b[4] = {char(v), char(v >> 8), char(v >> 16), char(v >> 24)}; f.write(b, 4); };
+    auto u16 = [&](uint16_t v) { char b[2] = {char(v), char(v >> 8)}; f.write(b, 2); };
+    const uint32_t dataBytes = (uint32_t)s.size() * 2;
+    f.write("RIFF", 4); u32(36 + dataBytes); f.write("WAVE", 4);
+    f.write("fmt ", 4); u32(16); u16(1); u16(1);          // PCM, 1 channel
+    u32(rate); u32(rate * 2); u16(2); u16(16);            // byte rate, block align, bits
+    f.write("data", 4); u32(dataBytes);
+    if (dataBytes) f.write(reinterpret_cast<const char*>(s.data()), dataBytes);
+    f.close();
+    return true;
+}
+
 static QJsonObject textContent(const QString& text, bool isError = false) {
     QJsonObject c; c["type"] = "text"; c["text"] = text;
     QJsonArray arr; arr.append(c);
@@ -177,6 +193,11 @@ QJsonArray McpServer::toolDefs() const {
                 {"hold", P("boolean", "Hold the key physically down across frames (default false = tap)")}}, {})));
     t.append(tool("bk_screenshot", "Render the BK screen to a PNG file.",
         schema({{"path", P("string", "Output PNG path")}, {"mono", P("boolean", "512x256 monochrome (default false=colour)")}}, {"path"})));
+    t.append(tool("bk_audio", "Run frames while capturing the speaker (piezo, 0177716 bit 6) "
+                  "to a mono 16-bit WAV file, and report peak level, active fraction and rough "
+                  "pitch. Lets you verify sound output (drive events with bk_key/bk_run first).",
+        schema({{"path", P("string", "Output WAV path")},
+                {"frames", P("integer", "50 Hz frames to run while capturing (default 100 = 2 s)")}}, {"path"})));
     t.append(tool("bk_state_save", "Save full emulator state to a file.", schema({{"path", P("string", "Path")}}, {"path"})));
     t.append(tool("bk_state_load", "Restore full emulator state from a file.", schema({{"path", P("string", "Path")}}, {"path"})));
     t.append(tool("bk_symbols", "Load a symbol table from a linker .map file (enables symbol names in break/read/disasm).",
@@ -432,6 +453,46 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         QString path = args.value("path").toString();
         if (!img.copy().save(path)) return fail("cannot write " + path);
         return textContent("Wrote screenshot to " + path);
+    }
+    if (name == "bk_audio") {
+        // Run `frames` 50 Hz frames while capturing the speaker (0177716 bit 6)
+        // output as PCM, write a mono 16-bit WAV, and report basic analysis.
+        QString path = args.value("path").toString();
+        if (path.isEmpty()) return fail("path required");
+        long frames = 100;
+        if (args.contains("frames")) parseNumber(args.value("frames"), frames);
+        if (frames < 1) frames = 1;
+        const int rate = 44100;
+        board_.sound().setEnabled(true);
+        board_.sound().clear();               // drop anything buffered before capture
+        std::vector<int16_t> samples;
+        int16_t tmp[8192];
+        for (long f = 0; f < frames; ++f) {
+            board_.runFrame();
+            size_t got;                        // drain each frame so nothing is lost
+            while ((got = board_.sound().read(tmp, 8192)) > 0)
+                samples.insert(samples.end(), tmp, tmp + got);
+            if (board_.breakHit()) { board_.clearBreakHit(); break; }
+        }
+        if (!writeWav(path, samples, rate)) return fail("cannot write " + path);
+        // Analysis: peak amplitude, fraction of non-silent samples, and a rough
+        // dominant pitch from the zero-crossing rate (good for single tones).
+        int peak = 0; long active = 0, crossings = 0; int prev = 0;
+        for (size_t i = 0; i < samples.size(); ++i) {
+            int v = samples[i];
+            if (v > peak) peak = v; else if (-v > peak) peak = -v;
+            if (v > 400 || v < -400) ++active;
+            int sign = (v > 200) ? 1 : (v < -200) ? -1 : prev;
+            if (sign && prev && sign != prev) ++crossings;
+            if (sign) prev = sign;
+        }
+        double ms = samples.size() * 1000.0 / rate;
+        double freq = (ms > 0) ? (crossings / 2.0) / (ms / 1000.0) : 0; // half-cycles/sec
+        return textContent(QString(
+            "Captured %1 samples (%2 ms) to %3\npeak=%4/32767  active=%5%%  ~pitch=%6 Hz")
+            .arg(samples.size()).arg(ms, 0, 'f', 0).arg(path)
+            .arg(peak).arg(samples.empty() ? 0 : active * 100 / (long)samples.size())
+            .arg(freq, 0, 'f', 0));
     }
     if (name == "bk_state_save") {
         if (!board_.saveState(args.value("path").toString().toStdString())) return fail("save failed");
