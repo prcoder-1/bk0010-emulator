@@ -29,14 +29,19 @@ static bool isBlockTerminator(uint16_t ir) {
     return false;
 }
 
-// One drawn row of the graph: either a collapsed basic block, or a single
-// instruction (a standalone one, or a line of an expanded block).
+static bool isJsr(uint16_t ir)    { return ir >= 0004000 && ir <= 0004777; }
+static bool isReturn(uint16_t ir) { return (ir >= 0000200 && ir <= 0000207) // RTS
+                                        || ir == 0000002 || ir == 0000006; }  // RTI / RTT
+
+// One drawn row of the graph: a collapsed subroutine or basic block, a group
+// header, or a single instruction line.
 struct GraphRow {
-    uint16_t addr;    // leader address for a block, else the instruction address
-    uint32_t count;   // aggregate (block) or per-instruction execution count
-    bool     block;   // true = collapsed block row
-    int      nInstr;  // block size (for a block row, or an expanded header); else 0
-    uint16_t leader;  // owning block leader
+    uint16_t addr;    // representative address (entry / leader / instruction)
+    uint32_t count;   // aggregate (group) or per-instruction execution count
+    int      kind;    // CodeGraphWidget::RowKind
+    int      nInstr;  // instruction count of the group (for labels); else 0
+    uint16_t key;     // subroutine entry or block leader (for toggling)
+    int      indent;  // 0 = subroutine, 1 = block, 2 = instruction
 };
 
 // Format a large count with a K/M/G suffix, e.g. 1209 -> "1.2K", 184090 -> "184K".
@@ -120,12 +125,12 @@ bool CodeGraphWidget::addrAtPos(const QPoint& pos, uint16_t& out) const {
     // 1) A row in the hot-instruction list.
     for (const auto& row : hotRows_)
         if (row.first.contains(pos)) { out = row.second; return true; }
-    // 2) A node in the graph: the one whose y is nearest the click.
+    // 2) A graph row: the one whose y is nearest the click.
     if (graphRect_.contains(pos) && !nodeYs_.empty()) {
         int cy = pos.y(), bestD = 1 << 30; uint16_t bestA = 0; bool found = false;
         for (const auto& nd : nodeYs_) {
-            int d = std::abs(nd.first - cy);
-            if (d < bestD) { bestD = d; bestA = nd.second; found = true; }
+            int d = std::abs(nd.y - cy);
+            if (d < bestD) { bestD = d; bestA = nd.addr; found = true; }
         }
         if (found) { out = bestA; return true; }
     }
@@ -158,22 +163,25 @@ void CodeGraphWidget::mouseReleaseEvent(QMouseEvent* e) {
     // Hot-list row → navigate the disassembler.
     for (const auto& r : hotRows_)
         if (r.first.contains(e->pos())) { navigate(r.second); return; }
-    // Graph node → toggle a collapsible block; otherwise navigate.
+    // Graph row → expand/collapse a subroutine or block, else navigate.
     if (graphRect_.contains(e->pos()) && !nodeYs_.empty()) {
-        int cy = e->pos().y(), bestD = 1 << 30; uint16_t addr = 0; bool found = false;
-        for (const auto& nd : nodeYs_) {
-            int d = std::abs(nd.first - cy);
-            if (d < bestD) { bestD = d; addr = nd.second; found = true; }
-        }
-        if (!found) return;
-        auto it = blockSize_.find(addr);
-        if (blockLeaders_.count(addr) && it != blockSize_.end() && it->second > 1) {
-            if (expanded_.count(addr)) expanded_.erase(addr);            // collapse
-            else { expanded_.insert(addr); scrollToAddr_ = addr; emit addressPicked(addr); }
+        int cy = e->pos().y(), bestD = 1 << 30; const Hit* hit = nullptr;
+        for (const auto& nd : nodeYs_) { int d = std::abs(nd.y - cy); if (d < bestD) { bestD = d; hit = &nd; } }
+        if (!hit) return;
+        auto toggle = [&](std::set<uint16_t>& set, uint16_t key) {
+            if (set.count(key)) set.erase(key);            // collapse
+            else { set.insert(key); scrollToAddr_ = hit->addr; emit addressPicked(hit->addr); }
             userInteracted();
             update();
-        } else {
-            navigate(addr);
+        };
+        switch (hit->kind) {
+        case K_SUB:     (subSize_.count(hit->key) && subSize_[hit->key] > 1)
+                            ? toggle(subExpanded_, hit->key) : navigate(hit->addr); break;
+        case K_SUB_HDR: toggle(subExpanded_, hit->key); break;
+        case K_BLK:     (blockSize_.count(hit->key) && blockSize_[hit->key] > 1)
+                            ? toggle(blockExpanded_, hit->key) : navigate(hit->addr); break;
+        case K_BLK_HDR: toggle(blockExpanded_, hit->key); break;
+        default:        navigate(hit->addr); break;
         }
     }
 }
@@ -190,9 +198,10 @@ void CodeGraphWidget::keyPressEvent(QKeyEvent* e) {
     case Qt::Key_PageDown:userInteracted(); panY_ -= page; clampPan(); update(); break;
     // Home resumes auto-follow of the hot instructions.
     case Qt::Key_Home: case Qt::Key_0: autoFollow_ = true; update(); break;
-    // Delete/Backspace restores right-click-excluded instructions.
+    // Delete/Backspace resets the view: un-hide excluded rows and collapse all.
     case Qt::Key_Delete: case Qt::Key_Backspace:
-        if (!excluded_.empty()) { excluded_.clear(); update(); }
+        excluded_.clear(); subExpanded_.clear(); blockExpanded_.clear();
+        update();
         break;
     default: QWidget::keyPressEvent(e); return;
     }
@@ -229,51 +238,88 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
             raw.push_back({a16, c});
     }
 
-    // ---- Group instructions into basic blocks ----
-    // Leaders: the first instruction, any branch/jump target (edge destination),
-    // any instruction after a control-transfer, and any address after a gap.
-    std::set<uint16_t> leaders;
-    for (auto& e : tr.edges()) leaders.insert(static_cast<uint16_t>(e.first & 0xFFFF));
+    // ---- Group instructions into subroutines and basic blocks ----
+    // Subroutine entries are JSR targets; block leaders are branch/jump targets,
+    // instructions after a control-transfer, and addresses after a gap. Every
+    // subroutine boundary (entry / after-return / gap) is also a block boundary.
+    std::set<uint16_t> subEntries;                 // JSR destinations
+    std::set<uint16_t> blockLeaders;               // basic-block leaders
+    for (auto& e : tr.edges()) {
+        uint16_t from = e.first >> 16, to = e.first & 0xFFFF;
+        blockLeaders.insert(to);                   // any jump/branch target
+        if (isJsr(mem.peekWord(from))) subEntries.insert(to);
+    }
+    std::set<uint16_t> subLeaders;
     for (size_t i = 0; i < raw.size(); ++i) {
-        if (i == 0) { leaders.insert(raw[0].first); continue; }
-        uint16_t prev = raw[i - 1].first;
-        uint16_t prevEnd = prev + static_cast<uint16_t>(bk::disasm(mem, prev).words * 2);
-        if (prevEnd != raw[i].first || isBlockTerminator(mem.peekWord(prev)))
-            leaders.insert(raw[i].first);
+        uint16_t a = raw[i].first;
+        if (i == 0) { blockLeaders.insert(a); subLeaders.insert(a); }
+        else {
+            uint16_t prev = raw[i - 1].first, prevIr = mem.peekWord(prev);
+            uint16_t prevEnd = prev + static_cast<uint16_t>(bk::disasm(mem, prev).words * 2);
+            bool gap = (prevEnd != a);
+            if (gap || isBlockTerminator(prevIr)) blockLeaders.insert(a);
+            if (gap || isReturn(prevIr))          subLeaders.insert(a);
+        }
+        if (subEntries.count(a)) { blockLeaders.insert(a); subLeaders.insert(a); }
     }
 
-    // Build the display rows (a collapsed block, or one row per instruction when
-    // expanded) and the address -> row-index map used to route the edges.
+    // Build the display rows and the address -> row-index map used to route edges.
     std::vector<GraphRow> nodes;
     std::unordered_map<uint16_t, int> indexOf;
-    blockLeaders_.clear();
+    subSize_.clear();
     blockSize_.clear();
     uint32_t localMax = 1;        // max count among the visible rows
-    for (size_t i = 0; i < raw.size();) {
-        uint16_t leader = raw[i].first;
-        size_t j = i + 1;
-        while (j < raw.size() && !leaders.count(raw[j].first)) ++j;
-        int nInstr = static_cast<int>(j - i);
-        uint32_t agg = 0;
-        for (size_t k = i; k < j; ++k) agg = std::max(agg, raw[k].second);
-        blockLeaders_.insert(leader);
-        blockSize_[leader] = nInstr;
-        bool open = (nInstr > 1) && expanded_.count(leader);
-        if (!open) {                                   // collapsed: one row
-            int idx = (int)nodes.size();
-            nodes.push_back({leader, agg, true, nInstr, leader});
-            for (size_t k = i; k < j; ++k) indexOf[raw[k].first] = idx;
-            if (agg > localMax) localMax = agg;
-        } else {                                       // expanded: a row per line
-            for (size_t k = i; k < j; ++k) {
+    auto bump = [&](uint32_t c) { if (c > localMax) localMax = c; };
+
+    // Emit the basic blocks of raw[bi..be) at the given indent (used both for a
+    // collapsed subroutine's single line and for an expanded subroutine's blocks).
+    auto emitBlocks = [&](size_t bi, size_t be) {
+        for (size_t i = bi; i < be;) {
+            uint16_t leader = raw[i].first;
+            size_t j = i + 1;
+            while (j < be && !blockLeaders.count(raw[j].first)) ++j;
+            int nInstr = int(j - i);
+            uint32_t agg = 0; for (size_t k = i; k < j; ++k) agg = std::max(agg, raw[k].second);
+            blockSize_[leader] = nInstr;
+            bool open = (nInstr > 1) && blockExpanded_.count(leader);
+            if (!open) {
                 int idx = (int)nodes.size();
-                nodes.push_back({raw[k].first, raw[k].second, false,
-                                 (k == i ? nInstr : 0), leader});
-                indexOf[raw[k].first] = idx;
-                if (raw[k].second > localMax) localMax = raw[k].second;
+                nodes.push_back({leader, agg, K_BLK, nInstr, leader, 1});
+                for (size_t k = i; k < j; ++k) indexOf[raw[k].first] = idx;
+                bump(agg);
+            } else {
+                for (size_t k = i; k < j; ++k) {
+                    int idx = (int)nodes.size();
+                    nodes.push_back({raw[k].first, raw[k].second,
+                                     (k == i ? K_BLK_HDR : K_INSTR),
+                                     (k == i ? nInstr : 0), leader, 2});
+                    indexOf[raw[k].first] = idx;
+                    bump(raw[k].second);
+                }
             }
+            i = j;
         }
-        i = j;
+    };
+
+    for (size_t s = 0; s < raw.size();) {
+        uint16_t entry = raw[s].first;
+        size_t se = s + 1;
+        while (se < raw.size() && !subLeaders.count(raw[se].first)) ++se;
+        int subN = int(se - s);
+        uint32_t subAgg = 0; for (size_t k = s; k < se; ++k) subAgg = std::max(subAgg, raw[k].second);
+        subSize_[entry] = subN;
+        if (subN > 1 && subExpanded_.count(entry)) {   // expanded subroutine
+            nodes.push_back({entry, subAgg, K_SUB_HDR, subN, entry, 0}); // label row
+            emitBlocks(s, se);
+        } else if (subN > 1) {                         // collapsed subroutine
+            int idx = (int)nodes.size();
+            nodes.push_back({entry, subAgg, K_SUB, subN, entry, 0});
+            for (size_t k = s; k < se; ++k) indexOf[raw[k].first] = idx;
+            bump(subAgg);
+        } else {                                       // single line → block level
+            emitBlocks(s, se);
+        }
+        s = se;
     }
     const int N = (int)nodes.size();
     const double lmax = std::log2(double(localMax) + 1.0) + 1e-6;
@@ -281,7 +327,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // ---- Layout: left = control-flow graph, right = hot list ----
     const int margin = fs + 4;
     const int headerY = margin + fm.ascent();
-    const int graphW = width() * 54 / 100;
+    const int graphW = width() * 46 / 100;
     p.setPen(QColor(200, 210, 255));
     p.drawText(margin, headerY, "Граф исполнения  (cyan → вперёд,  orange → цикл)");
     QRect g(margin, headerY + 8, graphW - margin, height() - headerY - 8 - (lineH + 8));
@@ -327,11 +373,13 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     const int labelW = showLabels ? fm.horizontalAdvance("022010 BICB (SP)+,(R1)+ ") : 0;
     const double laneX = g.left() + 8 + labelW;
 
-    auto yOf = [&](uint16_t addr) -> double {
-        auto it = indexOf.find(addr);
-        int idx = (it != indexOf.end()) ? it->second : 0;
+    auto yOfIndex = [&](int idx) -> double {
         if (N <= 1) return g.center().y();
         return g.top() + 6 + panY_ + (idx + 0.5) / N * contentH_;
+    };
+    auto yOf = [&](uint16_t addr) -> double {   // for edges: addr -> its row
+        auto it = indexOf.find(addr);
+        return yOfIndex(it != indexOf.end() ? it->second : 0);
     };
     auto hotFrac = [&](uint32_t c) { return std::log2(double(c) + 1.0) / lmax; };
 
@@ -376,18 +424,17 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     nodeYs_.clear();
     for (int i = 0; i < N; ++i) {
         const GraphRow& row = nodes[i];
-        double y = yOf(row.addr);
+        double y = yOfIndex(i);
         if (y < g.top() - lineH || y > g.bottom() + lineH) continue; // off-screen
-        nodeYs_.push_back({int(y), row.addr}); // for click hit-testing
+        nodeYs_.push_back({int(y), row.kind, row.key, row.addr}); // for click hit-testing
         double f = hotFrac(row.count);
         QColor dot(int(120 + 135 * f), int(70 + 90 * (1 - std::abs(f - 0.5) * 2)), int(60 * (1 - f)));
-        // Collapsed multi-instruction blocks get a square glyph; single lines a dot.
-        bool expandable = row.block && row.nInstr > 1;
-        bool header     = !row.block && row.nInstr > 1; // first line of an open block
+        // Collapsible groups (subroutine / block) get a square glyph; lines a dot.
+        bool collapsedGroup = (row.kind == K_SUB || row.kind == K_BLK) && row.nInstr > 1;
         p.setPen(Qt::NoPen);
         p.setBrush(dot);
-        if (expandable) { double r = 3.0 + 3.0 * f; p.drawRect(QRectF(laneX - r, y - r, 2 * r, 2 * r)); }
-        else            { double r = 2.5 + 3.5 * f; p.drawEllipse(QPointF(laneX, y), r, r); }
+        if (collapsedGroup) { double r = 3.0 + 3.0 * f; p.drawRect(QRectF(laneX - r, y - r, 2 * r, 2 * r)); }
+        else                { double r = 2.5 + 3.5 * f; p.drawEllipse(QPointF(laneX, y), r, r); }
         if (showLabels) {
             bk::DisasmLine d = bk::disasm(mem, row.addr);
             char buf[8]; std::snprintf(buf, sizeof(buf), "%06o", row.addr);
@@ -395,15 +442,16 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
             p.fillRect(QRectF(g.left() + 4, y - fm.ascent() + 2,
                               labelW * f, fm.height() - 2), QColor(120, 60, 30, 140));
             p.setPen(QColor(200 + int(55 * f), 200, 180));
+            const QString insn = QString::fromStdString(d.text);
+            const QString pad(row.indent * 2, QChar(' '));
             QString text;
-            if (expandable)                                 // "▶ addr insn  [N]"
-                text = QString("▶ %1 %2  [%3]").arg(buf)
-                           .arg(QString::fromStdString(d.text)).arg(row.nInstr);
-            else if (header)                                // "▼ addr insn"
-                text = QString("▼ %1 %2").arg(buf).arg(QString::fromStdString(d.text));
-            else                                            // indented instruction
-                text = QString("%1%2 %3").arg(row.leader != row.addr ? "  " : "")
-                           .arg(buf).arg(QString::fromStdString(d.text));
+            switch (row.kind) {
+            case K_SUB:     text = QString("▶ %1 %2  {%3}").arg(buf).arg(insn).arg(row.nInstr); break;
+            case K_SUB_HDR: text = QString("▼ %1  п/п, %2 инстр.").arg(buf).arg(row.nInstr);    break;
+            case K_BLK:     text = QString("%1▶ %2 %3  [%4]").arg(pad).arg(buf).arg(insn).arg(row.nInstr); break;
+            case K_BLK_HDR: text = QString("%1▼ %2 %3").arg(pad).arg(buf).arg(insn);            break;
+            default:        text = QString("%1%2 %3").arg(pad).arg(buf).arg(insn);              break;
+            }
             p.drawText(QPointF(g.left() + 6, y + fm.ascent() / 2 - 1), text);
         }
     }
@@ -437,7 +485,9 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         p.setPen(QColor(230, 230, 200));
         QString lineText = QString("%1 %2  ×%3")
             .arg(buf).arg(QString::fromStdString(d.text)).arg(fmtCount(hot[i].first));
-        p.drawText(textX, y, fm.elidedText(lineText, Qt::ElideRight, textW));
+        // Elide the middle (the instruction text) so the address and the ×count
+        // at the ends stay visible even when a line doesn't fully fit.
+        p.drawText(textX, y, fm.elidedText(lineText, Qt::ElideMiddle, textW));
         // Record the clickable row so a click scrolls the graph to this address.
         hotRows_.push_back({QRect(listX, y - fm.ascent(), listRight - listX, lineH), a});
         y += lineH;
@@ -446,8 +496,8 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // ---- Totals footer + controls hint ----
     p.setPen(QColor(150, 170, 210));
     p.drawText(margin, height() - 6,
-        QString("Блоков: %1  рёбер: %2  зум ×%3  [%4]  |  ЛКМ-блок ▶/▼·дизасм, "
-                "ПКМ-скрыть, Del-вернуть, колесо-скролл, Ctrl+колесо зум, Home-авто")
-            .arg((int)blockLeaders_.size()).arg(tr.edges().size()).arg(zoom_, 0, 'f', 1)
+        QString("П/п: %1  рёбер: %2  зум ×%3  [%4]  |  ЛКМ-разв/сверн·дизасм, "
+                "ПКМ-скрыть, Del-сброс, колесо-скролл, Ctrl+колесо зум, Home-авто")
+            .arg((int)subSize_.size()).arg(tr.edges().size()).arg(zoom_, 0, 'f', 1)
             .arg(autoFollow_ ? "авто → горячие" : "ручной"));
 }
