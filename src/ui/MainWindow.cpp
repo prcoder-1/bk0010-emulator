@@ -260,7 +260,17 @@ void MainWindow::openMemVis() {
 }
 
 void MainWindow::openCodeGraph() {
-    if (!codegraph_) codegraph_ = new CodeGraphWidget(board_.get());
+    if (!codegraph_) {
+        codegraph_ = new CodeGraphWidget(board_.get());
+        // Clicking a hot instruction jumps the debugger's disassembler to it,
+        // opening the debugger overlay if it isn't already showing.
+        connect(codegraph_, &CodeGraphWidget::addressPicked, this, [this](uint16_t addr) {
+            if (!paused_) setPaused(true);   // setPaused re-anchors disasm to PC…
+            overlay_->setDisasmAddr(addr);   // …so set the picked address after it
+            raise();                         // bring the disassembler window forward
+            activateWindow();
+        });
+    }
     board_->trace().setEnabled(true);
     codegraph_->show();
     codegraph_->raise();

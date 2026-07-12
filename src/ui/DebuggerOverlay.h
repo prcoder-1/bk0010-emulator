@@ -14,6 +14,7 @@ public:
     explicit DebuggerOverlay(bk::Board* board, QWidget* parent = nullptr);
 
     void followPc();                 // scroll disasm so PC is visible
+    void setDisasmAddr(uint16_t a) { disasmTop_ = a; update(); } // jump disasm to addr
     void setMemAddr(uint16_t a) { memAddr_ = a; update(); }
     void scrollDisasm(int lines);    // move the disasm window
     void scrollMem(int rows);

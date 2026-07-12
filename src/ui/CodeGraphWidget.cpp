@@ -75,9 +75,12 @@ void CodeGraphWidget::wheelEvent(QWheelEvent* e) {
 }
 
 void CodeGraphWidget::mousePressEvent(QMouseEvent* e) {
-    if (e->button() == Qt::LeftButton && graphRect_.contains(e->pos())) {
-        dragging_ = true;
-        lastDrag_ = e->pos();
+    if (e->button() == Qt::LeftButton) {
+        pressPos_ = e->pos();
+        if (graphRect_.contains(e->pos())) {   // may become a drag
+            dragging_ = true;
+            lastDrag_ = e->pos();
+        }
     }
 }
 
@@ -91,7 +94,33 @@ void CodeGraphWidget::mouseMoveEvent(QMouseEvent* e) {
     }
 }
 
-void CodeGraphWidget::mouseReleaseEvent(QMouseEvent*) { dragging_ = false; }
+void CodeGraphWidget::mouseReleaseEvent(QMouseEvent* e) {
+    bool wasDragging = dragging_;
+    dragging_ = false;
+    if (e->button() != Qt::LeftButton) return;
+    // A press+release without real movement is a click, not a drag.
+    if (wasDragging && (e->pos() - pressPos_).manhattanLength() > 4) return;
+
+    auto pick = [&](uint16_t addr) {
+        scrollToAddr_ = addr;      // scroll this graph to it (visual feedback)
+        userInteracted();          // manual mode so it stays put
+        emit addressPicked(addr);  // drive the debugger's disassembler
+        update();
+    };
+    // 1) A row in the hot-instruction list.
+    for (const auto& row : hotRows_)
+        if (row.first.contains(e->pos())) { pick(row.second); return; }
+    // 2) A node in the graph: pick the one whose y is nearest the click.
+    if (graphRect_.contains(e->pos()) && !nodeYs_.empty()) {
+        int cy = e->pos().y(), best = -1, bestD = 1 << 30;
+        uint16_t bestA = 0;
+        for (const auto& nd : nodeYs_) {
+            int d = std::abs(nd.first - cy);
+            if (d < bestD) { bestD = d; bestA = nd.second; best = 0; }
+        }
+        if (best == 0) pick(bestA);
+    }
+}
 
 void CodeGraphWidget::keyPressEvent(QKeyEvent* e) {
     double cy = graphRect_.center().y();
@@ -174,6 +203,18 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     }
 
     contentH_ = visH * zoom_;
+    // Honour a pending "scroll to hot address": zoom in enough that the label is
+    // legible, then pan so that instruction sits near the top of the graph.
+    if (scrollToAddr_ >= 0 && N > 0) {
+        auto it = indexOf.find(static_cast<uint16_t>(scrollToAddr_));
+        if (it != indexOf.end()) {
+            double targetZoom = std::min(60.0, std::max(1.0, N * (fm.height() + 2.0) / std::max(1.0, visH)));
+            zoom_ = std::max(zoom_, targetZoom);
+            contentH_ = visH * zoom_;
+            panY_ = visH * 0.15 - (it->second + 0.5) / N * contentH_;
+        }
+        scrollToAddr_ = -1;
+    }
     clampPan();
 
     // Vertical position of a node = its index spread over the (zoomed) content.
@@ -228,10 +269,12 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     }
 
     // ---- Nodes + labels ----
+    nodeYs_.clear();
     for (int i = 0; i < N; ++i) {
         uint16_t addr = nodes[i].first;
         double y = yOf(addr);
         if (y < g.top() - lineH || y > g.bottom() + lineH) continue; // off-screen
+        nodeYs_.push_back({int(y), addr}); // for click hit-testing
         double f = hotFrac(nodes[i].second);
         QColor dot(int(120 + 135 * f), int(70 + 90 * (1 - std::abs(f - 0.5) * 2)), int(60 * (1 - f)));
         double r = 2.5 + 3.5 * f;
@@ -266,6 +309,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     const int barMax = std::max(36, (listRight - listX) * 22 / 100);
     const int textX = listX + barMax + 8;
     const int textW = std::max(10, listRight - textX);
+    hotRows_.clear();
     for (size_t i = 0; i < hot.size() && y < height() - 6; ++i) {
         uint16_t a = hot[i].second;
         double frac = double(hot[i].first) / top;
@@ -277,6 +321,8 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         QString lineText = QString("%1 %2  ×%3")
             .arg(buf).arg(QString::fromStdString(d.text)).arg(fmtCount(hot[i].first));
         p.drawText(textX, y, fm.elidedText(lineText, Qt::ElideRight, textW));
+        // Record the clickable row so a click scrolls the graph to this address.
+        hotRows_.push_back({QRect(listX, y - fm.ascent(), listRight - listX, lineH), a});
         y += lineH;
     }
 
