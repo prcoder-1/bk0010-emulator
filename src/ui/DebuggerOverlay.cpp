@@ -3,6 +3,7 @@
 #include "Disasm.h"
 #include <QPainter>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QFontDatabase>
 #include <cstdio>
 
@@ -140,6 +141,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     int mx = disasmRect_.right() + margin;
     int mw = W - mx - margin;
     QRect memRect(mx, dTop, mw, dH * 3 / 5);
+    memRect_ = memRect; // cache for the wheel handler
     p.fillRect(memRect, panelBg);
     p.setPen(border); p.drawRect(memRect);
     p.setPen(title); p.drawText(memRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— ПАМЯТЬ —");
@@ -179,7 +181,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     p.setPen(QColor(180, 200, 255));
     p.drawText(margin, H - 4,
         "F12-выход  F7-шаг(в)  F8-шаг(через)  F9-тчк.останова  G-продолжить  "
-        "PgUp/PgDn-дизасм  [/]-память");
+        "колесо/PgUp/PgDn-дизасм  [/]-память");
 }
 
 void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
@@ -195,4 +197,16 @@ void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
             update();
         }
     }
+}
+
+void DebuggerOverlay::wheelEvent(QWheelEvent* e) {
+    // Scroll the panel under the cursor: the disassembler by default, the memory
+    // dump when hovering it. One notch (120 units) = a few lines.
+    int notches = e->angleDelta().y() / 120;
+    if (notches == 0) { e->ignore(); return; }
+    const QPoint pos = e->position().toPoint();
+    if (disasmRect_.contains(pos))   scrollDisasm(-notches * 3); // wheel up = earlier addrs
+    else if (memRect_.contains(pos)) scrollMem(-notches);
+    else { e->ignore(); return; }
+    e->accept();
 }

@@ -22,6 +22,7 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
+    void wheelEvent(QWheelEvent*) override;
 
 private:
     bk::Board* board_;
@@ -30,6 +31,7 @@ private:
     int lineH_ = 14;                 // pixel height of a text line (recomputed)
     int disasmLines_ = 20;
 
-    // Layout rectangles (computed each paint) used by mousePressEvent.
+    // Layout rectangles (computed each paint) used by the mouse handlers.
     QRect disasmRect_;
+    QRect memRect_;
 };
