@@ -42,6 +42,13 @@ public:
     // True while an unread code sits in the register (ready flag set).
     bool keyReady() const { return (kbdStatus_ & 0200) != 0; }
 
+    // Physical key-held state, exposed through 0177716 bit 6 (active-low). Many
+    // games (e.g. Digger) poll that bit to detect a key regardless of whether the
+    // monitor's keyboard ISR has already read the code register. Set on key-down,
+    // cleared on key-up; independent of the ready/DONE flag. See ioRead(REG_SYS).
+    void setKeyHeld(bool held) { keyHeld_ = held; }
+    bool keyHeld() const { return keyHeld_; }
+
     // --- Breakpoints / debugger support ---
     void toggleBreakpoint(uint16_t addr) {
         if (breakpoints_.count(addr)) breakpoints_.erase(addr); else breakpoints_.insert(addr);
@@ -92,9 +99,10 @@ private:
 
     // Internal register state
     uint16_t scroll_    = 0330;
-    uint16_t kbdStatus_ = 0;    // 0177660: bit7 = code ready, bit6 = IRQ enable
+    uint16_t kbdStatus_ = 0;    // 0177660: bit7 = code ready, bit6 = IRQ mask (0=enabled)
     uint16_t kbdData_   = 0;    // 0177662: the single latched key code (7 bits)
     bool     keyIntPending_ = false;
+    bool     keyHeld_ = false;   // physical key down (0177716 bit 6, active-low)
     uint16_t keyIntVec_ = 060;
     uint8_t  speaker_   = 0;
 

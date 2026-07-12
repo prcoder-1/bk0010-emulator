@@ -110,9 +110,10 @@ void Board::reset() {
     // priority itself once it has installed its interrupt vectors.
     cpu_.reset(START_VECTOR, 0340);
     scroll_ = 0330;
-    kbdStatus_ = 0100; // keyboard interrupt enabled (bit 6), no key ready
+    kbdStatus_ = 0;    // bit 6 (0100) = interrupt MASK (0 => enabled), bit 7 = ready
     kbdData_ = 0;
     keyIntPending_ = false;
+    keyHeld_ = false;
     keyIntVec_ = 060;
     // Timer power-on state (matches bk/timer.c timer_init: stopped).
     timerCsr_ = 0;
@@ -222,10 +223,10 @@ bool Board::pressKey(uint16_t bkCode) {
     if (kbdStatus_ & 0200) return false;
     kbdData_ = bkCode & 0177;                 // 7-bit code -> 0177662
     kbdStatus_ |= 0200;                       // set "code ready"
-    // Raise the keyboard interrupt. Function keys / АР2 (bit 0200 set) vector
-    // through 0274, ordinary keys through 060. (The monitor keeps the register
-    // interrupt-enabled; gating on bit 6 here is unreliable, so we always queue
-    // it and let the CPU priority / vector gate delivery.)
+    // Latch the interrupt vector: function keys / АР2 (bit 0200 set) go through
+    // 0274, ordinary keys through 060. Whether the interrupt is actually delivered
+    // is decided in deliverFrameInterrupts by the status bit-6 mask and the CPU
+    // priority; the code is always latched so polling software can read it.
     keyIntVec_ = (bkCode & 0200) ? 0274 : Cpu::VEC_KEYBOARD;
     keyIntPending_ = true;
     return true;
@@ -235,11 +236,18 @@ void Board::deliverFrameInterrupts() {
     if (cpu_.halted()) return;
     if (cpu_.psw & 0200) return; // interrupts masked
 
-    // A latched, not-yet-serviced key raises its interrupt first.
+    // A latched, not-yet-serviced key raises its interrupt first — but only while
+    // the keyboard interrupt is enabled. On BK-0010 status bit 6 (0100) is the
+    // interrupt MASK: software that polls the register (e.g. Digger) sets it to
+    // stop the monitor's ISR from stealing the code. When masked we leave the
+    // code latched (ready bit stays set) for polling and fall through to the
+    // frame IRQ. Matches the reference bk emulator (tty.c: raise when !TTY_IE).
     if (keyIntPending_) {
         keyIntPending_ = false;
-        if (mem_.peekWord(keyIntVec_) != 0) cpu_.interrupt(keyIntVec_);
-        return;
+        if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
+            cpu_.interrupt(keyIntVec_);
+            return;
+        }
     }
 
     if (mem_.peekWord(Cpu::VEC_IRQ2) != 0)
@@ -287,9 +295,12 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
     case REG_PORT:       value = 0; return true;
     case REG_SYS: {
         // BK-0010: bit15 set, high byte 0200 (serial idle). Bit 6 (0100) is the
-        // "key pressed" indicator, active-low: 0 while a key is waiting.
+        // "key pressed" indicator, active-low: 0 while a key is physically held.
+        // This tracks the key press/release directly (like the reference bk's
+        // key_pressed), NOT the code-ready flag — so a game polling this bit keeps
+        // seeing the key even after the monitor's ISR has drained the code register.
         uint16_t v = 0100000 | 0200;
-        if (!(kbdStatus_ & 0200)) v |= 0100; // no key pending -> bit 6 high
+        if (!keyHeld_) v |= 0100; // no key held -> bit 6 high
         value = v;
         return true;
     }

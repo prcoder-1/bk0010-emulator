@@ -255,14 +255,22 @@ int main() {
         CHECK(!b.keyReady(), "keyboard: no key ready initially");
         CHECK(b.pressKey(0101), "keyboard: first key (A) latched");   // 'A'
         CHECK(b.keyReady(), "keyboard: ready flag set after keypress");
-        // Register 0177716 bit 6 (key-pressed, active-low) is 0 while a key waits.
-        CHECK(!(b.memory().readWord(0177716) & 0100), "keyboard: 0177716 key-pressed bit low");
         CHECK(!b.pressKey(0102), "keyboard: second key dropped while register busy");
         CHECK((b.memory().readWord(0177662) & 0177) == 0101, "keyboard: register holds first code");
         CHECK(!b.keyReady(), "keyboard: ready flag cleared on read");
-        CHECK(b.memory().readWord(0177716) & 0100, "keyboard: 0177716 key-pressed bit high again");
         CHECK(b.pressKey(0102), "keyboard: next key latched after previous was read");
         CHECK((b.memory().readWord(0177662) & 0177) == 0102, "keyboard: register holds second code");
+        // Register 0177716 bit 6 (key-pressed, active-low) tracks the *physical*
+        // key-held state, set/cleared independently of the code register — games
+        // like Digger poll it and must keep seeing the key after the monitor ISR
+        // has already drained 0177662.
+        CHECK(b.memory().readWord(0177716) & 0100, "keyboard: 0177716 bit high with no key held");
+        b.setKeyHeld(true);
+        CHECK(!(b.memory().readWord(0177716) & 0100), "keyboard: 0177716 bit low while key held");
+        b.memory().readWord(0177662);   // draining the code register must not release it
+        CHECK(!(b.memory().readWord(0177716) & 0100), "keyboard: 0177716 still low after code read while held");
+        b.setKeyHeld(false);
+        CHECK(b.memory().readWord(0177716) & 0100, "keyboard: 0177716 bit high after release");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
