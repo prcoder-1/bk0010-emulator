@@ -4,6 +4,8 @@
 #include <QPoint>
 #include <QElapsedTimer>
 #include <cstdint>
+#include <vector>
+#include <utility>
 
 namespace bk { class Board; }
 
@@ -16,6 +18,11 @@ class CodeGraphWidget : public QWidget {
 public:
     explicit CodeGraphWidget(bk::Board* board, QWidget* parent = nullptr);
     void refresh() { update(); }
+
+signals:
+    // Emitted when the user clicks a hot instruction (list row or graph node),
+    // so the debugger's disassembler can jump to that address.
+    void addressPicked(uint16_t addr);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -46,4 +53,13 @@ private:
     // Cached layout from the last paint (used by the event handlers).
     QRect  graphRect_;
     double contentH_ = 0.0;
+
+    // Clickable rows of the hot-instruction list: (row rect, instruction addr).
+    std::vector<std::pair<QRect, uint16_t>> hotRows_;
+    // Drawn graph nodes for click hit-testing: (baseline y, instruction addr).
+    std::vector<std::pair<int, uint16_t>> nodeYs_;
+    // A picked address: the graph scrolls to it on next paint (-1 = none). Set by
+    // the click handlers, consumed by paintEvent.
+    int    scrollToAddr_ = -1;
+    QPoint pressPos_;        // to tell a click apart from a drag
 };
