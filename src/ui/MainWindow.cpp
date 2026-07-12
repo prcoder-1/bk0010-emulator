@@ -267,8 +267,10 @@ void MainWindow::openCodeGraph() {
         connect(codegraph_, &CodeGraphWidget::addressPicked, this, [this](uint16_t addr) {
             if (!paused_) setPaused(true);   // setPaused re-anchors disasm to PC…
             overlay_->setDisasmAddr(addr);   // …so set the picked address after it
-            raise();                         // bring the disassembler window forward
-            activateWindow();
+            overlay_->update();
+            // Don't raise/activate the main window: the user is clicking in the
+            // code-graph window and it must stay in front so its own reposition to
+            // the block is visible. Both panels update in place (side-by-side).
         });
     }
     board_->trace().setEnabled(true);
