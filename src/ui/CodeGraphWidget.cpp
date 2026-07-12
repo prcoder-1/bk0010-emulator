@@ -13,6 +13,32 @@
 
 using bk::Board;
 
+// A control-transfer instruction ends a basic block: the next sequential address
+// starts a new block. Covers PDP-11/ВМ1 branches, JMP, JSR, RTS, RTI/RTT, SOB,
+// EMT/TRAP and HALT (opcode ranges, octal).
+static bool isBlockTerminator(uint16_t ir) {
+    if (ir >= 0000400 && ir <= 0003477) return true; // BR..BLE (conditional branches)
+    if (ir >= 0100000 && ir <= 0103777) return true; // BPL..BCS
+    if (ir >= 0000100 && ir <= 0000177) return true; // JMP
+    if (ir >= 0004000 && ir <= 0004777) return true; // JSR
+    if (ir >= 0000200 && ir <= 0000207) return true; // RTS
+    if (ir == 0000002 || ir == 0000006) return true; // RTI / RTT
+    if (ir >= 0104000 && ir <= 0104777) return true; // EMT / TRAP
+    if (ir >= 0077000 && ir <= 0077777) return true; // SOB
+    if (ir == 0000000) return true;                  // HALT
+    return false;
+}
+
+// One drawn row of the graph: either a collapsed basic block, or a single
+// instruction (a standalone one, or a line of an expanded block).
+struct GraphRow {
+    uint16_t addr;    // leader address for a block, else the instruction address
+    uint32_t count;   // aggregate (block) or per-instruction execution count
+    bool     block;   // true = collapsed block row
+    int      nInstr;  // block size (for a block row, or an expanded header); else 0
+    uint16_t leader;  // owning block leader
+};
+
 // Format a large count with a K/M/G suffix, e.g. 1209 -> "1.2K", 184090 -> "184K".
 static QString fmtCount(uint32_t n) {
     struct { double div; const char* suf; } units[] = {{1e9, "G"}, {1e6, "M"}, {1e3, "K"}};
@@ -32,6 +58,7 @@ CodeGraphWidget::CodeGraphWidget(Board* board, QWidget* parent)
     setMinimumSize(700, 520);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(false);
+    setContextMenuPolicy(Qt::PreventContextMenu); // right-click is "hide instruction"
     sinceInteraction_.start();
 }
 
@@ -81,7 +108,28 @@ void CodeGraphWidget::mousePressEvent(QMouseEvent* e) {
             dragging_ = true;
             lastDrag_ = e->pos();
         }
+    } else if (e->button() == Qt::RightButton) {
+        // Right-click hides a hot instruction (e.g. a busy delay loop) from both
+        // the graph and the list. Reset with the Delete key (see keyPressEvent).
+        uint16_t addr;
+        if (addrAtPos(e->pos(), addr)) { excluded_.insert(addr); update(); }
     }
+}
+
+bool CodeGraphWidget::addrAtPos(const QPoint& pos, uint16_t& out) const {
+    // 1) A row in the hot-instruction list.
+    for (const auto& row : hotRows_)
+        if (row.first.contains(pos)) { out = row.second; return true; }
+    // 2) A node in the graph: the one whose y is nearest the click.
+    if (graphRect_.contains(pos) && !nodeYs_.empty()) {
+        int cy = pos.y(), bestD = 1 << 30; uint16_t bestA = 0; bool found = false;
+        for (const auto& nd : nodeYs_) {
+            int d = std::abs(nd.first - cy);
+            if (d < bestD) { bestD = d; bestA = nd.second; found = true; }
+        }
+        if (found) { out = bestA; return true; }
+    }
+    return false;
 }
 
 void CodeGraphWidget::mouseMoveEvent(QMouseEvent* e) {
@@ -101,24 +149,32 @@ void CodeGraphWidget::mouseReleaseEvent(QMouseEvent* e) {
     // A press+release without real movement is a click, not a drag.
     if (wasDragging && (e->pos() - pressPos_).manhattanLength() > 4) return;
 
-    auto pick = [&](uint16_t addr) {
+    auto navigate = [&](uint16_t addr) {
         scrollToAddr_ = addr;      // scroll this graph to it (visual feedback)
         userInteracted();          // manual mode so it stays put
         emit addressPicked(addr);  // drive the debugger's disassembler
         update();
     };
-    // 1) A row in the hot-instruction list.
-    for (const auto& row : hotRows_)
-        if (row.first.contains(e->pos())) { pick(row.second); return; }
-    // 2) A node in the graph: pick the one whose y is nearest the click.
+    // Hot-list row → navigate the disassembler.
+    for (const auto& r : hotRows_)
+        if (r.first.contains(e->pos())) { navigate(r.second); return; }
+    // Graph node → toggle a collapsible block; otherwise navigate.
     if (graphRect_.contains(e->pos()) && !nodeYs_.empty()) {
-        int cy = e->pos().y(), best = -1, bestD = 1 << 30;
-        uint16_t bestA = 0;
+        int cy = e->pos().y(), bestD = 1 << 30; uint16_t addr = 0; bool found = false;
         for (const auto& nd : nodeYs_) {
             int d = std::abs(nd.first - cy);
-            if (d < bestD) { bestD = d; bestA = nd.second; best = 0; }
+            if (d < bestD) { bestD = d; addr = nd.second; found = true; }
         }
-        if (best == 0) pick(bestA);
+        if (!found) return;
+        auto it = blockSize_.find(addr);
+        if (blockLeaders_.count(addr) && it != blockSize_.end() && it->second > 1) {
+            if (expanded_.count(addr)) expanded_.erase(addr);            // collapse
+            else { expanded_.insert(addr); scrollToAddr_ = addr; emit addressPicked(addr); }
+            userInteracted();
+            update();
+        } else {
+            navigate(addr);
+        }
     }
 }
 
@@ -134,6 +190,10 @@ void CodeGraphWidget::keyPressEvent(QKeyEvent* e) {
     case Qt::Key_PageDown:userInteracted(); panY_ -= page; clampPan(); update(); break;
     // Home resumes auto-follow of the hot instructions.
     case Qt::Key_Home: case Qt::Key_0: autoFollow_ = true; update(); break;
+    // Delete/Backspace restores right-click-excluded instructions.
+    case Qt::Key_Delete: case Qt::Key_Backspace:
+        if (!excluded_.empty()) { excluded_.clear(); update(); }
+        break;
     default: QWidget::keyPressEvent(e); return;
     }
     e->accept();
@@ -159,18 +219,62 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // Instructions not executed within GRAPH_WINDOW frames drop out of the graph,
     // so it tracks the currently-active code rather than everything ever run.
     const int GRAPH_WINDOW = 300; // frames (~6 s at 50 Hz) since last execution
-    std::vector<std::pair<uint16_t, uint32_t>> nodes; // (addr, count)
-    uint32_t localMax = 1;        // max exec count among the visible nodes
+    // Raw executed instructions in address order (also feeds the hot list).
+    std::vector<std::pair<uint16_t, uint32_t>> raw; // (addr, count)
     for (int a = 0; a < 0x10000; a += 2) {
         uint16_t a16 = static_cast<uint16_t>(a);
+        if (excluded_.count(a16)) continue;   // user-hidden (right-click)
         uint32_t c = tr.execCount(a16);
-        if (c && tr.fade(tr.lastExec(a16), GRAPH_WINDOW) > 0.0) {
-            nodes.push_back({a16, c});
-            if (c > localMax) localMax = c;
-        }
+        if (c && tr.fade(tr.lastExec(a16), GRAPH_WINDOW) > 0.0)
+            raw.push_back({a16, c});
     }
+
+    // ---- Group instructions into basic blocks ----
+    // Leaders: the first instruction, any branch/jump target (edge destination),
+    // any instruction after a control-transfer, and any address after a gap.
+    std::set<uint16_t> leaders;
+    for (auto& e : tr.edges()) leaders.insert(static_cast<uint16_t>(e.first & 0xFFFF));
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (i == 0) { leaders.insert(raw[0].first); continue; }
+        uint16_t prev = raw[i - 1].first;
+        uint16_t prevEnd = prev + static_cast<uint16_t>(bk::disasm(mem, prev).words * 2);
+        if (prevEnd != raw[i].first || isBlockTerminator(mem.peekWord(prev)))
+            leaders.insert(raw[i].first);
+    }
+
+    // Build the display rows (a collapsed block, or one row per instruction when
+    // expanded) and the address -> row-index map used to route the edges.
+    std::vector<GraphRow> nodes;
     std::unordered_map<uint16_t, int> indexOf;
-    for (int i = 0; i < (int)nodes.size(); ++i) indexOf[nodes[i].first] = i;
+    blockLeaders_.clear();
+    blockSize_.clear();
+    uint32_t localMax = 1;        // max count among the visible rows
+    for (size_t i = 0; i < raw.size();) {
+        uint16_t leader = raw[i].first;
+        size_t j = i + 1;
+        while (j < raw.size() && !leaders.count(raw[j].first)) ++j;
+        int nInstr = static_cast<int>(j - i);
+        uint32_t agg = 0;
+        for (size_t k = i; k < j; ++k) agg = std::max(agg, raw[k].second);
+        blockLeaders_.insert(leader);
+        blockSize_[leader] = nInstr;
+        bool open = (nInstr > 1) && expanded_.count(leader);
+        if (!open) {                                   // collapsed: one row
+            int idx = (int)nodes.size();
+            nodes.push_back({leader, agg, true, nInstr, leader});
+            for (size_t k = i; k < j; ++k) indexOf[raw[k].first] = idx;
+            if (agg > localMax) localMax = agg;
+        } else {                                       // expanded: a row per line
+            for (size_t k = i; k < j; ++k) {
+                int idx = (int)nodes.size();
+                nodes.push_back({raw[k].first, raw[k].second, false,
+                                 (k == i ? nInstr : 0), leader});
+                indexOf[raw[k].first] = idx;
+                if (raw[k].second > localMax) localMax = raw[k].second;
+            }
+        }
+        i = j;
+    }
     const int N = (int)nodes.size();
     const double lmax = std::log2(double(localMax) + 1.0) + 1e-6;
 
@@ -193,7 +297,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     if (autoFollow_ && N > 0) {
         int hotIdx = 0; uint32_t hotMax = 0;
         for (int i = 0; i < N; ++i)
-            if (nodes[i].second > hotMax) { hotMax = nodes[i].second; hotIdx = i; }
+            if (nodes[i].count > hotMax) { hotMax = nodes[i].count; hotIdx = i; }
         // Zoom so node spacing reaches label height (labels become readable).
         double targetZoom = std::min(60.0, std::max(1.0, N * (fm.height() + 2.0) / std::max(1.0, visH)));
         zoom_ += (targetZoom - zoom_) * 0.08;
@@ -271,37 +375,50 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // ---- Nodes + labels ----
     nodeYs_.clear();
     for (int i = 0; i < N; ++i) {
-        uint16_t addr = nodes[i].first;
-        double y = yOf(addr);
+        const GraphRow& row = nodes[i];
+        double y = yOf(row.addr);
         if (y < g.top() - lineH || y > g.bottom() + lineH) continue; // off-screen
-        nodeYs_.push_back({int(y), addr}); // for click hit-testing
-        double f = hotFrac(nodes[i].second);
+        nodeYs_.push_back({int(y), row.addr}); // for click hit-testing
+        double f = hotFrac(row.count);
         QColor dot(int(120 + 135 * f), int(70 + 90 * (1 - std::abs(f - 0.5) * 2)), int(60 * (1 - f)));
-        double r = 2.5 + 3.5 * f;
+        // Collapsed multi-instruction blocks get a square glyph; single lines a dot.
+        bool expandable = row.block && row.nInstr > 1;
+        bool header     = !row.block && row.nInstr > 1; // first line of an open block
         p.setPen(Qt::NoPen);
         p.setBrush(dot);
-        p.drawEllipse(QPointF(laneX, y), r, r);
+        if (expandable) { double r = 3.0 + 3.0 * f; p.drawRect(QRectF(laneX - r, y - r, 2 * r, 2 * r)); }
+        else            { double r = 2.5 + 3.5 * f; p.drawEllipse(QPointF(laneX, y), r, r); }
         if (showLabels) {
-            bk::DisasmLine d = bk::disasm(mem, addr);
-            char buf[8]; std::snprintf(buf, sizeof(buf), "%06o", addr);
+            bk::DisasmLine d = bk::disasm(mem, row.addr);
+            char buf[8]; std::snprintf(buf, sizeof(buf), "%06o", row.addr);
             // small hotness bar behind the label
             p.fillRect(QRectF(g.left() + 4, y - fm.ascent() + 2,
                               labelW * f, fm.height() - 2), QColor(120, 60, 30, 140));
             p.setPen(QColor(200 + int(55 * f), 200, 180));
-            p.drawText(QPointF(g.left() + 6, y + fm.ascent() / 2 - 1),
-                       QString("%1 %2").arg(buf).arg(QString::fromStdString(d.text)));
+            QString text;
+            if (expandable)                                 // "▶ addr insn  [N]"
+                text = QString("▶ %1 %2  [%3]").arg(buf)
+                           .arg(QString::fromStdString(d.text)).arg(row.nInstr);
+            else if (header)                                // "▼ addr insn"
+                text = QString("▼ %1 %2").arg(buf).arg(QString::fromStdString(d.text));
+            else                                            // indented instruction
+                text = QString("%1%2 %3").arg(row.leader != row.addr ? "  " : "")
+                           .arg(buf).arg(QString::fromStdString(d.text));
+            p.drawText(QPointF(g.left() + 6, y + fm.ascent() / 2 - 1), text);
         }
     }
 
     p.restore(); // end graph clip
 
-    // ---- Right: ranked hottest instructions ----
+    // ---- Right: ranked hottest instructions (individual, not blocks) ----
     std::vector<std::pair<uint32_t, uint16_t>> hot;
-    for (auto& n : nodes) hot.push_back({n.second, n.first});
+    for (auto& n : raw) hot.push_back({n.second, n.first});
     std::sort(hot.rbegin(), hot.rend());
     int listX = g.right() + margin;
     p.setPen(QColor(200, 220, 255));
-    p.drawText(listX, headerY, "Горячие инструкции:");
+    p.drawText(listX, headerY, excluded_.empty()
+        ? QString("Горячие инструкции:")
+        : QString("Горячие инструкции:  (скрыто %1)").arg(excluded_.size()));
     uint32_t top = hot.empty() ? 1 : hot[0].first;
     int y = headerY + lineH;
     // Keep the same `margin` gap from the right edge as the graph has on the left.
@@ -329,8 +446,8 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // ---- Totals footer + controls hint ----
     p.setPen(QColor(150, 170, 210));
     p.drawText(margin, height() - 6,
-        QString("Адресов: %1  рёбер: %2  зум ×%3  [%4]  |  колесо/перетаск.-скролл, "
-                "Ctrl+колесо или ± зум, Home-авто")
-            .arg(N).arg(tr.edges().size()).arg(zoom_, 0, 'f', 1)
+        QString("Блоков: %1  рёбер: %2  зум ×%3  [%4]  |  ЛКМ-блок ▶/▼·дизасм, "
+                "ПКМ-скрыть, Del-вернуть, колесо-скролл, Ctrl+колесо зум, Home-авто")
+            .arg((int)blockLeaders_.size()).arg(tr.edges().size()).arg(zoom_, 0, 'f', 1)
             .arg(autoFollow_ ? "авто → горячие" : "ручной"));
 }

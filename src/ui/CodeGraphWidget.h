@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <vector>
 #include <utility>
+#include <set>
+#include <map>
 
 namespace bk { class Board; }
 
@@ -36,6 +38,9 @@ private:
     void zoomAt(double factor, double centerY);
     void clampPan();
     void userInteracted();   // switch to manual mode, restart the idle timer
+    // Instruction address under a cursor position (hot-list row or nearest graph
+    // node). Returns false if the click missed both.
+    bool addrAtPos(const QPoint& pos, uint16_t& out) const;
 
     bk::Board* board_;
 
@@ -62,4 +67,16 @@ private:
     // the click handlers, consumed by paintEvent.
     int    scrollToAddr_ = -1;
     QPoint pressPos_;        // to tell a click apart from a drag
+
+    // Addresses the user right-clicked to hide (e.g. hot delay loops that swamp
+    // the ranking). Excluded from both the graph and the hot list; cleared by the
+    // reset key. See mouseReleaseEvent / keyPressEvent.
+    std::set<uint16_t> excluded_;
+
+    // The graph groups executed code into basic blocks, collapsed by default.
+    // `expanded_` holds the leader addresses of blocks the user has opened.
+    // `blockLeaders_` / `blockSize_` are rebuilt each paint for the click handler.
+    std::set<uint16_t> expanded_;
+    std::set<uint16_t> blockLeaders_;
+    std::map<uint16_t, int> blockSize_;
 };
