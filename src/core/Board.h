@@ -123,6 +123,11 @@ private:
     void deliverFrameInterrupts(); // 50 Hz IRQ (vector 0100) + keyboard (0060)
     int  stepCore();               // one instruction + sound/trace bookkeeping
 
+    // EMT 36 handler: reads the tape/disk parameter block (address in R1) and
+    // performs a file read/write against the host CWD instead of tape/disk.
+    // Returns true if it handled the call (so the ROM handler is skipped).
+    bool handleEmt36();
+
     Speaker sound_;
     Trace   trace_;
 };

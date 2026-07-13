@@ -709,7 +709,12 @@ int Cpu::step() {
     case OK:
     case R_RTT:   break;
     case R_ILLEGAL: service(VEC_RESERVED); break;
-    case R_EMT:  service(VEC_EMT);  break;
+    case R_EMT:
+        // EMT 36 = tape/disk file I/O. If a hook handles it (file read/write to
+        // the host), skip the ROM handler; PC already points past the EMT.
+        if ((ir_ & 0377) == 036 && emt36Hook_ && emt36Hook_()) break;
+        service(VEC_EMT);
+        break;
     case R_TRAP: service(VEC_TRAP); break;
     case R_IOT:  service(VEC_IOT);  break;
     case R_BPT:  service(VEC_TBIT); break; // BPT vector = 000014

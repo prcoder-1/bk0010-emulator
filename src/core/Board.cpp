@@ -79,6 +79,8 @@ Board::Board() {
     mem_.setIoBus(this);
     // Feed the access heatmap (no-op unless the trace is enabled).
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) { trace_.access(a, w, b); });
+    // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
+    cpu_.setEmt36Hook([this]() { return handleEmt36(); });
 }
 
 // Execute one instruction with sound + trace bookkeeping. Returns ticks.
@@ -281,6 +283,95 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
         cpu_.r[7] = addr; // jump to load address
     }
     return true;
+}
+
+// ---- EMT 36 (tape/disk driver) interception --------------------------------
+// Serves the monitor ROM's file-I/O EMT from the host filesystem (CWD) instead
+// of tape/disk. The parameter-block address is in R1; layout (bytes from base):
+//   +0  COMMAND   0=STOP 1=START(motor) 2=WRITE 3=READ 4=FICT_READ
+//   +1  RESPONSE  0=OK 1=INCORRECT_NAME 2=CRC_ERROR 3=STOP  (written back)
+//   +2  DATA_PTR  load/save address (word)
+//   +4  SIZE      byte count (word)
+//   +6  NAME[16]  file name (space-padded)
+//   +026 CUR_DATA_PTR / +030 CUR_SIZE / +032 CUR_NAME[16]  (found file, on read)
+// Host files use the standard .BIN/tape layout: [addr_lo,addr_hi,len_lo,len_hi,data].
+bool Board::handleEmt36() {
+    enum : uint8_t { CMD_STOP = 0, CMD_START = 1, CMD_WRITE = 2, CMD_READ = 3, CMD_FICT = 4 };
+    enum : uint8_t { RSP_OK = 0, RSP_BADNAME = 1, RSP_CRC = 2, RSP_STOP = 3 };
+
+    const uint16_t base = cpu_.r[1];
+    const uint8_t  cmd  = mem_.peekByte(base);
+
+    // Extract the 16-char name, trimming trailing spaces / NULs.
+    char raw[17] = {0};
+    for (int i = 0; i < 16; ++i) raw[i] = static_cast<char>(mem_.peekByte(base + 6 + i));
+    int n = 16;
+    while (n > 0 && (raw[n - 1] == ' ' || raw[n - 1] == '\0')) --n;
+    std::string name(raw, raw + n);
+
+    auto respond = [&](uint8_t code) { mem_.pokeByte(base + 1, code); return true; };
+
+    switch (cmd) {
+    case CMD_STOP:
+    case CMD_START:
+        // Motor control has no meaning without tape — just acknowledge.
+        return respond(RSP_OK);
+
+    case CMD_WRITE: {
+        // No name, or a name that would escape the working directory: refuse.
+        if (name.empty() || name.find('/') != std::string::npos ||
+            name.find('\\') != std::string::npos)
+            return respond(RSP_BADNAME);
+        const uint16_t addr = mem_.peekWord(base + 2);
+        const uint16_t len  = mem_.peekWord(base + 4);
+        FILE* f = std::fopen(name.c_str(), "wb");
+        if (!f) return respond(RSP_CRC);
+        uint8_t hdr[4] = { static_cast<uint8_t>(addr & 0377),
+                           static_cast<uint8_t>(addr >> 8),
+                           static_cast<uint8_t>(len & 0377),
+                           static_cast<uint8_t>(len >> 8) };
+        bool ok = std::fwrite(hdr, 1, 4, f) == 4;
+        for (uint16_t i = 0; ok && i < len; ++i) {
+            uint8_t b = mem_.peekByte(static_cast<uint16_t>(addr + i));
+            ok = std::fputc(b, f) != EOF;
+        }
+        std::fclose(f);
+        return respond(ok ? RSP_OK : RSP_CRC);
+    }
+
+    case CMD_READ:
+    case CMD_FICT: {
+        if (name.empty() || name.find('/') != std::string::npos ||
+            name.find('\\') != std::string::npos)
+            return respond(RSP_BADNAME);
+        FILE* f = std::fopen(name.c_str(), "rb");
+        if (!f) return respond(RSP_BADNAME);
+        uint8_t hdr[4];
+        if (std::fread(hdr, 1, 4, f) != 4) { std::fclose(f); return respond(RSP_CRC); }
+        const uint16_t fileAddr = hdr[0] | (hdr[1] << 8);
+        const uint16_t fileLen  = hdr[2] | (hdr[3] << 8);
+        // Report the found ("current") file in the block.
+        mem_.pokeWord(base + 026, fileAddr);
+        mem_.pokeWord(base + 030, fileLen);
+        for (int i = 0; i < 16; ++i)
+            mem_.pokeByte(base + 032 + i, i < n ? static_cast<uint8_t>(name[i]) : ' ');
+        if (cmd == CMD_READ) {
+            // Load address: honour a caller-supplied DATA_PTR, else the file's own.
+            const uint16_t caller = mem_.peekWord(base + 2);
+            const uint16_t load = caller ? caller : fileAddr;
+            std::vector<uint8_t> data(fileLen);
+            size_t got = fileLen ? std::fread(data.data(), 1, fileLen, f) : 0;
+            for (size_t i = 0; i < got; ++i)
+                mem_.pokeByte(static_cast<uint16_t>(load + i), data[i]);
+        }
+        std::fclose(f);
+        return respond(RSP_OK);
+    }
+
+    default:
+        // Unknown command: let the ROM handler run (safe fallback).
+        return false;
+    }
 }
 
 // ---- I/O register dispatch --------------------------------------------------
