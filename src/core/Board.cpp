@@ -74,10 +74,14 @@ void Board::timerSetMode(uint8_t mode) {
     timerPeriod_ = TIMER_BASE_PERIOD;
     if (mode & TIM_DIV16) timerPeriod_ *= 16;
     if (mode & TIM_DIV4)  timerPeriod_ *= 4;
-    if (!(timerCsr_ & TIM_START) && (mode & TIM_START)) {
-        timerCount_ = timerLimit_;   // preload on start
-        timerStart_ = totalTicks_;
-    }
+    // Real BK behaviour (verified against the GID BKemu core, CCPU::SetSysRegs):
+    // ANY write to the control register reloads the counter from the limit — not
+    // only on a stopped→running transition. Games rely on this to re-arm the
+    // period while the timer keeps running: e.g. VALLEY.BIN's note player writes
+    // limit = counter + note_period then rewrites the control register every note,
+    // so the reload here is what makes the note period set the tone pitch.
+    timerCount_ = timerLimit_;
+    timerStart_ = totalTicks_;
     timerCsr_ = mode;
 }
 
