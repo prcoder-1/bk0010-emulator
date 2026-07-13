@@ -46,17 +46,23 @@ void Board::timerCheck() {
     if ((timerCsr_ & TIM_ONCE) && !(timerCsr_ & TIM_CONTINUOUS)) {
         timerCount_ = 0;
         timerCsr_ &= ~TIM_START;   // one-shot: stop
-    } else if (timerCsr_ & TIM_CONTINUOUS) {
+    } else if ((timerCsr_ & TIM_CONTINUOUS) || timerLimit_ == 0) {
         // Free-running: the counter wraps through zero (mod 2^16), no reload.
+        // This also covers reload mode with a ZERO limit: a period of one is not a
+        // meaningful reload interval, so the counter behaves as a full 16-bit
+        // down-counter and reads negative (bit 15) in its upper half. Games use
+        // that sign bit as a pacer — e.g. VALLEY.BIN sets limit 0 and its map-music
+        // loop spins on `TST @#177710; BPL` until the counter goes negative.
+        // Matches the reference bk/timer.c (`timer_count = timer_setup - delta`).
         timerCount_ = static_cast<uint16_t>(static_cast<uint32_t>(timerCount_)
                                             - static_cast<uint32_t>(delta));
         timerStart_ += delta * timerPeriod_;
     } else {
-        // Reload mode: on each underflow the counter reloads from the limit.
-        // `delta` may span many periods (e.g. a long busy loop between register
-        // reads), so fold it modulo one full period — otherwise `limit - delta`
-        // would underflow to a huge value and the next poll loop would appear to
-        // hang for seconds.
+        // Reload mode (limit > 0): on each underflow the counter reloads from the
+        // limit. `delta` may span many periods (e.g. a long busy loop between
+        // register reads), so fold it modulo one full period — otherwise
+        // `limit - delta` would underflow to a huge value and the next poll loop
+        // would appear to hang for seconds (Digger frame pacer, commit 1d4128b).
         uint32_t period = static_cast<uint32_t>(timerLimit_) + 1;   // limit..0 inclusive
         uint32_t rem = static_cast<uint32_t>((delta - timerCount_) % period);
         timerCount_ = static_cast<uint16_t>(timerLimit_ - rem);
