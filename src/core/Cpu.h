@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include "Memory.h"
 
 namespace bk {
@@ -47,6 +48,11 @@ public:
     uint16_t sp() const { return r[6]; }
     uint16_t lastBranch() const { return lastBranch_; }
 
+    // Hook for intercepting EMT 36 (tape/disk file I/O). Called when an
+    // `EMT 036` instruction executes; if it returns true the call is considered
+    // handled and the ROM handler (vector 030) is skipped. See Board::handleEmt36.
+    void setEmt36Hook(std::function<bool()> h) { emt36Hook_ = std::move(h); }
+
 private:
     Memory& mem_;
     uint16_t ir_ = 0;          // current instruction register
@@ -54,6 +60,7 @@ private:
     uint16_t lastBranch_ = 0;  // PC of the last control-flow instruction
     bool halted_ = false;
     bool waiting_ = false;
+    std::function<bool()> emt36Hook_;  // EMT 36 intercept (true = handled, skip ROM)
 
     // Instruction-field accessors (bits of ir_).
     int srcMode() const { return (ir_ & 07000) >> 9; }
