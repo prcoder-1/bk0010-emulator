@@ -47,6 +47,7 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     QMenu* emu = menuBar()->addMenu("&Эмуляция");
     emu->addAction("&Сброс", this, &MainWindow::resetMachine, QKeySequence("Ctrl+R"));
     emu->addAction("Режим &цвет/ч-б", this, &MainWindow::toggleColorMode, QKeySequence("F10"));
+    emu->addAction("&Пауза", this, [this]{ setSuspended(!suspended_); }, QKeySequence(Qt::Key_Pause));
     emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_); }, QKeySequence("F12"));
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
@@ -84,7 +85,7 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::onTick() {
-    if (!paused_) {
+    if (!paused_ && !suspended_) {
         // Feed one buffered key into the register once it is free, so the BK
         // controller sees a stream of single codes just like real hardware.
         if (!keyFeed_.empty() && !board_->keyReady()) {
@@ -126,6 +127,19 @@ void MainWindow::setPaused(bool paused) {
     heldKeys_.clear();
     board_->setKeyHeld(false);
     renderScreen();
+}
+
+// Simple pause via the Pause key: freezes the 50 Hz emulation loop without the
+// Soft-ICE overlay. The last frame stays on screen; the status bar shows PAUSED.
+void MainWindow::setSuspended(bool suspended) {
+    suspended_ = suspended;
+    // Drop any held/buffered keys so nothing is stuck down or replayed on resume.
+    heldKeys_.clear();
+    keyFeed_.clear();
+    board_->setKeyHeld(false);
+    if (!paused_)  // don't fight the debugger for the status line
+        status_->setText(suspended_ ? "ПАУЗА — нажмите Pause для продолжения"
+                                     : "Выполнение");
 }
 
 void MainWindow::stepInto() {
@@ -202,6 +216,12 @@ void MainWindow::toggleColorMode() {
 void MainWindow::keyPressEvent(QKeyEvent* e) {
     // F12 toggles the debugger regardless of state.
     if (e->key() == Qt::Key_F12) { setPaused(!paused_); e->accept(); return; }
+    // Pause key toggles the simple emulation freeze.
+    if (e->key() == Qt::Key_Pause) { setSuspended(!suspended_); e->accept(); return; }
+
+    // While suspended, swallow all other keys so nothing reaches the game or the
+    // key buffer (they'd otherwise be replayed on resume).
+    if (suspended_ && !paused_) { e->accept(); return; }
 
     // Track the physical key-down state (ignoring auto-repeat) so 0177716 bit 6
     // stays low while a key is held — games poll it to detect input.

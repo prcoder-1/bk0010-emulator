@@ -43,6 +43,7 @@ private:
     void updateTitle();
     void renderScreen();
     void setPaused(bool paused);
+    void setSuspended(bool suspended);   // simple pause (Pause key), no debugger
     void stepInto();
     void stepOver();
 
@@ -64,5 +65,6 @@ private:
     // stays low while any game key is held — polled by games like Digger.
     std::set<int> heldKeys_;
     bool colorMode_ = true;
-    bool paused_ = false;
+    bool paused_ = false;       // Soft-ICE debugger overlay active
+    bool suspended_ = false;    // emulation frozen via the Pause key
 };
