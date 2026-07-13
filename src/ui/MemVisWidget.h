@@ -18,6 +18,7 @@ public:
     bool color = true;
     bool heatmap = true;
     bool hideRom = true;    // hide the ROM region (0100000..0177777); RAM only by default
+    bool hideScreen = false; // blank out the video RAM region (0040000..0077777)
     int startAddr = 0;
     int bytesPerRow = 64;
 protected:

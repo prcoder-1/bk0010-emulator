@@ -129,6 +129,16 @@ static int runHeadless(const QString& romDir, const QString& bin,
         QString withRomPath = memvisShot; withRomPath.replace(".png", "_withrom.png");
         cv.grab().save(withRomPath);
         std::printf("headless: wrote memvis (RAM+ROM) %s\n", qPrintable(withRomPath));
+        // Verification: video RAM hidden and ROM shown — the ROM compacts up to
+        // fill the space the screen would occupy, and the image fills the window
+        // (no blank gap for the hidden region).
+        MemCanvas cs(&board);
+        cs.resize(560, 640);
+        cs.hideScreen = true;
+        cs.hideRom = false;
+        QString noScreenPath = memvisShot; noScreenPath.replace(".png", "_noscreen.png");
+        cs.grab().save(noScreenPath);
+        std::printf("headless: wrote memvis (screen hidden, ROM shown) %s\n", qPrintable(noScreenPath));
     }
     if (!cgShot.isEmpty()) {
         CodeGraphWidget w(&board);

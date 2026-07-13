@@ -1,6 +1,7 @@
 #include "MemVisWidget.h"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include "Board.h"
 #include <QPainter>
 #include <QImage>
@@ -38,28 +39,36 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     int pxPerByte = (bpp == 1) ? 8 : (bpp == 4 ? 2 : 1);
     int imgW = bytesPerRow * pxPerByte;
     if (imgW <= 0) return;
-    // With ROM hidden, only RAM (0..0100000) is drawn and fills the whole window;
-    // with ROM shown, the full 64 KB is drawn (so everything appears smaller).
-    const int romStart = 0100000;
-    int endAddr = (hideRom && startAddr < romStart) ? romStart : 0x10000;
-    int rows = (endAddr - startAddr + bytesPerRow - 1) / bytesPerRow;
+
+    // Build the sequence of *visible* byte addresses, compacting out the hidden
+    // regions (ROM and/or video RAM). Hidden memory takes up no space in the view:
+    // the remaining bytes are laid out contiguously and the image is scaled to
+    // fill the whole window. So with the screen hidden, ROM (if shown) moves up to
+    // occupy that space instead of leaving a blank gap.
+    const int scrStart = 0040000, romStart = 0100000;
+    std::vector<uint16_t> vis;
+    vis.reserve(static_cast<size_t>(0x10000 - startAddr));
+    int scrBoundary = -1, romBoundary = -1; // compacted index where each region begins
+    for (int a = startAddr; a < 0x10000; ++a) {
+        uint16_t a16 = static_cast<uint16_t>(a);
+        if (hideRom && mem.isRom(a16)) continue;
+        if (hideScreen && a16 >= scrStart && a16 < romStart) continue;
+        if (a16 == scrStart) scrBoundary = static_cast<int>(vis.size());
+        if (a16 == romStart) romBoundary = static_cast<int>(vis.size());
+        vis.push_back(a16);
+    }
+    if (vis.empty()) return;
+
+    int rows = (static_cast<int>(vis.size()) + bytesPerRow - 1) / bytesPerRow;
     if (rows < 1) rows = 1;
     int imgH = rows;
     QImage img(imgW, imgH, QImage::Format_RGB32);
+    img.fill(qRgb(0, 0, 0)); // trailing bytes of the last partial row stay black
 
-    for (int row = 0; row < rows; ++row) {
-        for (int bx = 0; bx < bytesPerRow; ++bx) {
-            int addr = startAddr + row * bytesPerRow + bx;
-            if (addr >= 0x10000) { addr = 0xFFFF; }
-            uint16_t a16 = static_cast<uint16_t>(addr);
-
-            // Optionally blank out the ROM region so only RAM activity is shown.
-            if (hideRom && mem.isRom(a16)) {
-                int px0 = bx * pxPerByte;
-                for (int k = 0; k < pxPerByte; ++k) img.setPixel(px0 + k, row, qRgb(0, 0, 0));
-                continue;
-            }
-
+    for (int idx = 0; idx < static_cast<int>(vis.size()); ++idx) {
+        {
+            int row = idx / bytesPerRow, bx = idx % bytesPerRow;
+            uint16_t a16 = vis[idx];
             uint8_t byte = mem.peekByte(a16);
 
             // Recency of read / write / execute for this byte (1 = just now).
@@ -125,10 +134,15 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     QImage scaled = img.scaled(width(), height(), Qt::IgnoreAspectRatio, Qt::FastTransformation);
     p.drawImage(0, 0, scaled);
 
-    // Highlight the video RAM region boundary (0040000..0100000).
-    p.setPen(QColor(80, 160, 255, 120));
-    double yv = double(0040000 - startAddr) / (bytesPerRow) / imgH * height();
-    if (yv >= 0 && yv < height()) p.drawLine(0, int(yv), width(), int(yv));
+    // Mark the region boundaries at their compacted positions: video RAM start
+    // (blue) and ROM start (orange). Skipped regions have no boundary to draw.
+    auto boundary = [&](int idx, QColor c) {
+        if (idx <= 0) return;
+        double y = double(idx) / bytesPerRow / imgH * height();
+        if (y >= 0 && y < height()) { p.setPen(c); p.drawLine(0, int(y), width(), int(y)); }
+    };
+    boundary(scrBoundary, QColor(80, 160, 255, 120));  // 0040000 video RAM
+    boundary(romBoundary, QColor(255, 160, 80, 120));  // 0100000 ROM
 }
 
 MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
@@ -139,6 +153,7 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     auto* mode = new QComboBox; mode->addItems({"Ч/Б", "Цвет"}); mode->setCurrentIndex(1);
     auto* heat = new QCheckBox("Тепловая карта"); heat->setChecked(true);
     auto* showRom = new QCheckBox("Показать ПЗУ"); // ROM hidden by default
+    auto* showScreen = new QCheckBox("Показать экран"); showScreen->setChecked(true); // video RAM shown by default
     auto* addr = new QSpinBox; addr->setRange(0, 0xFFFF); addr->setDisplayIntegerBase(8);
     addr->setPrefix("адрес 0"); addr->setSingleStep(0100); addr->setValue(0);
     auto* row = new QSpinBox; row->setRange(8, 512); row->setValue(64); row->setPrefix("шир ");
@@ -148,6 +163,7 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
         canvas_->color = (mode->currentIndex() == 1);
         canvas_->heatmap = heat->isChecked();
         canvas_->hideRom = !showRom->isChecked();
+        canvas_->hideScreen = !showScreen->isChecked();
         canvas_->startAddr = addr->value();
         canvas_->bytesPerRow = row->value();
         canvas_->update();
@@ -156,12 +172,14 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     connect(mode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [=](int){ apply(); });
     connect(heat, &QCheckBox::toggled, this, [=](bool){ apply(); });
     connect(showRom, &QCheckBox::toggled, this, [=](bool){ apply(); });
+    connect(showScreen, &QCheckBox::toggled, this, [=](bool){ apply(); });
     connect(addr, QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
     connect(row,  QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
 
     auto* controls = new QHBoxLayout;
     controls->addWidget(new QLabel("бит/пиксель:")); controls->addWidget(bpp);
     controls->addWidget(mode); controls->addWidget(heat); controls->addWidget(showRom);
+    controls->addWidget(showScreen);
     controls->addWidget(addr); controls->addWidget(row);
     controls->addStretch();
 
