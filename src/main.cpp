@@ -78,7 +78,8 @@ static int runHeadless(const QString& romDir, const QString& bin,
         return 2;
     }
     board.reset();
-    if (!memvisShot.isEmpty() || !cgShot.isEmpty() || !caShot.isEmpty() || !hcShot.isEmpty())
+    if (!memvisShot.isEmpty() || !cgShot.isEmpty() || !caShot.isEmpty() || !hcShot.isEmpty()
+        || !dbgShot.isEmpty())
         board.trace().setEnabled(true);
     // Let the monitor ROM initialise (vectors, stack, display driver) before
     // jumping into a game.
