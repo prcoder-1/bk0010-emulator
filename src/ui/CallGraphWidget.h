@@ -46,7 +46,11 @@ private:
         double   x, y;       // centre-x, top-y in graph coordinates
         QRectF   box;        // cached rectangle in graph coordinates
     };
-    struct Edge { uint16_t from, to; uint64_t weight; };
+    struct Edge {
+        uint16_t from, to;
+        uint64_t weight;
+        std::vector<QPointF> bends;  // routing channel points (dummy-node centres)
+    };
 
     // A node in the nested-treemap ("callee map") view: functions of the call
     // tree, area ∝ subtree cost, callees nested inside callers.
@@ -75,6 +79,10 @@ private:
     std::vector<TNode> tree_;       // treemap call tree (tree_[0] = virtual root)
     std::unordered_map<uint16_t, int> nodeIndex_;  // entry → index into nodes_
     std::set<uint16_t> hidden_;     // functions purged by the user (Delete/Backspace)
+    std::unordered_map<uint16_t, QPointF> manualPos_;  // user-dragged node positions
+    bool     draggingNode_ = false; // a box is being dragged (not the canvas)
+    uint16_t dragEntry_ = 0;        // which node (by entry) is being dragged
+    QPointF  dragOffset_;           // cursor→node-anchor offset at grab (graph coords)
     int mode_ = ModeGraph;
     uint64_t maxCost_ = 1, totalCost_ = 1, maxWeight_ = 1;
 

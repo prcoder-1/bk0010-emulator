@@ -57,7 +57,8 @@ void CallGraphWidget::refresh() {
     // GUI caller already gates this on isVisible(); headless callers drive it
     // directly.
     uint32_t now = board_->trace().now();
-    if (nodes_.empty() || now - lastBuild_ >= 50) { rebuild(); lastBuild_ = now; }
+    // Don't reorder nodes_ while the user is dragging a box (indices must stay put).
+    if (!draggingNode_ && (nodes_.empty() || now - lastBuild_ >= 50)) { rebuild(); lastBuild_ = now; }
     update();
 }
 
@@ -173,48 +174,84 @@ void CallGraphWidget::rebuild() {
     int maxLevel = 0;
     for (auto& n : nodes_) maxLevel = std::max(maxLevel, n.level);
 
-    // Adjacency (parents/children) for barycenter ordering.
-    std::vector<std::vector<int>> parents(N), children(N);
-    for (auto& e : edges_) {
-        int ci = nodeIndex_[e.from], ti = nodeIndex_[e.to];
-        children[ci].push_back(ti);
-        parents[ti].push_back(ci);
+    // 6. Layered layout with a dummy node on every level a long (multi-level)
+    //    forward edge crosses, so such edges are routed through channels between
+    //    boxes instead of passing under them.
+    struct LP { double x = 0; int level = 0; int real = -1; };  // real≥0 → nodes_ index
+    std::vector<LP> lp(N);
+    for (int i = 0; i < N; ++i) lp[i] = { 0.0, nodes_[i].level, i };
+
+    std::vector<std::vector<int>> path(edges_.size());   // lp-index chain per edge
+    for (size_t ei = 0; ei < edges_.size(); ++ei) {
+        int u = nodeIndex_[edges_[ei].from], v = nodeIndex_[edges_[ei].to];
+        int lu = nodes_[u].level, lv = nodes_[v].level;
+        path[ei].push_back(u);
+        for (int L = lu + 1; L < lv; ++L) {              // forward, multi-level only
+            int d = (int)lp.size(); lp.push_back({ 0.0, L, -1 });
+            path[ei].push_back(d);
+        }
+        path[ei].push_back(v);
     }
+    const int T = (int)lp.size();
 
-    // 6. Order nodes within each level (start by cost, then barycenter passes to
-    //    pull children under their parents) and assign coordinates.
-    std::vector<std::vector<int>> byLevel(maxLevel + 1);
-    for (int i = 0; i < N; ++i) byLevel[nodes_[i].level].push_back(i);
-    for (auto& lv : byLevel)
-        std::sort(lv.begin(), lv.end(), [&](int a, int b) { return nodes_[a].cost > nodes_[b].cost; });
+    // Up/down adjacency over adjacent-level links (for barycenter ordering).
+    std::vector<std::vector<int>> up(T), down(T);
+    for (auto& pth : path)
+        for (size_t k = 0; k + 1 < pth.size(); ++k) {
+            int aa = pth[k], bb = pth[k + 1];
+            if (lp[aa].level + 1 == lp[bb].level) { down[aa].push_back(bb); up[bb].push_back(aa); }
+        }
 
+    // Order each layer: real nodes first by cost, then barycenter passes.
+    std::vector<std::vector<int>> layer(maxLevel + 1);
+    for (int i = 0; i < T; ++i) layer[lp[i].level].push_back(i);
+    auto costOf = [&](int i) { return lp[i].real >= 0 ? (double)nodes_[lp[i].real].cost : -1.0; };
+    for (auto& lyr : layer)
+        std::sort(lyr.begin(), lyr.end(), [&](int a, int b) { return costOf(a) > costOf(b); });
+
+    const double DUMMY_W = 18.0;
+    auto widthOf = [&](int i) { return lp[i].real >= 0 ? BOX_W : DUMMY_W; };
     auto assignX = [&]() {
         for (int L = 0; L <= maxLevel; ++L) {
-            int n = (int)byLevel[L].size();
-            double total = n * BOX_W + (n - 1) * H_GAP;
-            double x0 = -total / 2 + BOX_W / 2;
-            for (int i = 0; i < n; ++i) {
-                nodes_[byLevel[L][i]].x = x0 + i * (BOX_W + H_GAP);
-                nodes_[byLevel[L][i]].y = L * V_GAP;
-            }
+            auto& lyr = layer[L];
+            double total = H_GAP * std::max(0, (int)lyr.size() - 1);
+            for (int i : lyr) total += widthOf(i);
+            double x = -total / 2;
+            for (int i : lyr) { double w = widthOf(i); lp[i].x = x + w / 2; x += w + H_GAP; }
         }
     };
     assignX();
     auto meanX = [&](const std::vector<int>& adj, double cur) {
         if (adj.empty()) return cur;
-        double s = 0; for (int k : adj) s += nodes_[k].x; return s / adj.size();
+        double s = 0; for (int k : adj) s += lp[k].x; return s / adj.size();
     };
-    for (int pass = 0; pass < 4; ++pass) {
+    for (int pass = 0; pass < 6; ++pass) {
         for (int L = 1; L <= maxLevel; ++L)
-            std::stable_sort(byLevel[L].begin(), byLevel[L].end(),
-                             [&](int a, int b) { return meanX(parents[a], nodes_[a].x) < meanX(parents[b], nodes_[b].x); });
+            std::stable_sort(layer[L].begin(), layer[L].end(),
+                             [&](int a, int b) { return meanX(up[a], lp[a].x) < meanX(up[b], lp[b].x); });
         assignX();
         for (int L = maxLevel - 1; L >= 0; --L)
-            std::stable_sort(byLevel[L].begin(), byLevel[L].end(),
-                             [&](int a, int b) { return meanX(children[a], nodes_[a].x) < meanX(children[b], nodes_[b].x); });
+            std::stable_sort(layer[L].begin(), layer[L].end(),
+                             [&](int a, int b) { return meanX(down[a], lp[a].x) < meanX(down[b], lp[b].x); });
         assignX();
     }
-    for (auto& n : nodes_) n.box = QRectF(n.x - BOX_W / 2, n.y, BOX_W, BOX_H);
+
+    // Write back real-node coordinates and per-edge routing bends.
+    for (int i = 0; i < N; ++i) { nodes_[i].x = lp[i].x; nodes_[i].y = nodes_[i].level * V_GAP; }
+    for (size_t ei = 0; ei < edges_.size(); ++ei) {
+        edges_[ei].bends.clear();
+        for (size_t k = 1; k + 1 < path[ei].size(); ++k) {
+            int d = path[ei][k];
+            edges_[ei].bends.push_back(QPointF(lp[d].x, lp[d].level * V_GAP + BOX_H / 2));
+        }
+    }
+
+    // Apply the user's manual placements, then cache box rectangles.
+    for (auto& n : nodes_) {
+        auto it = manualPos_.find(n.entry);
+        if (it != manualPos_.end()) { n.x = it->second.x(); n.y = it->second.y(); }
+        n.box = QRectF(n.x - BOX_W / 2, n.y, BOX_W, BOX_H);
+    }
 
     buildTree();
 }
@@ -442,7 +479,7 @@ void CallGraphWidget::paintEvent(QPaintEvent*) {
     p.setPen(QColor(120, 130, 150));
     p.drawText(10, height() - 8, QString::fromUtf8(mode_ == ModeTree
         ? "Tab — граф вызовов · клик — дизасм · Del — убрать потемневшие"
-        : "Tab — карта · колесо — масштаб · клик — дизасм · +/- топ-N · 0 — вписать · Del — убрать потемневшие"));
+        : "Tab — карта · тащить блок — двигать, фон — панорама · колесо — масштаб · L — авто-раскладка · Del — убрать · клик — дизасм"));
 }
 
 void CallGraphWidget::paintGraph(QPainter& p) {
@@ -510,7 +547,20 @@ void CallGraphWidget::paintGraph(QPainter& p) {
         ec.setAlpha(150 + int(90 * t));
 
         QPainterPath path(p1);
-        path.cubicTo(c1, c2, pB);
+        if (!back && !e.bends.empty()) {
+            // Route a smooth spline through the layout's channel points (dummy
+            // nodes) so a multi-level edge passes between boxes, not under them.
+            std::vector<QPointF> pts; pts.push_back(p1);
+            for (const QPointF& bd : e.bends) pts.push_back(vt.map(bd));
+            pts.push_back(pB);
+            for (size_t k = 0; k + 1 < pts.size(); ++k) {
+                QPointF s = pts[k], d2 = pts[k + 1];
+                double dy = d2.y() - s.y();
+                path.cubicTo(s + QPointF(0, dy * 0.4), d2 - QPointF(0, dy * 0.4), d2);
+            }
+        } else {
+            path.cubicTo(c1, c2, pB);
+        }
         path.lineTo(aBase);                               // straight run into the head
         p.setPen(QPen(ec, std::max(1.0, w), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         p.setBrush(Qt::NoBrush);
@@ -525,7 +575,9 @@ void CallGraphWidget::paintGraph(QPainter& p) {
         // Call-count label at the curve midpoint (skip when zoomed too far out to
         // keep it readable / uncluttered).
         if (zoom_ >= 0.30) {
-            QPointF mid = 0.125 * p1 + 0.375 * c1 + 0.375 * c2 + 0.125 * pB;
+            QPointF mid = (!back && !e.bends.empty())
+                ? vt.map(e.bends[e.bends.size() / 2])
+                : 0.125 * p1 + 0.375 * c1 + 0.375 * c2 + 0.125 * pB;
             QString lbl = cgCount(e.weight);
             QFont ef = mono; ef.setPixelSize(std::clamp(int(10 * zoom_), 7, 12));
             p.setFont(ef);
@@ -606,13 +658,36 @@ void CallGraphWidget::wheelEvent(QWheelEvent* e) {
 }
 
 void CallGraphWidget::mousePressEvent(QMouseEvent* e) {
-    if (e->button() == Qt::LeftButton) {
-        dragging_ = true; pressPos_ = lastDrag_ = e->pos();
+    if (e->button() != Qt::LeftButton) return;
+    pressPos_ = lastDrag_ = e->pos();
+    draggingNode_ = false;
+    dragging_ = false;
+    // In the graph view, grab a box under the cursor to move it; empty space pans.
+    if (mode_ == ModeGraph) {
+        QPointF g = viewTransform().inverted().map(QPointF(e->pos()));
+        for (int i = (int)nodes_.size() - 1; i >= 0; --i)
+            if (nodes_[i].box.contains(g)) {
+                draggingNode_ = true;
+                dragEntry_ = nodes_[i].entry;
+                dragOffset_ = g - QPointF(nodes_[i].x, nodes_[i].y);
+                fitView_ = false;   // keep the view still while arranging
+                return;
+            }
     }
+    dragging_ = true;   // pan the canvas
 }
 
 void CallGraphWidget::mouseMoveEvent(QMouseEvent* e) {
-    if (dragging_) {
+    if (draggingNode_) {
+        auto it = nodeIndex_.find(dragEntry_);
+        if (it == nodeIndex_.end()) { draggingNode_ = false; return; }
+        QPointF np = viewTransform().inverted().map(QPointF(e->pos())) - dragOffset_;
+        Node& n = nodes_[it->second];
+        n.x = np.x(); n.y = np.y();
+        n.box = QRectF(n.x - BOX_W / 2, n.y, BOX_W, BOX_H);
+        manualPos_[dragEntry_] = np;     // survives rebuilds; edges follow the box
+        update();
+    } else if (dragging_) {
         fitView_ = false;
         pan_ += e->pos() - lastDrag_;
         lastDrag_ = e->pos();
@@ -622,8 +697,11 @@ void CallGraphWidget::mouseMoveEvent(QMouseEvent* e) {
 
 void CallGraphWidget::mouseReleaseEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return;
+    bool wasNode = draggingNode_;
     dragging_ = false;
+    draggingNode_ = false;
     if ((e->pos() - pressPos_).manhattanLength() > 4) return;   // was a drag
+    if (wasNode) { emit addressPicked(dragEntry_); return; }     // click on a box
     // Click: hit-test a box and jump the disassembler to that routine.
     if (mode_ == ModeTree) {
         // Deepest (most specific) rectangle under the cursor wins.
@@ -662,6 +740,9 @@ void CallGraphWidget::keyPressEvent(QKeyEvent* e) {
         topN_ = std::max(topN_ - 10, 10); rebuild(); update(); break;
     case Qt::Key_0:
         fitView_ = true; update(); break;
+    case Qt::Key_L:
+        // Re-layout automatically: discard manual placements.
+        manualPos_.clear(); rebuild(); fitView_ = true; update(); break;
     case Qt::Key_Delete: case Qt::Key_Backspace: {
         // Purge the fully-darkened (long-idle) functions from the graph.
         bk::Trace& tr = board_->trace();
