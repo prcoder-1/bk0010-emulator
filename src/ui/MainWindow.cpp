@@ -3,6 +3,7 @@
 #include "DebuggerOverlay.h"
 #include "MemVisWidget.h"
 #include "CodeGraphWidget.h"
+#include "HotChartWidget.h"
 #include "AudioOut.h"
 #include "Disasm.h"
 #include <vector>
@@ -53,6 +54,7 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
     dbg->addAction("&Граф кода / горячие точки…", this, &MainWindow::openCodeGraph, QKeySequence("Ctrl+G"));
+    dbg->addAction("Горячие инструкции во &времени…", this, &MainWindow::openHotChart, QKeySequence("Ctrl+H"));
     dbg->addSeparator();
     dbg->addAction("&Сохранить состояние…", this, &MainWindow::saveState, QKeySequence("Ctrl+S"));
     dbg->addAction("В&осстановить состояние…", this, &MainWindow::loadState, QKeySequence("Ctrl+L"));
@@ -102,6 +104,7 @@ void MainWindow::onTick() {
     if (paused_) overlay_->update();
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
     if (codegraph_ && codegraph_->isVisible()) codegraph_->refresh();
+    if (hotchart_ && hotchart_->isVisible()) hotchart_->refresh();
 }
 
 void MainWindow::renderScreen() {
@@ -296,6 +299,21 @@ void MainWindow::openCodeGraph() {
     board_->trace().setEnabled(true);
     codegraph_->show();
     codegraph_->raise();
+}
+
+void MainWindow::openHotChart() {
+    if (!hotchart_) {
+        hotchart_ = new HotChartWidget(board_.get());
+        // Clicking a legend row jumps the debugger's disassembler to that address.
+        connect(hotchart_, &HotChartWidget::addressPicked, this, [this](uint16_t addr) {
+            if (!paused_) setPaused(true);
+            overlay_->setDisasmAddr(addr);
+            overlay_->update();
+        });
+    }
+    board_->trace().setEnabled(true);
+    hotchart_->show();
+    hotchart_->raise();
 }
 
 void MainWindow::saveState() {

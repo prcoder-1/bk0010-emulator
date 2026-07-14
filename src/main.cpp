@@ -12,6 +12,7 @@
 #include "ui/DebuggerOverlay.h"
 #include "ui/MemVisWidget.h"
 #include "ui/CodeGraphWidget.h"
+#include "ui/HotChartWidget.h"
 #include "ui/BkKeymap.h"
 #include "mcp/McpServer.h"
 #include "Board.h"
@@ -61,6 +62,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
                        int frames, bool color, const QString& shot,
                        int keyCode, int keyFrame, const QString& dbgShot,
                        const QString& memvisShot, const QString& cgShot,
+                       const QString& hcShot,
                        const QString& typeStr, const QString& keysList) {
     // Parse "frame:code,frame:code,..." into precisely-timed key injections.
     std::vector<std::pair<int,int>> keys;
@@ -74,7 +76,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
         return 2;
     }
     board.reset();
-    if (!memvisShot.isEmpty() || !cgShot.isEmpty()) board.trace().setEnabled(true);
+    if (!memvisShot.isEmpty() || !cgShot.isEmpty() || !hcShot.isEmpty()) board.trace().setEnabled(true);
     // Let the monitor ROM initialise (vectors, stack, display driver) before
     // jumping into a game.
     for (int i = 0; i < 25; ++i) board.runFrame();
@@ -158,6 +160,15 @@ static int runHeadless(const QString& romDir, const QString& bin,
         w.grab().save(zoomPath);
         std::printf("headless: wrote manual codegraph %s\n", qPrintable(zoomPath));
     }
+    if (!hcShot.isEmpty()) {
+        // Build a real time-series: interleave running frames with the widget's
+        // sampler so its history fills up as if driven by the 50 Hz GUI loop.
+        HotChartWidget w(&board);
+        w.resize(880, 480);
+        for (int k = 0; k < 500; ++k) { board.runFrame(); w.refresh(); }
+        w.grab().save(hcShot);
+        std::printf("headless: wrote hot chart %s\n", qPrintable(hcShot));
+    }
 
     // Report speaker sample activity (verifies the audio sample path).
     {
@@ -225,7 +236,7 @@ int main(int argc, char** argv) {
     if (qEnvironmentVariableIsSet("BK_ROM_DIR"))
         romDir = qEnvironmentVariable("BK_ROM_DIR");
 
-    QString binToLoad, shot, dbgShot, memvisShot, cgShot, typeStr, keysList;
+    QString binToLoad, shot, dbgShot, memvisShot, cgShot, hcShot, typeStr, keysList;
     int frames = 0, keyCode = -1, keyFrame = 0;
     bool color = true, headless = false;
     const QStringList args = app.arguments();
@@ -236,6 +247,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--dbgshot" && i + 1 < args.size()) { dbgShot = args[++i]; headless = true; }
         else if (args[i] == "--memvis" && i + 1 < args.size()) { memvisShot = args[++i]; headless = true; }
         else if (args[i] == "--codegraph" && i + 1 < args.size()) { cgShot = args[++i]; headless = true; }
+        else if (args[i] == "--hotchart" && i + 1 < args.size()) { hcShot = args[++i]; headless = true; }
         else if (args[i] == "--mono") color = false;
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
         else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
@@ -249,7 +261,7 @@ int main(int argc, char** argv) {
 
     if (headless)
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
-                           dbgShot, memvisShot, cgShot, typeStr, keysList);
+                           dbgShot, memvisShot, cgShot, hcShot, typeStr, keysList);
 
     MainWindow w(romDir);
     w.show();

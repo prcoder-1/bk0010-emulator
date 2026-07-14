@@ -229,11 +229,17 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     // so it tracks the currently-active code rather than everything ever run.
     const int GRAPH_WINDOW = 300; // frames (~6 s at 50 Hz) since last execution
     // Raw executed instructions in address order (also feeds the hot list).
+    // Alongside, accumulate the total CPU time (execution count × per-instruction
+    // ticks) over *all* executed code, so the hot list can show each instruction's
+    // share of total CPU time as a percentage.
     std::vector<std::pair<uint16_t, uint32_t>> raw; // (addr, count)
+    uint64_t totalTicks = 0;
+    bk::Cpu& cpu = board_->cpu();
     for (int a = 0; a < 0x10000; a += 2) {
         uint16_t a16 = static_cast<uint16_t>(a);
-        if (excluded_.count(a16)) continue;   // user-hidden (right-click)
         uint32_t c = tr.execCount(a16);
+        if (c) totalTicks += static_cast<uint64_t>(c) * cpu.instrTicks(mem.peekWord(a16));
+        if (excluded_.count(a16)) continue;   // user-hidden (right-click)
         if (c && tr.fade(tr.lastExec(a16), GRAPH_WINDOW) > 0.0)
             raw.push_back({a16, c});
     }
@@ -465,8 +471,8 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     int listX = g.right() + margin;
     p.setPen(QColor(200, 220, 255));
     p.drawText(listX, headerY, excluded_.empty()
-        ? QString("Горячие инструкции:")
-        : QString("Горячие инструкции:  (скрыто %1)").arg(excluded_.size()));
+        ? QString("Горячие инструкции (×вызовы, %% времени CPU):")
+        : QString("Горячие инструкции (×вызовы, %% CPU; скрыто %1):").arg(excluded_.size()));
     uint32_t top = hot.empty() ? 1 : hot[0].first;
     int y = headerY + lineH;
     // Keep the same `margin` gap from the right edge as the graph has on the left.
@@ -483,11 +489,16 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
         bk::DisasmLine d = bk::disasm(mem, a);
         char buf[8]; std::snprintf(buf, sizeof(buf), "%06o", a);
         p.setPen(QColor(230, 230, 200));
-        QString lineText = QString("%1 %2  ×%3")
-            .arg(buf).arg(QString::fromStdString(d.text)).arg(fmtCount(hot[i].first));
-        // Elide the middle (the instruction text) so the address and the ×count
-        // at the ends stay visible even when a line doesn't fully fit.
-        p.drawText(textX, y, fm.elidedText(lineText, Qt::ElideMiddle, textW));
+        // Right side: call count and the instruction's share of total CPU time.
+        uint64_t itks = static_cast<uint64_t>(hot[i].first) * cpu.instrTicks(mem.peekWord(a));
+        double pct = totalTicks ? 100.0 * double(itks) / double(totalTicks) : 0.0;
+        QString right = QString("×%1  %2%").arg(fmtCount(hot[i].first))
+                            .arg(pct, 0, 'f', pct >= 10.0 ? 0 : 1);
+        int rw = fm.horizontalAdvance(right);
+        // Left side: address + disassembly, elided to leave room for the counters.
+        QString left = QString("%1 %2").arg(buf).arg(QString::fromStdString(d.text));
+        p.drawText(textX, y, fm.elidedText(left, Qt::ElideRight, std::max(10, textW - rw - 8)));
+        p.drawText(listRight - rw, y, right);
         // Record the clickable row so a click scrolls the graph to this address.
         hotRows_.push_back({QRect(listX, y - fm.ascent(), listRight - listX, lineH), a});
         y += lineH;
