@@ -133,6 +133,11 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
             p.fillRect(lineRect, warm);
         }
         if (isPc) p.fillRect(lineRect, QColor(60, 60, 0, 160));
+        if ((int)a == link_) {   // linked highlight from another profiler window
+            p.fillRect(lineRect, QColor(255, 245, 150, 45));
+            p.setPen(QPen(QColor(255, 245, 150), 1.3)); p.setBrush(Qt::NoBrush);
+            p.drawRect(lineRect);
+        }
         p.setPen(isBp ? bpCol : fg);
         p.drawText(x, y, isBp ? "●" : (isPc ? "►" : " "));
         // raw words

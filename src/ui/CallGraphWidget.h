@@ -23,9 +23,12 @@ class CallGraphWidget : public QWidget {
 public:
     explicit CallGraphWidget(bk::Board* board, QWidget* parent = nullptr);
     void refresh();
+    // Linked highlighting: mark the routine at `addr` (-1 = none) as highlighted.
+    void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
 
 signals:
     void addressPicked(uint16_t addr);
+    void hoverAddress(int addr);   // routine under the cursor (-1 = none)
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -33,6 +36,7 @@ protected:
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
+    void leaveEvent(QEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
     bool event(QEvent*) override;          // intercept Tab (view toggle)
 
@@ -94,4 +98,6 @@ private:
     bool    fitView_ = true;        // auto-fit until the user pans/zooms
     bool    dragging_ = false;
     QPoint  pressPos_, lastDrag_;
+    int     link_ = -1;             // linked-highlight address (-1 = none)
+    int     hoverEmit_ = -2;        // last address broadcast via hoverAddress
 };

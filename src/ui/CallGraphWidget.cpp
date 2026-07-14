@@ -48,7 +48,7 @@ CallGraphWidget::CallGraphWidget(Board* board, QWidget* parent)
     : QWidget(parent), board_(board) {
     setMinimumSize(320, 240);
     setFocusPolicy(Qt::StrongFocus);
-    setMouseTracking(false);
+    setMouseTracking(true);   // hover → linked highlighting across profiler windows
 }
 
 void CallGraphWidget::refresh() {
@@ -416,7 +416,8 @@ void CallGraphWidget::paintTreeMap(QPainter& p) {
         double dk = 0.22 + 0.78 * vis;   // idle boxes darken (but stay visible)
         double frac = double(t.self) / double(maxCost_);
         QColor fill = dim(heatColor(frac), dk);
-        p.setPen(QPen(fill.darker(220), 1.0));
+        bool hl = ((int)t.entry == link_);
+        p.setPen(hl ? QPen(QColor(255, 245, 150), 2.0) : QPen(fill.darker(220), 1.0));
         p.setBrush(fill);
         p.drawRect(r);
 
@@ -621,11 +622,15 @@ void CallGraphWidget::paintGraph(QPainter& p) {
         double frac = double(n.cost) / double(maxCost_);
         double pct  = 100.0 * double(n.cost) / double(totalCost_);
         QColor fill = dim(heatColor(frac), dk);
-        p.setPen(QPen(fill.lighter(160), 1.4));
+        bool hl = ((int)n.entry == link_);
+        p.setPen(hl ? QPen(QColor(255, 245, 150), 2.5) : QPen(fill.lighter(160), 1.4));
         p.setBrush(fill);
         p.drawRoundedRect(r, 5, 5);
 
-        if (r.height() < 16) continue;   // too small to label
+        // Semantic zoom: at low zoom (fit view) boxes are tiny — skip labels and
+        // show just colour + heat, so the overview stays legible; detail appears
+        // as you zoom in (address+% below, then a disassembly preview).
+        if (r.height() < 16 || zoom_ < 0.55) continue;
         QFont nf = mono; nf.setPixelSize(std::clamp(int(11 * zoom_), 7, 15));
         p.setFont(nf);
         QFontMetrics fm(nf);
@@ -712,7 +717,19 @@ void CallGraphWidget::mouseMoveEvent(QMouseEvent* e) {
         pan_ += e->pos() - lastDrag_;
         lastDrag_ = e->pos();
         update();
+    } else if (mode_ == ModeGraph) {
+        // Hover → broadcast the routine under the cursor for linked highlighting.
+        QPointF g = viewTransform().inverted().map(QPointF(e->pos()));
+        int found = -1;
+        for (int i = (int)nodes_.size() - 1; i >= 0; --i)
+            if (nodes_[i].box.contains(g)) { found = nodes_[i].entry; break; }
+        if (found != hoverEmit_) { hoverEmit_ = found; setHighlight(found); emit hoverAddress(found); }
     }
+}
+
+void CallGraphWidget::leaveEvent(QEvent*) {
+    if (hoverEmit_ != -1) { hoverEmit_ = -1; emit hoverAddress(-1); }
+    setHighlight(-1);
 }
 
 void CallGraphWidget::mouseReleaseEvent(QMouseEvent* e) {
