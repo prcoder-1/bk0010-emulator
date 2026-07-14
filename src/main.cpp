@@ -13,6 +13,7 @@
 #include "ui/MemVisWidget.h"
 #include "ui/CodeGraphWidget.h"
 #include "ui/HotChartWidget.h"
+#include <QMouseEvent>
 #include "ui/BkKeymap.h"
 #include "mcp/McpServer.h"
 #include "Board.h"
@@ -168,6 +169,16 @@ static int runHeadless(const QString& romDir, const QString& bin,
         for (int k = 0; k < 500; ++k) { board.runFrame(); w.refresh(); }
         w.grab().save(hcShot);
         std::printf("headless: wrote hot chart %s\n", qPrintable(hcShot));
+        // Exercise the right-click "hide" on a legend row (a second grab lays out
+        // the legend; the header then shows "(скрыто 1)").
+        w.grab();
+        QMouseEvent rc(QEvent::MouseButtonPress, QPointF(650, 62),
+                       Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+        QApplication::sendEvent(&w, &rc);
+        for (int k = 0; k < 20; ++k) { board.runFrame(); w.refresh(); }
+        QString hidePath = hcShot; hidePath.replace(".png", "_hidden.png");
+        w.grab().save(hidePath);
+        std::printf("headless: wrote hot chart after hide %s\n", qPrintable(hidePath));
     }
 
     // Report speaker sample activity (verifies the audio sample path).

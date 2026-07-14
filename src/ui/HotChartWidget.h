@@ -37,18 +37,19 @@ protected:
 private:
     void sample();
     uint16_t funcOf(uint16_t addr) const;  // nearest subroutine entry <= addr (0 = none)
-    QColor colorForFunc(uint16_t entry);
 
     bk::Board* board_;
     int topN_ = 10;
     static constexpr int HIST = 320;         // samples retained (time-window width)
     static constexpr int SAMPLE_FRAMES = 4;  // emulated frames per sample (~12 Hz)
     uint32_t lastNow_ = 0;
+    uint64_t lastTotalTicks_ = 0;   // grand-total CPU ticks at the previous sample
 
-    struct Series { uint16_t addr; uint32_t last; std::deque<uint32_t> hist; uint32_t total; };
+    // hist = per-interval share of CPU time (%); total = cumulative call count;
+    // pctAll = cumulative share of total CPU time (%). last = previous call count.
+    struct Series { uint16_t addr; uint32_t last; std::deque<double> hist; uint32_t total; double pctAll; };
     std::vector<Series> series_;
     std::set<uint16_t> subEntries_;          // JSR destinations (function entries)
-    std::map<uint16_t, QColor> funcColor_;   // stable colour per function entry
-    int nextColor_ = 0;
+    std::set<uint16_t> excluded_;            // right-click-hidden instructions (Del resets)
     std::vector<std::pair<QRect, uint16_t>> legendRows_; // click hit-testing
 };
