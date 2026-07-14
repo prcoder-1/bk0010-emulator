@@ -35,6 +35,7 @@ set(APP_SOURCES
     src/ui/MemVisWidget.cpp
     src/ui/HotPathWidget.cpp
     src/ui/CallGraphWidget.cpp
+    src/ui/FlameWidget.cpp
     src/ui/HotChartWidget.cpp
     src/ui/AudioOut.cpp
     src/ui/BkKeymap.cpp

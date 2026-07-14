@@ -13,6 +13,7 @@
 #include "ui/MemVisWidget.h"
 #include "ui/HotPathWidget.h"
 #include "ui/CallGraphWidget.h"
+#include "ui/FlameWidget.h"
 #include "ui/HotChartWidget.h"
 #include <QMouseEvent>
 #include "ui/BkKeymap.h"
@@ -64,7 +65,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
                        int frames, bool color, const QString& shot,
                        int keyCode, int keyFrame, const QString& dbgShot,
                        const QString& memvisShot, const QString& hpShot,
-                       const QString& caShot, const QString& hcShot,
+                       const QString& caShot, const QString& faShot, const QString& hcShot,
                        const QString& typeStr, const QString& keysList) {
     // Parse "frame:code,frame:code,..." into precisely-timed key injections.
     std::vector<std::pair<int,int>> keys;
@@ -79,8 +80,9 @@ static int runHeadless(const QString& romDir, const QString& bin,
     }
     board.reset();
     if (!memvisShot.isEmpty() || !hpShot.isEmpty() || !caShot.isEmpty() || !hcShot.isEmpty()
-        || !dbgShot.isEmpty())
+        || !dbgShot.isEmpty() || !faShot.isEmpty())
         board.trace().setEnabled(true);
+    if (!faShot.isEmpty()) board.trace().setFlameEnabled(true);
     // Let the monitor ROM initialise (vectors, stack, display driver) before
     // jumping into a game.
     for (int i = 0; i < 25; ++i) board.runFrame();
@@ -196,6 +198,13 @@ static int runHeadless(const QString& romDir, const QString& bin,
         w.grab().save(purgePath);
         std::printf("headless: wrote call graph after purge %s\n", qPrintable(purgePath));
     }
+    if (!faShot.isEmpty()) {
+        FlameWidget w(&board);
+        w.resize(900, 560);
+        w.refresh();
+        w.grab().save(faShot);
+        std::printf("headless: wrote flame graph %s\n", qPrintable(faShot));
+    }
     if (!hcShot.isEmpty()) {
         // Build a real time-series: interleave running frames with the widget's
         // sampler so its history fills up as if driven by the 50 Hz GUI loop.
@@ -282,7 +291,7 @@ int main(int argc, char** argv) {
     if (qEnvironmentVariableIsSet("BK_ROM_DIR"))
         romDir = qEnvironmentVariable("BK_ROM_DIR");
 
-    QString binToLoad, shot, dbgShot, memvisShot, hpShot, caShot, hcShot, typeStr, keysList;
+    QString binToLoad, shot, dbgShot, memvisShot, hpShot, caShot, faShot, hcShot, typeStr, keysList;
     int frames = 0, keyCode = -1, keyFrame = 0;
     bool color = true, headless = false;
     const QStringList args = app.arguments();
@@ -294,6 +303,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--memvis" && i + 1 < args.size()) { memvisShot = args[++i]; headless = true; }
         else if (args[i] == "--hotpath" && i + 1 < args.size()) { hpShot = args[++i]; headless = true; }
         else if (args[i] == "--callgraph" && i + 1 < args.size()) { caShot = args[++i]; headless = true; }
+        else if (args[i] == "--flame" && i + 1 < args.size()) { faShot = args[++i]; headless = true; }
         else if (args[i] == "--hotchart" && i + 1 < args.size()) { hcShot = args[++i]; headless = true; }
         else if (args[i] == "--mono") color = false;
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
@@ -308,7 +318,7 @@ int main(int argc, char** argv) {
 
     if (headless)
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
-                           dbgShot, memvisShot, hpShot, caShot, hcShot, typeStr, keysList);
+                           dbgShot, memvisShot, hpShot, caShot, faShot, hcShot, typeStr, keysList);
 
     MainWindow w(romDir);
     w.show();

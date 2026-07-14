@@ -104,6 +104,7 @@ int Board::stepCore() {
         uint16_t pcNow = cpu_.pc();
         int16_t delta = static_cast<int16_t>(pcNow - pcBefore);
         if (delta < 0 || delta > 6) trace_.edge(pcBefore, pcNow); // non-sequential = control flow
+        trace_.profileStep(mem_.peekWord(pcBefore), pcNow, cpu_.sp(), t); // flame-graph CCT
     }
     return t;
 }
@@ -259,12 +260,15 @@ void Board::deliverFrameInterrupts() {
         keyIntPending_ = false;
         if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
             cpu_.interrupt(keyIntVec_);
+            trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
             return;
         }
     }
 
-    if (mem_.peekWord(Cpu::VEC_IRQ2) != 0)
+    if (mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
         cpu_.interrupt(Cpu::VEC_IRQ2);         // 0100 (50 Hz)
+        trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
+    }
 }
 
 int Board::stepInstruction() {
