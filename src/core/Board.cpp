@@ -41,7 +41,8 @@ void Board::timerCheck() {
         timerStart_ += delta * timerPeriod_;
         return;
     }
-    // Counter reached / passed zero.
+    // Counter reached / passed zero — this is the frame-sync tick a game waits on.
+    recordFrameBoundary();
     if (timerCsr_ & TIM_ENBEND) timerCsr_ |= TIM_END;
     if ((timerCsr_ & TIM_ONCE) && !(timerCsr_ & TIM_CONTINUOUS)) {
         timerCount_ = 0;
@@ -68,6 +69,16 @@ void Board::timerCheck() {
         timerCount_ = static_cast<uint16_t>(timerLimit_ - rem);
         timerStart_ += delta * timerPeriod_;
     }
+}
+
+// Record a frame-synchronisation boundary at the current tick (deduped, capped).
+// The timer may cross zero several times between two register reads, but a game
+// paces one frame per crossing it observes, so one boundary per timerCheck edge
+// is the right granularity for marking frames.
+void Board::recordFrameBoundary() {
+    if (!frameTicks_.empty() && frameTicks_.back() == totalTicks_) return;
+    frameTicks_.push_back(totalTicks_);
+    if (frameTicks_.size() > 8192) frameTicks_.pop_front();
 }
 
 void Board::timerSetMode(uint8_t mode) {
@@ -135,6 +146,7 @@ void Board::reset() {
     totalTicks_ = 0;
     timerStart_ = 0;
     timerPeriod_ = TIMER_BASE_PERIOD;
+    frameTicks_.clear();
     speaker_ = 0;
     framesSinceReset_ = 0;
     std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));

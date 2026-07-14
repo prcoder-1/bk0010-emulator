@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <set>
+#include <deque>
 #include "Memory.h"
 #include "Cpu.h"
 #include "Screen.h"
@@ -80,6 +81,15 @@ public:
     Speaker& sound() { return sound_; }
     Trace&  trace()  { return trace_; }
 
+    // Running CPU-tick counter (free-running, monotonic).
+    uint64_t totalTicks() const { return totalTicks_; }
+
+    // Tick timestamps of recent frame-synchronisation events. BK frames are not a
+    // fixed 50 Hz: a game paces itself on the programmable timer, spinning until it
+    // reaches/passes zero. Each such underflow is recorded here (capped ring), so
+    // the profiler can mark real per-game frame boundaries on its time axis.
+    const std::deque<uint64_t>& frameBoundaries() const { return frameTicks_; }
+
     // Side-effect-free snapshot of a system I/O register (0177660..0177716) for
     // the debugger — returns the value ioRead would yield, without the side
     // effects (no ready-flag clear, no timer advance). Unknown addr -> raw peek.
@@ -129,6 +139,10 @@ private:
     uint32_t timerPeriod_ = 128;    // CPU ticks per timer decrement
     void timerCheck();              // lazily advance the counter to "now"
     void timerSetMode(uint8_t mode);
+
+    // Tick timestamps of recent timer-underflow (frame-sync) events (capped ring).
+    std::deque<uint64_t> frameTicks_;
+    void recordFrameBoundary();
 
     std::set<uint16_t> breakpoints_;
     bool     breakHit_ = false;
