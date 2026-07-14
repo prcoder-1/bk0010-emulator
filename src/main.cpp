@@ -185,6 +185,13 @@ static int runHeadless(const QString& romDir, const QString& bin,
         QString treePath = caShot; treePath.replace(".png", "_tree.png");
         w.grab().save(treePath);
         std::printf("headless: wrote call treemap %s\n", qPrintable(treePath));
+        // Back to the graph, then purge the darkened (long-idle) functions (Delete).
+        QApplication::sendEvent(&w, &tab);
+        QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+        QApplication::sendEvent(&w, &del);
+        QString purgePath = caShot; purgePath.replace(".png", "_purged.png");
+        w.grab().save(purgePath);
+        std::printf("headless: wrote call graph after purge %s\n", qPrintable(purgePath));
     }
     if (!hcShot.isEmpty()) {
         // Build a real time-series: interleave running frames with the widget's
