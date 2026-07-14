@@ -2,7 +2,7 @@
 #include "GlScreen.h"
 #include "DebuggerOverlay.h"
 #include "MemVisWidget.h"
-#include "CodeGraphWidget.h"
+#include "HotPathWidget.h"
 #include "CallGraphWidget.h"
 #include "HotChartWidget.h"
 #include "AudioOut.h"
@@ -54,7 +54,7 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
-    dbg->addAction("&Граф кода / горячие точки…", this, &MainWindow::openCodeGraph, QKeySequence("Ctrl+G"));
+    dbg->addAction("Горячий &путь…", this, &MainWindow::openHotPath, QKeySequence("Ctrl+G"));
     dbg->addAction("Граф &вызовов…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
     dbg->addAction("Горячие инструкции во &времени…", this, &MainWindow::openHotChart, QKeySequence("Ctrl+H"));
     dbg->addSeparator();
@@ -105,7 +105,7 @@ void MainWindow::onTick() {
     renderScreen();
     if (paused_) overlay_->update();
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
-    if (codegraph_ && codegraph_->isVisible()) codegraph_->refresh();
+    if (hotpath_ && hotpath_->isVisible()) hotpath_->refresh();
     if (callgraph_ && callgraph_->isVisible()) callgraph_->refresh();
     if (hotchart_ && hotchart_->isVisible()) hotchart_->refresh();
 }
@@ -285,23 +285,21 @@ void MainWindow::openMemVis() {
     memvis_->raise();
 }
 
-void MainWindow::openCodeGraph() {
-    if (!codegraph_) {
-        codegraph_ = new CodeGraphWidget(board_.get());
-        // Clicking a hot instruction jumps the debugger's disassembler to it,
+void MainWindow::openHotPath() {
+    if (!hotpath_) {
+        hotpath_ = new HotPathWidget(board_.get());
+        hotpath_->resize(720, 620);
+        // Clicking a row jumps the debugger's disassembler to that address,
         // opening the debugger overlay if it isn't already showing.
-        connect(codegraph_, &CodeGraphWidget::addressPicked, this, [this](uint16_t addr) {
+        connect(hotpath_, &HotPathWidget::addressPicked, this, [this](uint16_t addr) {
             if (!paused_) setPaused(true);   // setPaused re-anchors disasm to PC…
             overlay_->setDisasmAddr(addr);   // …so set the picked address after it
             overlay_->update();
-            // Don't raise/activate the main window: the user is clicking in the
-            // code-graph window and it must stay in front so its own reposition to
-            // the block is visible. Both panels update in place (side-by-side).
         });
     }
     board_->trace().setEnabled(true);
-    codegraph_->show();
-    codegraph_->raise();
+    hotpath_->show();
+    hotpath_->raise();
 }
 
 void MainWindow::openCallGraph() {
