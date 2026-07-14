@@ -9,7 +9,7 @@
 class GlScreen;
 class DebuggerOverlay;
 class MemVisWidget;
-class CodeGraphWidget;
+class HotPathWidget;
 class CallGraphWidget;
 class HotChartWidget;
 class AudioOut;
@@ -37,7 +37,7 @@ private slots:
     void resetMachine();
     void toggleColorMode();
     void openMemVis();
-    void openCodeGraph();
+    void openHotPath();
     void openCallGraph();
     void openHotChart();
     void saveState();
@@ -55,7 +55,7 @@ private:
     GlScreen* screen_ = nullptr;
     DebuggerOverlay* overlay_ = nullptr;
     MemVisWidget* memvis_ = nullptr;
-    CodeGraphWidget* codegraph_ = nullptr;
+    HotPathWidget* hotpath_ = nullptr;
     CallGraphWidget* callgraph_ = nullptr;
     HotChartWidget* hotchart_ = nullptr;
     AudioOut* audio_ = nullptr;

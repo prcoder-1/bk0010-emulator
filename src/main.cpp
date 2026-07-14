@@ -11,7 +11,7 @@
 #include "ui/MainWindow.h"
 #include "ui/DebuggerOverlay.h"
 #include "ui/MemVisWidget.h"
-#include "ui/CodeGraphWidget.h"
+#include "ui/HotPathWidget.h"
 #include "ui/CallGraphWidget.h"
 #include "ui/HotChartWidget.h"
 #include <QMouseEvent>
@@ -63,7 +63,7 @@ static int runKeyTest() {
 static int runHeadless(const QString& romDir, const QString& bin,
                        int frames, bool color, const QString& shot,
                        int keyCode, int keyFrame, const QString& dbgShot,
-                       const QString& memvisShot, const QString& cgShot,
+                       const QString& memvisShot, const QString& hpShot,
                        const QString& caShot, const QString& hcShot,
                        const QString& typeStr, const QString& keysList) {
     // Parse "frame:code,frame:code,..." into precisely-timed key injections.
@@ -78,7 +78,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
         return 2;
     }
     board.reset();
-    if (!memvisShot.isEmpty() || !cgShot.isEmpty() || !caShot.isEmpty() || !hcShot.isEmpty()
+    if (!memvisShot.isEmpty() || !hpShot.isEmpty() || !caShot.isEmpty() || !hcShot.isEmpty()
         || !dbgShot.isEmpty())
         board.trace().setEnabled(true);
     // Let the monitor ROM initialise (vectors, stack, display driver) before
@@ -146,23 +146,25 @@ static int runHeadless(const QString& romDir, const QString& bin,
         cs.grab().save(noScreenPath);
         std::printf("headless: wrote memvis (screen hidden, ROM shown) %s\n", qPrintable(noScreenPath));
     }
-    if (!cgShot.isEmpty()) {
-        CodeGraphWidget w(&board);
-        w.resize(760, 560);
-        // Let the auto-follow glide converge onto the hottest instructions.
-        for (int k = 0; k < 120; ++k) w.grab();
-        w.grab().save(cgShot);
-        std::printf("headless: wrote codegraph (auto-follow) %s\n", qPrintable(cgShot));
-        // Exercise manual zoom + scroll and capture a second image.
-        for (int k = 0; k < 5; ++k) {
-            QKeyEvent ke(QEvent::KeyPress, Qt::Key_Plus, Qt::NoModifier);
-            QApplication::sendEvent(&w, &ke);
-        }
-        QKeyEvent pd(QEvent::KeyPress, Qt::Key_PageDown, Qt::NoModifier);
-        QApplication::sendEvent(&w, &pd);
-        QString zoomPath = cgShot; zoomPath.replace(".png", "_zoom.png");
-        w.grab().save(zoomPath);
-        std::printf("headless: wrote manual codegraph %s\n", qPrintable(zoomPath));
+    if (!hpShot.isEmpty()) {
+        HotPathWidget w(&board);
+        w.resize(760, 620);
+        w.refresh();
+        w.grab().save(hpShot);
+        std::printf("headless: wrote hot path %s\n", qPrintable(hpShot));
+        // Expand the top path, then its first block, and capture the detail view.
+        auto click = [&](int x, int y) {
+            QMouseEvent pr(QEvent::MouseButtonPress, QPointF(x, y), QPointF(x, y),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent rl(QEvent::MouseButtonRelease, QPointF(x, y), QPointF(x, y),
+                           Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&w, &pr); QApplication::sendEvent(&w, &rl);
+        };
+        w.grab();  click(12, 30);        // triangle of path #1 → expand
+        w.grab();  click(24, 52);        // triangle of its first block → expand
+        QString exp = hpShot; exp.replace(".png", "_expanded.png");
+        w.grab().save(exp);
+        std::printf("headless: wrote hot path (expanded) %s\n", qPrintable(exp));
     }
     if (!caShot.isEmpty()) {
         CallGraphWidget w(&board);
@@ -280,7 +282,7 @@ int main(int argc, char** argv) {
     if (qEnvironmentVariableIsSet("BK_ROM_DIR"))
         romDir = qEnvironmentVariable("BK_ROM_DIR");
 
-    QString binToLoad, shot, dbgShot, memvisShot, cgShot, caShot, hcShot, typeStr, keysList;
+    QString binToLoad, shot, dbgShot, memvisShot, hpShot, caShot, hcShot, typeStr, keysList;
     int frames = 0, keyCode = -1, keyFrame = 0;
     bool color = true, headless = false;
     const QStringList args = app.arguments();
@@ -290,7 +292,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--shot" && i + 1 < args.size()) shot = args[++i];
         else if (args[i] == "--dbgshot" && i + 1 < args.size()) { dbgShot = args[++i]; headless = true; }
         else if (args[i] == "--memvis" && i + 1 < args.size()) { memvisShot = args[++i]; headless = true; }
-        else if (args[i] == "--codegraph" && i + 1 < args.size()) { cgShot = args[++i]; headless = true; }
+        else if (args[i] == "--hotpath" && i + 1 < args.size()) { hpShot = args[++i]; headless = true; }
         else if (args[i] == "--callgraph" && i + 1 < args.size()) { caShot = args[++i]; headless = true; }
         else if (args[i] == "--hotchart" && i + 1 < args.size()) { hcShot = args[++i]; headless = true; }
         else if (args[i] == "--mono") color = false;
@@ -306,7 +308,7 @@ int main(int argc, char** argv) {
 
     if (headless)
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
-                           dbgShot, memvisShot, cgShot, caShot, hcShot, typeStr, keysList);
+                           dbgShot, memvisShot, hpShot, caShot, hcShot, typeStr, keysList);
 
     MainWindow w(romDir);
     w.show();

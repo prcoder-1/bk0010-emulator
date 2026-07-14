@@ -33,7 +33,7 @@ set(APP_SOURCES
     src/ui/GlScreen.cpp
     src/ui/DebuggerOverlay.cpp
     src/ui/MemVisWidget.cpp
-    src/ui/CodeGraphWidget.cpp
+    src/ui/HotPathWidget.cpp
     src/ui/CallGraphWidget.cpp
     src/ui/HotChartWidget.cpp
     src/ui/AudioOut.cpp
