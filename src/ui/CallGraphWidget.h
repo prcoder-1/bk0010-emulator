@@ -9,11 +9,12 @@
 
 namespace bk { class Board; }
 
-// A KCachegrind-style call graph: executed subroutines are drawn as boxes,
-// coloured by how much CPU time they cost (cold blue → hot red), connected by
-// call arrows whose thickness grows with call frequency. Laid out top-down in
-// levels (callers above callees). Opened from the Отладка menu; pan by dragging,
-// zoom with the wheel, click a box to jump the disassembler to that routine.
+// A profiling call graph: executed subroutines are drawn as boxes, coloured by
+// how much CPU time they cost (cold blue → hot red), connected by call arrows
+// whose thickness grows logarithmically with call frequency. Laid out top-down
+// in levels (callers above callees). A second view (Tab) shows the same data as
+// a nested-rectangles "callee map" (area ∝ cost). Opened from the Отладка menu;
+// pan by dragging, zoom with the wheel, click a box to jump the disassembler.
 class CallGraphWidget : public QWidget {
     Q_OBJECT
 public:
@@ -30,6 +31,7 @@ protected:
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
+    bool event(QEvent*) override;          // intercept Tab (view toggle)
 
 private:
     struct Node {
@@ -42,14 +44,33 @@ private:
     };
     struct Edge { uint16_t from, to; uint64_t weight; };
 
+    // A node in the nested-treemap ("callee map") view: functions of the call
+    // tree, area ∝ subtree cost, callees nested inside callers.
+    struct TNode {
+        uint16_t entry;
+        uint64_t self;      // own CPU-time cost
+        uint64_t subtree;   // self + all descendants
+        int      depth;     // 0 = virtual root
+        std::vector<int> kids;
+        QRectF   rect;      // laid-out rectangle (screen coordinates)
+    };
+
+    enum Mode { ModeGraph = 0, ModeTree = 1 };
+
     void rebuild();                 // build nodes/edges + layout from the trace
+    void buildTree();               // build the call tree for the treemap view
+    void layoutTree(int idx, QRectF r);
+    void paintGraph(QPainter& p);   // layered box-and-arrow view
+    void paintTreeMap(QPainter& p); // nested-rectangles (callee map) view
     void fitToView();               // set zoom/pan so the whole graph is visible
     QTransform viewTransform() const;
 
     bk::Board* board_;
     std::vector<Node> nodes_;
     std::vector<Edge> edges_;
+    std::vector<TNode> tree_;       // treemap call tree (tree_[0] = virtual root)
     std::unordered_map<uint16_t, int> nodeIndex_;  // entry → index into nodes_
+    int mode_ = ModeGraph;
     uint64_t maxCost_ = 1, totalCost_ = 1, maxWeight_ = 1;
 
     int      topN_ = 40;            // keep the N costliest functions

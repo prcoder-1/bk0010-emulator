@@ -55,7 +55,7 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
     dbg->addAction("&Граф кода / горячие точки…", this, &MainWindow::openCodeGraph, QKeySequence("Ctrl+G"));
-    dbg->addAction("Граф &вызовов (KCachegrind)…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
+    dbg->addAction("Граф &вызовов…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
     dbg->addAction("Горячие инструкции во &времени…", this, &MainWindow::openHotChart, QKeySequence("Ctrl+H"));
     dbg->addSeparator();
     dbg->addAction("&Сохранить состояние…", this, &MainWindow::saveState, QKeySequence("Ctrl+S"));

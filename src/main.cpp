@@ -169,8 +169,9 @@ static int runHeadless(const QString& romDir, const QString& bin,
         w.refresh();
         w.grab().save(caShot);
         std::printf("headless: wrote call graph %s\n", qPrintable(caShot));
-        // Exercise wheel-zoom and capture a second, zoomed-in image.
-        for (int k = 0; k < 4; ++k) {
+        // Exercise wheel-zoom and capture a second, zoomed-in image (also shows
+        // the per-box instruction disassembly that appears at high zoom).
+        for (int k = 0; k < 14; ++k) {
             QWheelEvent we(QPointF(470, 350), QPointF(470, 350), QPoint(), QPoint(0, 120),
                            Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
             QApplication::sendEvent(&w, &we);
@@ -178,6 +179,12 @@ static int runHeadless(const QString& romDir, const QString& bin,
         QString zoomPath = caShot; zoomPath.replace(".png", "_zoom.png");
         w.grab().save(zoomPath);
         std::printf("headless: wrote call graph (zoom) %s\n", qPrintable(zoomPath));
+        // Toggle to the nested-rectangles (treemap) view and capture it.
+        QKeyEvent tab(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier);
+        QApplication::sendEvent(&w, &tab);
+        QString treePath = caShot; treePath.replace(".png", "_tree.png");
+        w.grab().save(treePath);
+        std::printf("headless: wrote call treemap %s\n", qPrintable(treePath));
     }
     if (!hcShot.isEmpty()) {
         // Build a real time-series: interleave running frames with the widget's
