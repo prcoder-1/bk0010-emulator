@@ -64,6 +64,7 @@ private:
 
     // Clickable rows of the hot-instruction list: (row rect, instruction addr).
     std::vector<std::pair<QRect, uint16_t>> hotRows_;
+    int hotTopN_ = 10;       // how many hottest instructions to list ([ / ] adjust)
     // Drawn graph rows for click hit-testing.
     struct Hit { int y; int kind; uint16_t key; uint16_t addr; };
     std::vector<Hit> nodeYs_;

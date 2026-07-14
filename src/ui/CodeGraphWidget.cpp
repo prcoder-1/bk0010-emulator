@@ -196,6 +196,9 @@ void CodeGraphWidget::keyPressEvent(QKeyEvent* e) {
     case Qt::Key_Down:    userInteracted(); panY_ -= 40; clampPan(); update(); break;
     case Qt::Key_PageUp:  userInteracted(); panY_ += page; clampPan(); update(); break;
     case Qt::Key_PageDown:userInteracted(); panY_ -= page; clampPan(); update(); break;
+    // [ / ] change how many hottest instructions the list shows (top-N).
+    case Qt::Key_BracketLeft:  if (hotTopN_ > 1)  --hotTopN_; update(); break;
+    case Qt::Key_BracketRight: if (hotTopN_ < 40) ++hotTopN_; update(); break;
     // Home resumes auto-follow of the hot instructions.
     case Qt::Key_Home: case Qt::Key_0: autoFollow_ = true; update(); break;
     // Delete/Backspace resets the view: un-hide excluded rows and collapse all.
@@ -471,8 +474,8 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     int listX = g.right() + margin;
     p.setPen(QColor(200, 220, 255));
     p.drawText(listX, headerY, excluded_.empty()
-        ? QString("Горячие инструкции (×вызовы, %% времени CPU):")
-        : QString("Горячие инструкции (×вызовы, %% CPU; скрыто %1):").arg(excluded_.size()));
+        ? QString("Горячие: топ %1 (×вызовы, %% времени CPU):").arg(hotTopN_)
+        : QString("Горячие: топ %1 (×вызовы, %% CPU; скрыто %2):").arg(hotTopN_).arg(excluded_.size()));
     uint32_t top = hot.empty() ? 1 : hot[0].first;
     int y = headerY + lineH;
     // Keep the same `margin` gap from the right edge as the graph has on the left.
@@ -481,7 +484,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     const int textX = listX + barMax + 8;
     const int textW = std::max(10, listRight - textX);
     hotRows_.clear();
-    for (size_t i = 0; i < hot.size() && y < height() - 6; ++i) {
+    for (size_t i = 0; i < hot.size() && i < static_cast<size_t>(hotTopN_) && y < height() - 6; ++i) {
         uint16_t a = hot[i].second;
         double frac = double(hot[i].first) / top;
         p.fillRect(listX, y - fm.ascent(), int(frac * barMax), fm.height(),
@@ -508,7 +511,7 @@ void CodeGraphWidget::paintEvent(QPaintEvent*) {
     p.setPen(QColor(150, 170, 210));
     p.drawText(margin, height() - 6,
         QString("П/п: %1  рёбер: %2  зум ×%3  [%4]  |  ЛКМ-разв/сверн·дизасм, "
-                "ПКМ-скрыть, Del-сброс, колесо-скролл, Ctrl+колесо зум, Home-авто")
+                "ПКМ-скрыть, [ ]-топ N, Del-сброс, колесо-скролл, Ctrl+колесо зум, Home-авто")
             .arg((int)subSize_.size()).arg(tr.edges().size()).arg(zoom_, 0, 'f', 1)
             .arg(autoFollow_ ? "авто → горячие" : "ручной"));
 }
