@@ -161,16 +161,35 @@ void CallGraphWidget::rebuild() {
     const int N = (int)nodes_.size();
     if (N == 0) return;
 
-    // 5. Assign levels: longest path from roots (relaxation, capped for cycles).
-    for (int iter = 0; iter <= N; ++iter) {
-        bool changed = false;
-        for (auto& e : edges_) {
-            int ci = nodeIndex_[e.from], ti = nodeIndex_[e.to];
-            int want = nodes_[ci].level + 1;
-            if (want > nodes_[ti].level && want <= N) { nodes_[ti].level = want; changed = true; }
+    // 5. Assign levels by longest path over the DAG obtained by dropping the edges
+    //    that close a cycle. A plain longest-path relaxation would follow cycles
+    //    (recursion / mutual calls) and inflate the layout all the way to N levels,
+    //    stretching it vertically with huge inter-level gaps. So: DFS to get a
+    //    topological order, then relax only forward edges (topoIdx[to] > topoIdx[from]).
+    std::vector<std::vector<int>> adj(N);
+    for (auto& e : edges_) adj[nodeIndex_[e.from]].push_back(nodeIndex_[e.to]);
+    std::vector<char> state(N, 0);       // 0=new, 1=on-stack, 2=done
+    std::vector<int> childIdx(N, 0), topo, stk;
+    for (int s = 0; s < N; ++s) {
+        if (state[s]) continue;
+        stk.push_back(s); state[s] = 1;
+        while (!stk.empty()) {
+            int u = stk.back();
+            if (childIdx[u] < (int)adj[u].size()) {
+                int v = adj[u][childIdx[u]++];
+                if (state[v] == 0) { state[v] = 1; stk.push_back(v); }
+            } else { state[u] = 2; topo.push_back(u); stk.pop_back(); }
         }
-        if (!changed) break;
     }
+    std::reverse(topo.begin(), topo.end());
+    std::vector<int> topoIdx(N);
+    for (int i = 0; i < N; ++i) topoIdx[topo[i]] = i;
+    for (auto& n : nodes_) n.level = 0;
+    for (int u : topo)
+        for (int v : adj[u])
+            if (topoIdx[v] > topoIdx[u] && nodes_[v].level < nodes_[u].level + 1)
+                nodes_[v].level = nodes_[u].level + 1;
+
     int maxLevel = 0;
     for (auto& n : nodes_) maxLevel = std::max(maxLevel, n.level);
 
@@ -462,9 +481,10 @@ void CallGraphWidget::paintEvent(QPaintEvent*) {
     mono.setPixelSize(11);
     p.setFont(mono);
     p.setPen(QColor(200, 210, 255));
-    p.drawText(10, 18, QString::fromUtf8(mode_ == ModeTree
-        ? "Карта вызовов — площадь ∝ доле времени CPU, вложение = вызываемые подпрограммы, цвет = собств. стоимость"
-        : "Граф вызовов — цвет = доля времени CPU, толщина стрелки и число над ней = частота вызовов"));
+    QString hdr = (mode_ == ModeTree)
+        ? QString::fromUtf8("Карта вызовов — площадь ∝ доле времени CPU, вложение = вызываемые подпрограммы, цвет = собств. стоимость")
+        : QString::fromUtf8("Граф вызовов (топ-%1 блоков) — цвет = доля времени CPU, толщина стрелки = частота вызовов").arg(topN_);
+    p.drawText(10, 18, hdr);
     if (nodes_.empty()) {
         p.setPen(QColor(140, 150, 170));
         p.drawText(10, 40, QString::fromUtf8("нет данных трассировки — запустите игру"));
@@ -479,7 +499,7 @@ void CallGraphWidget::paintEvent(QPaintEvent*) {
     p.setPen(QColor(120, 130, 150));
     p.drawText(10, height() - 8, QString::fromUtf8(mode_ == ModeTree
         ? "Tab — граф вызовов · клик — дизасм · Del — убрать потемневшие"
-        : "Tab — карта · тащить блок — двигать, фон — панорама · колесо — масштаб · L — авто-раскладка · Del — убрать · клик — дизасм"));
+        : "Tab — карта · тащить блок — двигать, фон — панорама · колесо — масштаб · [ ] — число блоков · L — авто-раскладка · Del — убрать · клик — дизасм"));
 }
 
 void CallGraphWidget::paintGraph(QPainter& p) {
@@ -734,10 +754,10 @@ bool CallGraphWidget::event(QEvent* e) {
 
 void CallGraphWidget::keyPressEvent(QKeyEvent* e) {
     switch (e->key()) {
-    case Qt::Key_Plus: case Qt::Key_Equal:
-        topN_ = std::min(topN_ + 10, 120); rebuild(); update(); break;
-    case Qt::Key_Minus: case Qt::Key_Underscore:
-        topN_ = std::max(topN_ - 10, 10); rebuild(); update(); break;
+    case Qt::Key_BracketRight: case Qt::Key_Plus: case Qt::Key_Equal:
+        topN_ = std::min(topN_ + 4, 80); rebuild(); update(); break;
+    case Qt::Key_BracketLeft: case Qt::Key_Minus: case Qt::Key_Underscore:
+        topN_ = std::max(topN_ - 4, 3); rebuild(); update(); break;
     case Qt::Key_0:
         fitView_ = true; update(); break;
     case Qt::Key_L:

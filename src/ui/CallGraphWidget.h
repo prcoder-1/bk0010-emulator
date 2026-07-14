@@ -86,7 +86,7 @@ private:
     int mode_ = ModeGraph;
     uint64_t maxCost_ = 1, totalCost_ = 1, maxWeight_ = 1;
 
-    int      topN_ = 40;            // keep the N costliest functions
+    int      topN_ = 12;            // show only the N costliest blocks (+/- adjust)
     uint32_t lastBuild_ = 0;        // trace clock at last rebuild (throttle)
 
     double  zoom_ = 1.0;
