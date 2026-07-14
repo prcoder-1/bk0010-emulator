@@ -3,6 +3,7 @@
 #include "DebuggerOverlay.h"
 #include "MemVisWidget.h"
 #include "CodeGraphWidget.h"
+#include "CallGraphWidget.h"
 #include "HotChartWidget.h"
 #include "AudioOut.h"
 #include "Disasm.h"
@@ -54,6 +55,7 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
     dbg->addAction("&Граф кода / горячие точки…", this, &MainWindow::openCodeGraph, QKeySequence("Ctrl+G"));
+    dbg->addAction("Граф &вызовов (KCachegrind)…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
     dbg->addAction("Горячие инструкции во &времени…", this, &MainWindow::openHotChart, QKeySequence("Ctrl+H"));
     dbg->addSeparator();
     dbg->addAction("&Сохранить состояние…", this, &MainWindow::saveState, QKeySequence("Ctrl+S"));
@@ -104,6 +106,7 @@ void MainWindow::onTick() {
     if (paused_) overlay_->update();
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
     if (codegraph_ && codegraph_->isVisible()) codegraph_->refresh();
+    if (callgraph_ && callgraph_->isVisible()) callgraph_->refresh();
     if (hotchart_ && hotchart_->isVisible()) hotchart_->refresh();
 }
 
@@ -299,6 +302,22 @@ void MainWindow::openCodeGraph() {
     board_->trace().setEnabled(true);
     codegraph_->show();
     codegraph_->raise();
+}
+
+void MainWindow::openCallGraph() {
+    if (!callgraph_) {
+        callgraph_ = new CallGraphWidget(board_.get());
+        callgraph_->resize(900, 680);
+        // Clicking a function box jumps the debugger's disassembler to its entry.
+        connect(callgraph_, &CallGraphWidget::addressPicked, this, [this](uint16_t addr) {
+            if (!paused_) setPaused(true);
+            overlay_->setDisasmAddr(addr);
+            overlay_->update();
+        });
+    }
+    board_->trace().setEnabled(true);
+    callgraph_->show();
+    callgraph_->raise();
 }
 
 void MainWindow::openHotChart() {
