@@ -203,7 +203,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     int gy = botRect.y() + lineH_ + lineH_;
     const int stx = divX + 8, stw = botRect.right() - 6 - stx;
     for (const auto& sr : sregs) {
-        if (gy - lineH_ > botRect.bottom()) break;
+        if (gy > botRect.bottom()) break;
         uint16_t v = board_->peekReg(sr.addr);
         QString hint;
         if (sr.addr == 0177712) {            // таймер CSR: R=RUN (счёт идёт), F=флаг события
@@ -217,8 +217,9 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         QString s = QString("%1 %2 %3%4").arg(oct6(sr.addr))
                         .arg(QString::fromUtf8(sr.name), -12).arg(oct6(v))
                         .arg(hint.isEmpty() ? "" : " " + hint);
-        p.drawText(QRect(stx, gy - lineH_, stw, lineH_), Qt::AlignLeft | Qt::AlignVCenter,
-                   fm.elidedText(s, Qt::ElideRight, stw));
+        // Draw at the baseline (same as the stack rows) so the first row lines up
+        // the same distance below the header on both sides.
+        p.drawText(stx, gy, fm.elidedText(s, Qt::ElideRight, stw));
         gy += lineH_;
     }
 
