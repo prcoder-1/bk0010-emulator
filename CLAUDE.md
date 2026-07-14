@@ -35,7 +35,8 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 ```
 
 Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
-`--hotpath`, `--callgraph`, `--flame`, `--hotchart`, `--mono`, `--key <code>`, `--keyframe N`.
+`--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
+`--key <code>`, `--keyframe N`.
 Screenshots render from the CPU-side pixel buffer / `QWidget::grab`, so no GL
 context or display is needed.
 This is the primary way to verify visual changes; the GUI itself needs `xvfb-run`.

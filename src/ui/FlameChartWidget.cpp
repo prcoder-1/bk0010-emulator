@@ -1,0 +1,139 @@
+#include "FlameChartWidget.h"
+#include "Board.h"
+#include "Disasm.h"
+#include <QPainter>
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <QKeyEvent>
+#include <algorithm>
+#include <vector>
+
+using bk::Board;
+
+static QString oct6(uint16_t v) { return QString("%1").arg(v, 6, 8, QChar('0')); }
+
+// Stable warm colour per function (flame look), brighter when highlighted/hovered.
+static QColor flameColor(uint16_t func, bool hot) {
+    uint32_t h = func * 2654435761u;
+    double hue = 0.02 + 0.11 * ((h >> 8) & 0xFF) / 255.0;
+    double sat = 0.72 - 0.15 * ((h >> 16) & 0xFF) / 255.0;
+    return QColor::fromHsvF(float(hue), float(sat), hot ? 0.96f : 0.78f);
+}
+
+FlameChartWidget::FlameChartWidget(Board* board, QWidget* parent)
+    : QWidget(parent), board_(board) {
+    setMinimumSize(460, 240);
+    setFocusPolicy(Qt::StrongFocus);
+    setMouseTracking(true);
+    board_->trace().setFlameEnabled(true);
+}
+
+void FlameChartWidget::refresh() { update(); }
+
+void FlameChartWidget::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.fillRect(rect(), QColor(14, 15, 22));
+    QFont mono("monospace"); mono.setStyleHint(QFont::TypeWriter); mono.setPixelSize(11);
+    p.setFont(mono);
+    QFontMetrics fm(mono);
+    rowH_ = fm.height() + 4;
+
+    bk::Trace& tr = board_->trace();
+    const uint64_t now = tr.flameTick();
+    p.setPen(QColor(200, 210, 255));
+    double winMs = winTicks_ / 3000.0;
+    p.drawText(10, 16, QString::fromUtf8(
+        "Хронология вызовов — X = время (%1 мс в окне), Y = глубина стека; вправо = сейчас")
+        .arg(winMs, 0, 'f', winMs >= 10 ? 0 : 1));
+
+    if (now == 0) {
+        p.setPen(QColor(140, 150, 170));
+        p.drawText(10, 40, QString::fromUtf8("нет данных — запустите игру (стек собирается на лету)"));
+        return;
+    }
+
+    const int top = 24, bottom = height() - 20;
+    const double t1 = double(now);
+    const double t0 = t1 - winTicks_;
+    const double plotL = 8, plotR = width() - 8, plotW = plotR - plotL;
+    auto tickToX = [&](double T) { return plotL + (T - t0) / winTicks_ * plotW; };
+
+    bars_.clear();
+    maxDepth_ = 0;
+
+    auto drawSpan = [&](uint16_t func, int depth, uint64_t s, uint64_t e) {
+        if (func == 0) return;                          // skip the synthetic root
+        double a = std::max<double>(s, t0), b = std::min<double>(e, t1);
+        if (b <= a) return;
+        double x0 = tickToX(a), x1 = tickToX(b);
+        double y = top + depth * rowH_ - scroll_;
+        maxDepth_ = std::max(maxDepth_, depth);
+        if (y + rowH_ < top || y > bottom) return;
+        QRectF r(x0, y, std::max(1.0, x1 - x0), rowH_ - 1);
+        bars_.push_back({ r, func });
+        bool hl = ((int)func == link_);
+        p.setBrush(flameColor(func, hl));
+        p.setPen(hl ? QPen(QColor(255, 245, 150), 1.6) : QPen(QColor(18, 18, 26)));
+        p.drawRect(r);
+        if (r.width() > 34) {
+            p.setPen(QColor(25, 20, 15));
+            QString lbl = oct6(func);
+            if (r.width() > 120) lbl += "  " + QString::fromStdString(bk::disasm(board_->memory(), func).text);
+            p.drawText(r.adjusted(3, 0, -2, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                       fm.elidedText(lbl, Qt::ElideRight, int(r.width() - 5)));
+        }
+    };
+
+    // Completed spans (iterate from the newest until they fall before the window),
+    // then the currently-open frames extending to "now".
+    const auto& spans = tr.spans();
+    int scanned = 0;
+    for (auto it = spans.rbegin(); it != spans.rend() && scanned < 200000; ++it, ++scanned) {
+        if (it->end < uint64_t(t0)) break;
+        if (it->start >= uint64_t(t1)) continue;
+        drawSpan(it->func, it->depth, it->start, it->end);
+    }
+    std::vector<bk::Trace::Span> open;
+    tr.openFrames(open);
+    for (const auto& s : open) drawSpan(s.func, s.depth, s.start, s.end);
+
+    p.setPen(QColor(120, 130, 150));
+    p.drawText(10, height() - 6, QString::fromUtf8(
+        "колесо — зум времени · тащить — глубина · клик — в дизасм · наведение — подсветка · 0 — сброс зума"));
+}
+
+void FlameChartWidget::wheelEvent(QWheelEvent* e) {
+    double factor = e->angleDelta().y() > 0 ? 1.0 / 1.25 : 1.25;   // scroll up = zoom in
+    winTicks_ = std::clamp(winTicks_ * factor, 20000.0, 3.0e8);
+    update();
+}
+
+void FlameChartWidget::mousePressEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton) { dragging_ = true; pressPos_ = lastDrag_ = e->pos(); }
+}
+
+void FlameChartWidget::mouseMoveEvent(QMouseEvent* e) {
+    if (dragging_) {
+        scroll_ = std::clamp(scroll_ - (e->pos().y() - lastDrag_.y()), 0.0,
+                             std::max(0.0, double(maxDepth_ + 1) * rowH_ - (height() - 44)));
+        lastDrag_ = e->pos();
+        update();
+        return;
+    }
+    int found = -1;
+    for (const Bar& b : bars_) if (b.rect.contains(e->pos())) { found = b.func; break; }
+    if (found != hoverEmit_) { hoverEmit_ = found; setHighlight(found); emit hoverAddress(found); }
+}
+
+void FlameChartWidget::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() != Qt::LeftButton) return;
+    dragging_ = false;
+    if ((e->pos() - pressPos_).manhattanLength() > 4) return;    // was a drag
+    for (const Bar& b : bars_)
+        if (b.rect.contains(e->pos())) { emit addressPicked(b.func); return; }
+}
+
+void FlameChartWidget::leaveEvent(QEvent*) {
+    if (hoverEmit_ != -1) { hoverEmit_ = -1; emit hoverAddress(-1); }
+    setHighlight(-1);
+}

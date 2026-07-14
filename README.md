@@ -46,6 +46,14 @@
   `JSR`/возвратам (и прерываниям). **Клик** — углубиться в поддерево, **ПКМ**/
   `Backspace` — вверх, `0` — весь граф, `Del` — сброс; клик ведёт дизассемблер
   на подпрограмму, наведение показывает собств./вкл. долю.
+- **Хронология вызовов** (`Ctrl+T`) — времяупорядоченный flame chart (как в
+  Chrome DevTools/speedscope): X = время CPU, Y = глубина стека, каждый бар — один
+  вызов подпрограммы на всём протяжении, пока он был на стеке. Правый край — «сейчас».
+  Колесо — зум времени, тащить — прокрутка по глубине, клик — в дизассемблер.
+- Все окна профилировщика связаны **общей подсветкой** (наведение на подпрограмму
+  подсвечивает её во всех окнах и в дизассемблере). У «Горячих инструкций во времени»
+  дополнительно: `G` — агрегация по подпрограммам, `S` — стопка (streamgraph),
+  `F` — маркеры кадров по таймеру, колесо над графиком — зум по времени.
 - **Сохранение/восстановление** полного состояния (`Ctrl+S` / `Ctrl+L`).
 
 ## Сборка
@@ -82,6 +90,7 @@ cmake --build build -j
 | `Ctrl+G`| Горячий путь                                |
 | `Ctrl+K`| Граф вызовов                                |
 | `Ctrl+F`| Пламенный граф                              |
+| `Ctrl+T`| Хронология вызовов (flame chart)            |
 | `Ctrl+H`| Горячие инструкции во времени               |
 | `Ctrl+I`| Визуализация памяти                         |
 | `Ctrl+S`/`Ctrl+L` | Сохранить / восстановить состояние |
@@ -105,7 +114,7 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 ```
 
 Доступны: `--frames N`, `--shot`, `--dbgshot`, `--memvis`, `--hotpath`,
-`--callgraph`, `--flame`, `--hotchart`, `--mono`, `--key <код>`, `--keyframe N`.
+`--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`, `--key <код>`, `--keyframe N`.
 
 ## MCP-сервер (отладка через Claude)
 
@@ -146,7 +155,8 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 - `src/core/` — ядро эмуляции (без Qt): `Cpu`, `Memory`, `Disasm`, `Screen`,
   `Speaker`, `Trace`, `Board` (главный цикл, I/O-регистры, прерывания, save/restore).
 - `src/ui/` — Qt6: `MainWindow`, `GlScreen` (OpenGL), `DebuggerOverlay`,
-  `MemVisWidget`, `HotPathWidget`, `CallGraphWidget`, `FlameWidget`, `HotChartWidget`.
+  `MemVisWidget`, `HotPathWidget`, `CallGraphWidget`, `FlameWidget`,
+  `FlameChartWidget`, `HotChartWidget`.
 - `src/mcp/` — `McpServer`: MCP-сервер поверх ядра (JSON-RPC по stdio, QtCore JSON).
 
 Ядро исполняет инструкции по кадрам 50 Гц (3 МГц), UI-поток отображает текстуру
