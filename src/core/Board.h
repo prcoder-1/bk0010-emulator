@@ -80,6 +80,11 @@ public:
     Speaker& sound() { return sound_; }
     Trace&  trace()  { return trace_; }
 
+    // Side-effect-free snapshot of a system I/O register (0177660..0177716) for
+    // the debugger — returns the value ioRead would yield, without the side
+    // effects (no ready-flag clear, no timer advance). Unknown addr -> raw peek.
+    uint16_t peekReg(uint16_t addr) const;
+
     // Save/restore full emulator state (RAM, CPU, device registers).
     bool saveState(const std::string& path);
     bool loadState(const std::string& path);
