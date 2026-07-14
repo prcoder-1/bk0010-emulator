@@ -106,7 +106,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     disasmLines_ = (panelBottomMax - dTop - 8) / lineH_ - 1;
     if (disasmLines_ < 1) disasmLines_ = 1;
     int dH = (disasmLines_ + 1) * lineH_ + 8;   // snug: title + lines + small pad
-    disasmRect_ = QRect(margin, dTop, (W - 3 * margin) * 21 / 40, dH);
+    disasmRect_ = QRect(margin, dTop, (W - 3 * margin) * 3 / 5, dH);
     p.fillRect(disasmRect_, panelBg);
     p.setPen(border); p.drawRect(disasmRect_);
     p.setPen(title); p.drawText(disasmRect_.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— ДИЗАССЕМБЛЕР —");
@@ -137,11 +137,12 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         a += d.words * 2;
     }
 
-    // ---- Right column: memory on top, then one box with the stack (left) and
-    // the system registers (right). ----
+    // ---- Right column: memory / stack / system registers, stacked vertically.
+    // Registers show two values each (written vs read), so they need the full
+    // column width. ----
     int mx = disasmRect_.right() + margin;
     int mw = W - mx - margin;
-    QRect memRect(mx, dTop, mw, dH * 2 / 5);
+    QRect memRect(mx, dTop, mw, dH * 9 / 32);
     memRect_ = memRect; // cache for the wheel handler
     p.fillRect(memRect, panelBg);
     p.setPen(border); p.drawRect(memRect);
@@ -162,32 +163,33 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         ma += static_cast<uint16_t>(wpr * 2);
     }
 
-    // ---- One box: stack on the left, system registers on the right ----
-    QRect botRect(mx, memRect.bottom() + margin, mw, dH - memRect.height() - margin);
-    p.fillRect(botRect, panelBg);
-    p.setPen(border); p.drawRect(botRect);
-    // Stack column (left): 10px indent + "000742: 042231" (14 chars) + gap before
-    // the divider.
-    int stkColW = 10 + 14 * cw + 10;
-    int divX = botRect.x() + stkColW;
-    p.setPen(QColor(70, 110, 180, 170));
-    p.drawLine(divX, botRect.y() + 4, divX, botRect.bottom() - 4); // divider
-    p.setPen(title);
-    p.drawText(botRect.x() + 10, botRect.y() + lineH_, "— СТЕК (SP) —");
-    p.drawText(divX + 10, botRect.y() + lineH_, "— СИСТ. РЕГИСТРЫ —");
+    // ---- Stack (middle) fills the space between memory and the bottom-anchored
+    // register box, which is sized to fit exactly its title row + 9 registers. ----
+    int sregH = 10 * lineH_ + 8;
+    QRect stkRect(mx, memRect.bottom() + margin, mw,
+                  dTop + dH - sregH - 2 * margin - memRect.bottom());
+    p.fillRect(stkRect, panelBg);
+    p.setPen(border); p.drawRect(stkRect);
+    p.setPen(title); p.drawText(stkRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— СТЕК (SP) —");
     p.setPen(fg);
-    int srows = (botRect.height() - lineH_ - 6) / lineH_;
+    int srows = (stkRect.height() - lineH_ - 6) / lineH_;
     uint16_t sa = cpu.sp();
-    int sy = botRect.y() + lineH_ + lineH_;
+    int sy = stkRect.y() + lineH_ + lineH_;
     for (int r = 0; r < srows; ++r) {
-        p.drawText(botRect.x() + 10, sy,
+        p.drawText(stkRect.x() + 10, sy,
             QString("%1: %2").arg(oct6(sa)).arg(oct6(mem.peekWord(sa))));
         sy += lineH_;
         sa += 2;
     }
 
-    // System registers: the documented I/O registers (see digger-bk0010/memory.h),
-    // read side-effect-free.
+    // ---- System registers (bottom): documented I/O registers (see
+    // digger-bk0010/memory.h) with the last value written and the value read back
+    // — on real hardware these often differ (e.g. keyboard/timer status). ----
+    QRect sregRect(mx, stkRect.bottom() + margin, mw, sregH);
+    p.fillRect(sregRect, panelBg);
+    p.setPen(border); p.drawRect(sregRect);
+    p.setPen(title); p.drawText(sregRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft,
+                                "— СИСТ. РЕГИСТРЫ —");
     struct SReg { uint16_t addr; const char* name; };
     static const SReg sregs[] = {
         {0176560, "ИРПС"},         // последовательный порт (не эмулируется)
@@ -200,33 +202,32 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         {0177714, "пар. порт"},    // параллельный интерфейс (порт/джойстик)
         {0177716, "внеш устр."},   // управление внешними устройствами (динамик/лента/клавиша)
     };
-    int gy = botRect.y() + lineH_ + lineH_;
-    const int stx = divX + 8, stw = botRect.right() - 6 - stx;
+    const int srx = sregRect.x() + 10, srw = sregRect.width() - 16;
+    // Column headers over the two value columns (written / read), on the title row.
+    p.setPen(QColor(150, 180, 230));
+    p.drawText(srx + 20 * cw, sregRect.y() + lineH_, "зап");
+    p.drawText(srx + 27 * cw, sregRect.y() + lineH_, "чит");
+    int gy = sregRect.y() + lineH_ + lineH_;
     for (const auto& sr : sregs) {
-        if (gy > botRect.bottom()) break;
-        uint16_t v = board_->peekReg(sr.addr);
-        QString hint;
-        if (sr.addr == 0177712) {            // таймер CSR: R=RUN (счёт идёт), F=флаг события
-            if (v & 020)  hint += "R";
-            if (v & 0200) hint += "F";
-        } else if (sr.addr == 0177716) {     // бит 6 (MAG_KEY): 0 = клавиша нажата
-            if (!(v & 0100)) hint = "К";
-        }
-        // Name padded to the widest label so values line up in a column right
-        // after it (close to the name, no big gap); flag last.
-        QString s = QString("%1 %2 %3%4").arg(oct6(sr.addr))
-                        .arg(QString::fromUtf8(sr.name), -12).arg(oct6(v))
-                        .arg(hint.isEmpty() ? "" : " " + hint);
-        // Draw at the baseline (same as the stack rows) so the first row lines up
-        // the same distance below the header on both sides.
-        p.drawText(stx, gy, fm.elidedText(s, Qt::ElideRight, stw));
+        if (gy > sregRect.bottom()) break;
+        uint16_t rd = board_->peekReg(sr.addr);
+        uint16_t wr = board_->peekRegWritten(sr.addr);
+        QString flag;                        // decode a couple of read-side status bits
+        if (sr.addr == 0177712) { if (rd & 020) flag += "R"; if (rd & 0200) flag += "F"; }
+        else if (sr.addr == 0177716 && !(rd & 0100)) flag = "К";
+        // addr | name (padded) | written | read | flag
+        QString s = QString("%1 %2 %3 %4%5").arg(oct6(sr.addr))
+                        .arg(QString::fromUtf8(sr.name), -12).arg(oct6(wr)).arg(oct6(rd))
+                        .arg(flag.isEmpty() ? "" : " " + flag);
+        p.setPen(fg);
+        p.drawText(srx, gy, fm.elidedText(s, Qt::ElideRight, srw));
         gy += lineH_;
     }
 
     // ---- Help line ----
     p.setPen(QColor(180, 200, 255));
     p.drawText(margin, H - 4,
-        "F12-выход  F7-шаг(в)  F8-шаг(через)  F9-тчк.останова  G-продолжить  "
+        "F12-выход  F7-шаг(в)  F8-шаг(через)  F9-тчк.останова  Esc-продолжить  "
         "колесо/PgUp/PgDn-дизасм  [/]-память");
 }
 

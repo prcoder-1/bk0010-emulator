@@ -136,6 +136,7 @@ void Board::reset() {
     timerPeriod_ = TIMER_BASE_PERIOD;
     speaker_ = 0;
     framesSinceReset_ = 0;
+    std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));
     screen_.setScroll(scroll_);
     trace_.reset();
 }
@@ -413,6 +414,7 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
 }
 
 bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
+    if (addr >= ADDR_IO_PAGE) ioLastWrite_[(addr - ADDR_IO_PAGE) >> 1] = value; // for the debugger
     switch (addr) {
     case REG_SCROLL:    scroll_ = value & 0777; return true;
     case REG_TIMER_LIM: timerLimit_ = value; return true;
@@ -441,6 +443,10 @@ uint16_t Board::peekReg(uint16_t addr) const {
     case 0176560:        return 0;   // ИРПС (последовательный порт) — не эмулируется
     default:             return mem_.peekWord(addr);
     }
+}
+
+uint16_t Board::peekRegWritten(uint16_t addr) const {
+    return (addr >= ADDR_IO_PAGE) ? ioLastWrite_[(addr - ADDR_IO_PAGE) >> 1] : 0;
 }
 
 } // namespace bk
