@@ -114,6 +114,15 @@ void HotChartWidget::sample() {
 void HotChartWidget::refresh() {
     bk::Trace& tr = board_->trace();
     tr.setEnabled(true);
+    // The emulator reset (Board::reset → Trace::reset) zeroes exec counts and the
+    // frame clock. Detect the clock running backwards and drop our accumulated
+    // state, otherwise the next sample would compute deltas via unsigned underflow
+    // (a spurious off-scale spike). See the code-review note.
+    if (tr.now() < lastNow_) {
+        series_.clear();
+        lastTotalTicks_ = 0;
+        lastNow_ = 0;
+    }
     // Sample on emulated time (frozen while paused), not wall-clock.
     if (tr.now() - lastNow_ >= static_cast<uint32_t>(SAMPLE_FRAMES)) {
         lastNow_ = tr.now();
