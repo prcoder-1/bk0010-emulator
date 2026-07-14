@@ -120,7 +120,7 @@ void MainWindow::setPaused(bool paused) {
         overlay_->followPc();
         overlay_->show();
         overlay_->raise();
-        status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, F9 точка, G продолжить, F12 выход");
+        status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, F9 точка, Esc продолжить, F12 выход");
     } else {
         overlay_->hide();
         status_->setText("Выполнение");
@@ -239,7 +239,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         case Qt::Key_F7:       stepInto(); return;
         case Qt::Key_F8:       stepOver(); return;
         case Qt::Key_F9:       board_->toggleBreakpoint(board_->cpu().pc()); overlay_->update(); return;
-        case Qt::Key_G:        setPaused(false); return;
+        case Qt::Key_Escape:   setPaused(false); return;
         case Qt::Key_PageUp:   overlay_->scrollDisasm(-8); return;
         case Qt::Key_PageDown: overlay_->scrollDisasm(8); return;
         case Qt::Key_BracketLeft:  overlay_->scrollMem(-8); return;

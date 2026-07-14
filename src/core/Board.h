@@ -85,6 +85,10 @@ public:
     // effects (no ready-flag clear, no timer advance). Unknown addr -> raw peek.
     uint16_t peekReg(uint16_t addr) const;
 
+    // Last value the program wrote to an I/O register (0 if never written / not
+    // an I/O-page address). Reads may differ from this on real hardware.
+    uint16_t peekRegWritten(uint16_t addr) const;
+
     // Save/restore full emulator state (RAM, CPU, device registers).
     bool saveState(const std::string& path);
     bool loadState(const std::string& path);
@@ -101,6 +105,10 @@ private:
     int cpuFreqHz_ = 3000000;
     int frameHz_   = 50;
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()
+
+    // Last value written to each I/O-page word (0177600..0177776), for the
+    // debugger — hardware often reads back something different than was written.
+    uint16_t ioLastWrite_[64] = {0};
 
     // Internal register state
     uint16_t scroll_    = 0330;
