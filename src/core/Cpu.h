@@ -48,6 +48,11 @@ public:
     uint16_t sp() const { return r[6]; }
     uint16_t lastBranch() const { return lastBranch_; }
 
+    // Approximate CPU-tick cost of the instruction with opcode word `ir` (base
+    // timing by addressing mode, ignoring operand extension words). Used by the
+    // profiler views to estimate per-instruction execution time.
+    int instrTicks(uint16_t ir) const { return timingFor(ir); }
+
     // Hook for intercepting EMT 36 (tape/disk file I/O). Called when an
     // `EMT 036` instruction executes; if it returns true the call is considered
     // handled and the ROM handler (vector 030) is skipped. See Board::handleEmt36.
