@@ -306,6 +306,16 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
 //   +6  NAME[16]  file name (space-padded)
 //   +026 CUR_DATA_PTR / +030 CUR_SIZE / +032 CUR_NAME[16]  (found file, on read)
 // Host files use the standard .BIN/tape layout: [addr_lo,addr_hi,len_lo,len_hi,data].
+// BK tape names carry no extension, but the same single-file data is commonly
+// stored on the host as "<name>.bin". Open the bare name first, then fall back to
+// a ".bin"/".BIN" suffix so extracted game files load without renaming. (Whole-disk
+// images like ".bkd" are NOT tried — they are container images, not tape files.)
+static FILE* openTapeRead(const std::string& name) {
+    for (const char* ext : {"", ".bin", ".BIN"})
+        if (FILE* f = std::fopen((name + ext).c_str(), "rb")) return f;
+    return nullptr;
+}
+
 bool Board::handleEmt36() {
     enum : uint8_t { CMD_STOP = 0, CMD_START = 1, CMD_WRITE = 2, CMD_READ = 3, CMD_FICT = 4 };
     enum : uint8_t { RSP_OK = 0, RSP_BADNAME = 1, RSP_CRC = 2, RSP_STOP = 3 };
@@ -355,7 +365,7 @@ bool Board::handleEmt36() {
         if (name.empty() || name.find('/') != std::string::npos ||
             name.find('\\') != std::string::npos)
             return respond(RSP_BADNAME);
-        FILE* f = std::fopen(name.c_str(), "rb");
+        FILE* f = openTapeRead(name);   // tolerates a ".bin"/".BIN" host extension
         if (!f) return respond(RSP_BADNAME);
         uint8_t hdr[4];
         if (std::fread(hdr, 1, 4, f) != 4) { std::fclose(f); return respond(RSP_CRC); }
