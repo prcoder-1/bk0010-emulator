@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <vector>
 #include <utility>
+#include <deque>
 
 namespace bk {
 
@@ -75,10 +76,24 @@ public:
         std::unordered_map<uint16_t, int> kids;  // callee entry -> child node index
     };
 
+    // A time-ordered call span (one invocation) for the flame *chart*: the frame
+    // `func` at call depth `depth` was on the stack over CPU ticks [start, end).
+    struct Span { uint16_t func; uint16_t depth; uint64_t start, end; };
+
     void setFlameEnabled(bool e) { flameOn_ = e; if (flame_.empty()) flameReset(); }
     bool flameEnabled() const { return flameOn_; }
     void flameClear() { flameReset(); }
     const std::vector<FlameNode>& flame() const { return flame_; }
+    // Time-ordered spans + the running flame-tick clock (ticks charged while the
+    // profiler was on). Currently-open frames are appended (end = now) by openFrames.
+    const std::deque<Span>& spans() const { return spans_; }
+    uint64_t flameTick() const { return flameTick_; }
+    void openFrames(std::vector<Span>& out) const {
+        for (size_t i = 1; i < fstack_.size(); ++i)
+            out.push_back({flame_[fstack_[i].node].func,
+                           static_cast<uint16_t>(flame_[fstack_[i].node].depth),
+                           fstack_[i].start, flameTick_});
+    }
 
     // Called by Board after every instruction: `ir` = executed opcode word, `pc`/`sp`
     // = state after it, `ticks` = its cost. A JSR pushes a frame; a return (RTS/RTI
@@ -86,8 +101,12 @@ public:
     // instruction's ticks are charged to the current top-of-stack context.
     void profileStep(uint16_t ir, uint16_t pcNow, uint16_t sp, int ticks) {
         if (!flameOn_) return;
-        if (ticks > 0) flame_[fstack_.back().first].self += static_cast<uint64_t>(ticks);
-        while (fstack_.size() > 1 && sp > fstack_.back().second) fstack_.pop_back();
+        if (ticks > 0) { flameTick_ += static_cast<uint64_t>(ticks); flame_[fstack_.back().node].self += static_cast<uint64_t>(ticks); }
+        while (fstack_.size() > 1 && sp > fstack_.back().second()) {
+            const FStack& top = fstack_.back();          // returned → emit its span
+            spanPush(flame_[top.node].func, static_cast<uint16_t>(flame_[top.node].depth), top.start, flameTick_);
+            fstack_.pop_back();
+        }
         if (ir >= 0004000 && ir <= 0004777) flamePush(pcNow, sp);   // JSR
     }
     // Called by Board when it dispatches an interrupt to `handler` (sp already
@@ -95,17 +114,26 @@ public:
     void profileInterrupt(uint16_t handler, uint16_t sp) { if (flameOn_) flamePush(handler, sp); }
 
 private:
+    struct FStack { int node; uint16_t sp_; uint64_t start; uint16_t second() const { return sp_; } };
     bool flameOn_ = false;
+    uint64_t flameTick_ = 0;                          // ticks charged while profiling
     std::vector<FlameNode> flame_;                    // flame_[0] = root
-    std::vector<std::pair<int, uint16_t>> fstack_;    // (node index, call-time SP)
+    std::vector<FStack> fstack_;                       // active call stack
+    std::deque<Span> spans_;                          // completed spans (capped ring)
 
     void flameReset() {
         flame_.assign(1, FlameNode{0, 0, -1, 0, {}});
-        fstack_.assign(1, {0, static_cast<uint16_t>(0xFFFF)});
+        fstack_.assign(1, FStack{0, static_cast<uint16_t>(0xFFFF), 0});
+        spans_.clear();
+        flameTick_ = 0;
+    }
+    void spanPush(uint16_t func, uint16_t depth, uint64_t start, uint64_t end) {
+        spans_.push_back({func, depth, start, end});
+        if (spans_.size() > 300000) spans_.pop_front();
     }
     void flamePush(uint16_t func, uint16_t callSP) {
-        if (fstack_.size() >= 512) { fstack_.push_back({fstack_.back().first, callSP}); return; }
-        int cur = fstack_.back().first, child;
+        if (fstack_.size() >= 512) { fstack_.push_back({fstack_.back().node, callSP, flameTick_}); return; }
+        int cur = fstack_.back().node, child;
         auto it = flame_[cur].kids.find(func);
         if (it != flame_[cur].kids.end()) child = it->second;
         else if (flame_.size() < 200000) {
@@ -113,7 +141,7 @@ private:
             flame_.push_back(FlameNode{func, 0, cur, flame_[cur].depth + 1, {}});
             flame_[cur].kids[func] = child;
         } else child = cur;                            // node cap: degrade gracefully
-        fstack_.push_back({child, callSP});
+        fstack_.push_back({child, callSP, flameTick_});
     }
 
     bool enabled_ = false;

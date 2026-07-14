@@ -5,6 +5,7 @@
 #include "HotPathWidget.h"
 #include "CallGraphWidget.h"
 #include "FlameWidget.h"
+#include "FlameChartWidget.h"
 #include "HotChartWidget.h"
 #include "AudioOut.h"
 #include "Disasm.h"
@@ -58,6 +59,7 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     dbg->addAction("Горячий &путь…", this, &MainWindow::openHotPath, QKeySequence("Ctrl+G"));
     dbg->addAction("Граф &вызовов…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
     dbg->addAction("&Пламенный граф…", this, &MainWindow::openFlame, QKeySequence("Ctrl+F"));
+    dbg->addAction("&Хронология вызовов…", this, &MainWindow::openFlameChart, QKeySequence("Ctrl+T"));
     dbg->addAction("Горячие инструкции во &времени…", this, &MainWindow::openHotChart, QKeySequence("Ctrl+H"));
     dbg->addSeparator();
     dbg->addAction("&Сохранить состояние…", this, &MainWindow::saveState, QKeySequence("Ctrl+S"));
@@ -110,6 +112,7 @@ void MainWindow::onTick() {
     if (hotpath_ && hotpath_->isVisible()) hotpath_->refresh();
     if (callgraph_ && callgraph_->isVisible()) callgraph_->refresh();
     if (flame_ && flame_->isVisible()) flame_->refresh();
+    if (flamechart_ && flamechart_->isVisible()) flamechart_->refresh();
     if (hotchart_ && hotchart_->isVisible()) hotchart_->refresh();
 }
 
@@ -289,9 +292,10 @@ void MainWindow::openMemVis() {
 }
 
 void MainWindow::broadcastHighlight(int addr, QWidget* src) {
-    if (hotpath_   && hotpath_   != src) hotpath_->setHighlight(addr);
-    if (callgraph_ && callgraph_ != src) callgraph_->setHighlight(addr);
-    if (flame_     && flame_     != src) flame_->setHighlight(addr);
+    if (hotpath_    && hotpath_    != src) hotpath_->setHighlight(addr);
+    if (callgraph_  && callgraph_  != src) callgraph_->setHighlight(addr);
+    if (flame_      && flame_      != src) flame_->setHighlight(addr);
+    if (flamechart_ && flamechart_ != src) flamechart_->setHighlight(addr);
     if (overlay_) overlay_->setHighlight(addr);   // debugger disasm is always a receiver
 }
 
@@ -348,6 +352,24 @@ void MainWindow::openFlame() {
     board_->trace().setFlameEnabled(true);
     flame_->show();
     flame_->raise();
+}
+
+void MainWindow::openFlameChart() {
+    if (!flamechart_) {
+        flamechart_ = new FlameChartWidget(board_.get());
+        flamechart_->resize(900, 480);
+        connect(flamechart_, &FlameChartWidget::addressPicked, this, [this](uint16_t addr) {
+            if (!paused_) setPaused(true);
+            overlay_->setDisasmAddr(addr);
+            overlay_->update();
+        });
+        connect(flamechart_, &FlameChartWidget::hoverAddress, this,
+                [this](int a) { broadcastHighlight(a, flamechart_); });
+    }
+    board_->trace().setEnabled(true);
+    board_->trace().setFlameEnabled(true);
+    flamechart_->show();
+    flamechart_->raise();
 }
 
 void MainWindow::openHotChart() {
