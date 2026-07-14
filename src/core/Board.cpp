@@ -428,4 +428,19 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     }
 }
 
+uint16_t Board::peekReg(uint16_t addr) const {
+    switch (addr) {
+    case REG_KBD_STATUS: return kbdStatus_;
+    case REG_KBD_DATA:   return kbdData_;
+    case REG_SCROLL:     return scroll_;
+    case REG_TIMER_LIM:  return timerLimit_;
+    case REG_TIMER_CNT:  return timerCount_;                     // as of the last read
+    case REG_TIMER_CSR:  return static_cast<uint16_t>(0177400 | timerCsr_);
+    case REG_PORT:       return 0;                               // input port, no device
+    case REG_SYS:        return static_cast<uint16_t>(0100000 | 0200 | (keyHeld_ ? 0 : 0100)); // bit6=0 while a key is held
+    case 0176560:        return 0;   // ИРПС (последовательный порт) — не эмулируется
+    default:             return mem_.peekWord(addr);
+    }
+}
+
 } // namespace bk
