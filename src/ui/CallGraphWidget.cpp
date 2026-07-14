@@ -15,7 +15,12 @@
 
 using bk::Board;
 
-static QColor heatColor(double frac);   // cold→hot cost colour (defined below)
+static QColor heatColor(double frac);        // cold→hot cost colour (defined below)
+static QColor dim(QColor c, double k);       // scale brightness (defined below)
+
+// A function darkens to its dimmest over this many frames (~50 Hz) without
+// executing; once fully dark it can be purged with Delete/Backspace.
+static constexpr int ACTIVE_WINDOW = 350;
 
 // JSR opcode range (octal) — a subroutine call.
 static bool cgIsJsr(uint16_t ir) { return ir >= 0004000 && ir <= 0004777; }
@@ -85,15 +90,19 @@ void CallGraphWidget::rebuild() {
         return (it == entries.begin()) ? entries.front() : *(--it);
     };
 
-    // 2. Cost per function = Σ execCount × per-instruction ticks over its range.
+    // 2. Cost per function = Σ execCount × per-instruction ticks over its range;
+    //    also track each function's most recent execution time (for the fade-out).
     std::unordered_map<uint16_t, uint64_t> cost;
+    std::unordered_map<uint16_t, uint32_t> lastAct;
     totalCost_ = 0;
     for (int a = 0; a < 0x10000; a += 2) {
         uint32_t c = tr.execCount((uint16_t)a);
         if (!c) continue;
-        uint64_t tk = (uint64_t)c * cpu.instrTicks(mem.peekWord((uint16_t)a));
-        cost[funcOf((uint16_t)a)] += tk;
-        totalCost_ += tk;
+        uint16_t f = funcOf((uint16_t)a);
+        cost[f] += (uint64_t)c * cpu.instrTicks(mem.peekWord((uint16_t)a));
+        totalCost_ += (uint64_t)c * cpu.instrTicks(mem.peekWord((uint16_t)a));
+        uint32_t le = tr.lastExec((uint16_t)a);
+        if (le > lastAct[f]) lastAct[f] = le;
     }
     if (totalCost_ == 0) totalCost_ = 1;
 
@@ -109,10 +118,18 @@ void CallGraphWidget::rebuild() {
         if (cf != to) edgeW[{cf, to}] += e.second;
     }
 
-    // 4. Rank functions by cost, keep the top-N, build nodes.
+    // 4. Rank functions by cost, keep the top-N, build nodes. Idle functions are
+    //    kept (they darken via lastActive), except those the user purged with
+    //    Delete/Backspace — but a purged function re-appears once it runs again.
+    for (auto it = hidden_.begin(); it != hidden_.end(); ) {
+        auto c = lastAct.find(*it);
+        if (c != lastAct.end() && tr.fade(c->second, ACTIVE_WINDOW) > 0.0) it = hidden_.erase(it);
+        else ++it;
+    }
     std::vector<std::pair<uint64_t, uint16_t>> ranked;
     ranked.reserve(cost.size());
-    for (auto& kv : cost) ranked.push_back({kv.second, kv.first});
+    for (auto& kv : cost)
+        if (!hidden_.count(kv.first)) ranked.push_back({kv.second, kv.first});
     std::sort(ranked.begin(), ranked.end(), std::greater<>());
     if ((int)ranked.size() > topN_) ranked.resize(topN_);
 
@@ -124,6 +141,7 @@ void CallGraphWidget::rebuild() {
         n.entry = r.second;
         n.cost  = r.first;
         n.calls = (uint32_t)incoming[r.second];
+        n.lastActive = lastAct[r.second];
         n.level = 0;
         nodeIndex_[n.entry] = (int)nodes_.size();
         nodes_.push_back(n);
@@ -331,12 +349,17 @@ void CallGraphWidget::paintTreeMap(QPainter& p) {
     for (int i = 1; i < (int)tree_.size(); ++i) if (!tree_[i].rect.isEmpty()) order.push_back(i);
     std::sort(order.begin(), order.end(), [&](int a, int b) { return tree_[a].depth < tree_[b].depth; });
 
+    bk::Trace& tr = board_->trace();
     QFont mono("monospace"); mono.setStyleHint(QFont::TypeWriter);
     for (int i : order) {
         const TNode& t = tree_[i];
         QRectF r = t.rect;
+        auto it = nodeIndex_.find(t.entry);
+        double vis = it != nodeIndex_.end()
+            ? std::clamp(tr.fade(nodes_[it->second].lastActive, ACTIVE_WINDOW), 0.0, 1.0) : 1.0;
+        double dk = 0.22 + 0.78 * vis;   // idle boxes darken (but stay visible)
         double frac = double(t.self) / double(maxCost_);
-        QColor fill = heatColor(frac);
+        QColor fill = dim(heatColor(frac), dk);
         p.setPen(QPen(fill.darker(220), 1.0));
         p.setBrush(fill);
         p.drawRect(r);
@@ -346,11 +369,20 @@ void CallGraphWidget::paintTreeMap(QPainter& p) {
         double pct = 100.0 * double(t.self) / double(totalCost_);
         mono.setPixelSize(10);
         p.setFont(mono);
-        p.setPen(frac > 0.55 ? QColor(20, 15, 15) : QColor(235, 240, 250));
+        double bright = (0.45 + 0.5 * frac) * dk;   // ≈ dimmed fill brightness
+        p.setPen(bright > 0.55 ? QColor(20, 15, 15) : QColor(230, 236, 246));
         QString lbl = oct6(t.entry);
         if (r.width() > 96 && pct >= 0.1) lbl += QString("  %1%").arg(pct, 0, 'f', pct >= 10 ? 0 : 1);
         p.drawText(r.adjusted(4, 1, -3, 0), Qt::AlignLeft | Qt::AlignTop, lbl);
     }
+}
+
+// Scale a colour's brightness by k (0..1); idle nodes are drawn darker, not
+// transparent, so they stay visible until the user purges them.
+static QColor dim(QColor c, double k) {
+    float h, s, v, a; c.getHsvF(&h, &s, &v, &a);
+    if (h < 0) h = 0;   // achromatic guard (fromHsvF needs a valid hue)
+    return QColor::fromHsvF(h, s, std::clamp(v * float(k), 0.0f, 1.0f), a);
 }
 
 // Cold→hot heat colour for a cost fraction (0..1): blue → cyan → yellow → red.
@@ -409,8 +441,8 @@ void CallGraphWidget::paintEvent(QPaintEvent*) {
     p.setFont(mono);
     p.setPen(QColor(120, 130, 150));
     p.drawText(10, height() - 8, QString::fromUtf8(mode_ == ModeTree
-        ? "Tab — граф вызовов · клик — перейти в дизассемблер"
-        : "Tab — карта вызовов · тащить — двигать · колесо — масштаб · клик — дизасм · +/- топ-N · 0 — вписать"));
+        ? "Tab — граф вызовов · клик — дизасм · Del — убрать потемневшие"
+        : "Tab — карта · колесо — масштаб · клик — дизасм · +/- топ-N · 0 — вписать · Del — убрать потемневшие"));
 }
 
 void CallGraphWidget::paintGraph(QPainter& p) {
@@ -419,56 +451,81 @@ void CallGraphWidget::paintGraph(QPainter& p) {
     const QTransform vt = viewTransform();
 
     // ---- Edges (draw first, under the boxes) ----
+    bk::Trace& tr = board_->trace();
     const double logMaxW = std::log(double(maxWeight_) + 1.0);
     for (auto& e : edges_) {
         const Node& a = nodes_[nodeIndex_[e.from]];
         const Node& b = nodes_[nodeIndex_[e.to]];
         bool back = b.level <= a.level;            // cycle / recursion / self up-call
 
-        // Endpoints and the last Bézier control point (used for the arrowhead
-        // direction). Forward edges drop from the caller's bottom to the callee's
-        // top; back edges bow out to the right and re-enter from the side.
-        QPointF p1, p2, c1, c2;
+        // Darken the edge with the less-recently-active of its two endpoints.
+        double vis = std::clamp(std::min(tr.fade(a.lastActive, ACTIVE_WINDOW),
+                                         tr.fade(b.lastActive, ACTIVE_WINDOW)), 0.0, 1.0);
+        double dk = 0.22 + 0.78 * vis;   // brightness factor (idle → dark)
+
+        // Exit point on the caller and entry (tip) on the callee, plus the unit
+        // directions of travel there. Forward edges leave the bottom and enter the
+        // top; back edges (cycles) leave the right side and re-enter the right side.
+        QPointF p1, tip, exitDir, nrm;
         if (back) {
-            p1 = vt.map(QPointF(a.box.right(), a.y + BOX_H / 2));
-            p2 = vt.map(QPointF(b.box.right(), b.y + BOX_H / 2));
-            double t0 = std::log(double(e.weight) + 1.0) / (logMaxW + 1e-9);
-            double bow = (60 + 40 * t0) * zoom_;
-            c1 = p1 + QPointF(bow, 0);
-            c2 = p2 + QPointF(bow, 0);
+            p1  = vt.map(QPointF(a.box.right(), a.y + BOX_H / 2));
+            tip = vt.map(QPointF(b.box.right(), b.y + BOX_H / 2));
+            exitDir = QPointF(1, 0);
+            nrm     = QPointF(-1, 0);      // travels left into the right edge
         } else {
-            p1 = vt.map(QPointF(a.x, a.box.bottom()));
-            p2 = vt.map(QPointF(b.x, b.box.top()));
-            double dy = p2.y() - p1.y();
-            c1 = p1 + QPointF(0, dy * 0.4);
-            c2 = p2 - QPointF(0, dy * 0.4);
+            p1  = vt.map(QPointF(a.x, a.box.bottom()));
+            tip = vt.map(QPointF(b.x, b.box.top()));
+            exitDir = QPointF(0, 1);
+            nrm     = QPointF(0, 1);       // travels down into the top edge
         }
-        double t = std::log(double(e.weight) + 1.0) / (logMaxW + 1e-9);   // 0..1 (colour/arrowhead)
+        double t = std::log(double(e.weight) + 1.0) / (logMaxW + 1e-9);   // 0..1 (colour)
         // Thickness grows logarithmically with the absolute call count:
         // ×1 → ~1px, ×10 → ~3px, ×100 → ~5px, ×1000 → ~7px (before zoom).
         double w = std::clamp(1.0 + 0.9 * std::log(double(e.weight)), 1.0, 9.0) * zoom_;
-        QColor ec = back ? QColor(230, 150, 60) : QColor(90, 170, 235);
+
+        // Slim arrowhead sitting on a short straight approach segment that runs
+        // perpendicular into the box, so the head is always clean regardless of
+        // how the curve arrives.
+        double ahLen = std::max(12.0 * zoom_, 2.1 * w);   // arrowhead length
+        double ahW   = std::max(3.4 * zoom_, 0.8 * w);    // half-width (narrow)
+        double seg   = ahLen + 8.0 * zoom_;               // straight segment length
+        QPointF pB    = tip - nrm * seg;                  // curve ends here
+        QPointF aBase = tip - nrm * ahLen;                // line ends / head begins
+
+        // Control points: leave the caller along exitDir, arrive at pB along nrm
+        // (so the curve is tangent to the straight segment — no kink).
+        double d = std::hypot(pB.x() - p1.x(), pB.y() - p1.y());
+        double h = std::clamp(d * 0.4, 12.0, 500.0);
+        QPointF c1, c2;
+        if (back) {
+            double bow = std::max(h, (50.0 + 40.0 * t) * zoom_);
+            c1 = p1 + exitDir * bow;
+            c2 = pB - nrm * bow;
+        } else {
+            c1 = p1 + exitDir * h;
+            c2 = pB - nrm * h;
+        }
+
+        QColor ec = dim(back ? QColor(230, 150, 60) : QColor(90, 170, 235), dk);
         ec.setAlpha(150 + int(90 * t));
 
         QPainterPath path(p1);
-        path.cubicTo(c1, c2, p2);
+        path.cubicTo(c1, c2, pB);
+        path.lineTo(aBase);                               // straight run into the head
         p.setPen(QPen(ec, std::max(1.0, w), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         p.setBrush(Qt::NoBrush);
         p.drawPath(path);
 
-        // Arrowhead at the callee end, aimed along the tangent (c2 → p2).
-        double ang = std::atan2(p2.y() - c2.y(), p2.x() - c2.x());
-        double ah = (8 + 4 * t) * zoom_;
-        QPointF a1 = p2 - QPointF(std::cos(ang - 0.5) * ah, std::sin(ang - 0.5) * ah);
-        QPointF a2 = p2 - QPointF(std::cos(ang + 0.5) * ah, std::sin(ang + 0.5) * ah);
-        QColor head = ec; head.setAlpha(235);
+        // Slim isosceles arrowhead from aBase to the tip, along nrm.
+        QPointF perp(-nrm.y(), nrm.x());
+        QColor head = ec; head.setAlpha(240);
         p.setPen(Qt::NoPen); p.setBrush(head);
-        p.drawPolygon(QPolygonF({p2, a1, a2}));
+        p.drawPolygon(QPolygonF({tip, aBase + perp * ahW, aBase - perp * ahW}));
 
         // Call-count label at the curve midpoint (skip when zoomed too far out to
         // keep it readable / uncluttered).
         if (zoom_ >= 0.30) {
-            QPointF mid = 0.125 * p1 + 0.375 * c1 + 0.375 * c2 + 0.125 * p2;
+            QPointF mid = 0.125 * p1 + 0.375 * c1 + 0.375 * c2 + 0.125 * pB;
             QString lbl = cgCount(e.weight);
             QFont ef = mono; ef.setPixelSize(std::clamp(int(10 * zoom_), 7, 12));
             p.setFont(ef);
@@ -486,10 +543,12 @@ void CallGraphWidget::paintGraph(QPainter& p) {
     // ---- Nodes ----
     p.setBrush(Qt::NoBrush);
     for (auto& n : nodes_) {
+        double vis = std::clamp(tr.fade(n.lastActive, ACTIVE_WINDOW), 0.0, 1.0);
+        double dk  = 0.22 + 0.78 * vis;   // idle boxes darken (but stay visible)
         QRectF r = vt.mapRect(n.box);
         double frac = double(n.cost) / double(maxCost_);
         double pct  = 100.0 * double(n.cost) / double(totalCost_);
-        QColor fill = heatColor(frac);
+        QColor fill = dim(heatColor(frac), dk);
         p.setPen(QPen(fill.lighter(160), 1.4));
         p.setBrush(fill);
         p.drawRoundedRect(r, 5, 5);
@@ -500,9 +559,9 @@ void CallGraphWidget::paintGraph(QPainter& p) {
         QFontMetrics fm(nf);
         QString l1 = oct6(n.entry);
         QString l2 = QString("%1%  ×%2").arg(pct, 0, 'f', pct >= 10 ? 0 : 1).arg(cgCount(n.calls));
-        p.setPen(QColor(240, 244, 255));
+        p.setPen(dim(QColor(240, 244, 255), dk));
         p.drawText(r.adjusted(4, 2, -4, -2), Qt::AlignHCenter | Qt::AlignTop, l1);
-        p.setPen(QColor(210, 220, 240));
+        p.setPen(dim(QColor(210, 220, 240), dk));
         p.drawText(r.adjusted(4, fm.height() + 1, -4, -2), Qt::AlignHCenter | Qt::AlignTop, l2);
 
         // At high zoom, list a few instructions disassembled from the entry, so a
@@ -514,11 +573,11 @@ void CallGraphWidget::paintGraph(QPainter& p) {
         double dlh = dfm.height();
         double y = r.top() + 2 * fm.height() + 5;
         if (r.bottom() - y < dlh) continue;                 // no room for even one
-        p.setPen(QColor(255, 255, 255, 40));                // faint separator
+        p.setPen(QColor(255, 255, 255, int(40 * (0.3 + 0.7 * vis))));   // faint separator
         p.drawLine(QPointF(r.left() + 5, y - 2), QPointF(r.right() - 5, y - 2));
         const bk::Memory& mem = board_->memory();
         uint16_t a = n.entry;
-        p.setPen(QColor(205, 224, 210));
+        p.setPen(dim(QColor(205, 224, 210), dk));
         for (int k = 0; k < 16 && r.bottom() - y >= dlh; ++k) {
             bk::DisasmLine dl = bk::disasm(mem, a);
             QString s = oct6(a) + "  " + QString::fromStdString(dl.text);
@@ -603,6 +662,14 @@ void CallGraphWidget::keyPressEvent(QKeyEvent* e) {
         topN_ = std::max(topN_ - 10, 10); rebuild(); update(); break;
     case Qt::Key_0:
         fitView_ = true; update(); break;
+    case Qt::Key_Delete: case Qt::Key_Backspace: {
+        // Purge the fully-darkened (long-idle) functions from the graph.
+        bk::Trace& tr = board_->trace();
+        for (auto& n : nodes_)
+            if (tr.fade(n.lastActive, ACTIVE_WINDOW) <= 0.0) hidden_.insert(n.entry);
+        rebuild(); update();
+        break;
+    }
     default: QWidget::keyPressEvent(e);
     }
 }

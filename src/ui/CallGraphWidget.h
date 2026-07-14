@@ -6,15 +6,18 @@
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
+#include <set>
 
 namespace bk { class Board; }
 
 // A profiling call graph: executed subroutines are drawn as boxes, coloured by
 // how much CPU time they cost (cold blue → hot red), connected by call arrows
 // whose thickness grows logarithmically with call frequency. Laid out top-down
-// in levels (callers above callees). A second view (Tab) shows the same data as
-// a nested-rectangles "callee map" (area ∝ cost). Opened from the Отладка menu;
-// pan by dragging, zoom with the wheel, click a box to jump the disassembler.
+// in levels (callers above callees). Routines not called for a while darken (but
+// stay visible); Delete/Backspace purges the fully-darkened ones. A second view
+// (Tab) shows the same data as a nested-rectangles "callee map" (area ∝ cost).
+// Opened from the Отладка menu; pan by dragging, zoom with the wheel, click a
+// box to jump the disassembler.
 class CallGraphWidget : public QWidget {
     Q_OBJECT
 public:
@@ -35,12 +38,13 @@ protected:
 
 private:
     struct Node {
-        uint16_t entry;   // subroutine entry address
-        uint64_t cost;    // CPU-time cost (Σ execCount × ticks) of its instructions
-        uint32_t calls;   // times it was called (Σ incoming JSR edge weight)
-        int      level;   // layout row (call depth)
-        double   x, y;    // centre-x, top-y in graph coordinates
-        QRectF   box;     // cached rectangle in graph coordinates
+        uint16_t entry;      // subroutine entry address
+        uint64_t cost;       // CPU-time cost (Σ execCount × ticks) of its instructions
+        uint32_t calls;      // times it was called (Σ incoming JSR edge weight)
+        uint32_t lastActive; // trace timestamp of its most recent execution (for fade)
+        int      level;      // layout row (call depth)
+        double   x, y;       // centre-x, top-y in graph coordinates
+        QRectF   box;        // cached rectangle in graph coordinates
     };
     struct Edge { uint16_t from, to; uint64_t weight; };
 
@@ -70,6 +74,7 @@ private:
     std::vector<Edge> edges_;
     std::vector<TNode> tree_;       // treemap call tree (tree_[0] = virtual root)
     std::unordered_map<uint16_t, int> nodeIndex_;  // entry → index into nodes_
+    std::set<uint16_t> hidden_;     // functions purged by the user (Delete/Backspace)
     int mode_ = ModeGraph;
     uint64_t maxCost_ = 1, totalCost_ = 1, maxWeight_ = 1;
 
