@@ -49,6 +49,7 @@ HotPathWidget::HotPathWidget(Board* board, QWidget* parent)
     : QWidget(parent), board_(board) {
     setMinimumSize(360, 260);
     setFocusPolicy(Qt::StrongFocus);
+    setMouseTracking(true);   // hover → linked highlighting
 }
 
 void HotPathWidget::refresh() {
@@ -201,6 +202,13 @@ void HotPathWidget::paintEvent(QPaintEvent*) {
     auto hfrac = [&](uint32_t c) { return c ? std::log(double(c) + 1.0) / (logMax + 1e-9) : 0.0; };
 
     auto rowVisible = [&](double yy) { return yy + rowH_ >= top && yy <= height(); };
+    // Linked highlight: mark the row for the routine hovered in another window.
+    auto hlRow = [&](const QRect& rr, uint16_t a) {
+        if (link_ >= 0 && (int)a == link_) {
+            p.fillRect(rr, QColor(255, 245, 150, 45));
+            p.fillRect(QRect(rr.x(), rr.y(), 3, rr.height()), QColor(255, 245, 150));
+        }
+    };
 
     int rank = 1;
     for (auto& path : paths_) {
@@ -211,6 +219,7 @@ void HotPathWidget::paintEvent(QPaintEvent*) {
         if (rowVisible(y)) {
             double pct = 100.0 * double(path.cost) / double(totalCost_);
             p.fillRect(pr, heat(pct / 100.0, 70));
+            hlRow(pr, path.entry);
             int x = 8;
             p.setPen(QColor(230, 200, 120));
             p.drawText(x, (int)y + fm.ascent() + 2, pOpen ? "▾" : "▸");
@@ -240,6 +249,7 @@ void HotPathWidget::paintEvent(QPaintEvent*) {
             rows_.push_back({ br, 1, K_BLOCK, blk.leader, blk.leader, true });
             if (rowVisible(y)) {
                 p.fillRect(br, heat(hfrac(blk.count), 55));
+                hlRow(br, blk.leader);
                 int x = 8 + 2 * cw;
                 p.setPen(QColor(210, 200, 150));
                 p.drawText(x, (int)y + fm.ascent() + 2, bOpen ? "▾" : "▸");
@@ -267,6 +277,7 @@ void HotPathWidget::paintEvent(QPaintEvent*) {
                 rows_.push_back({ ir, 2, K_INSTR, instrs_[k].addr, 0, false });
                 if (rowVisible(y)) {
                     p.fillRect(ir, heat(hfrac(instrs_[k].count), 45));
+                    hlRow(ir, instrs_[k].addr);
                     bk::DisasmLine d = bk::disasm(mem, instrs_[k].addr);
                     QString raw;
                     for (int w = 0; w < d.words; ++w) raw += oct6(mem.peekWord(instrs_[k].addr + w * 2)) + " ";
@@ -310,7 +321,17 @@ void HotPathWidget::mouseMoveEvent(QMouseEvent* e) {
         scroll_ = std::clamp(scroll_, 0.0, std::max(0.0, contentH_ - (height() - 2.0 * rowH_)));
         lastDrag_ = e->pos();
         update();
+        return;
     }
+    // Hover → broadcast the address under the cursor for linked highlighting.
+    int found = -1;
+    for (const Row& r : rows_) if (r.rect.contains(e->pos())) { found = r.addr; break; }
+    if (found != hoverEmit_) { hoverEmit_ = found; setHighlight(found); emit hoverAddress(found); }
+}
+
+void HotPathWidget::leaveEvent(QEvent*) {
+    if (hoverEmit_ != -1) { hoverEmit_ = -1; emit hoverAddress(-1); }
+    setHighlight(-1);
 }
 
 void HotPathWidget::mouseReleaseEvent(QMouseEvent* e) {

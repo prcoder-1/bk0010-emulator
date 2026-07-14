@@ -23,9 +23,11 @@ class HotPathWidget : public QWidget {
 public:
     explicit HotPathWidget(bk::Board* board, QWidget* parent = nullptr);
     void refresh();
+    void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
 
 signals:
     void addressPicked(uint16_t addr);
+    void hoverAddress(int addr);   // address under the cursor (-1 = none)
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -34,6 +36,7 @@ protected:
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
+    void leaveEvent(QEvent*) override;
 
 private:
     struct Instr { uint16_t addr; uint32_t count; };
@@ -71,5 +74,7 @@ private:
     double   contentH_ = 0.0;
     bool     dragging_ = false;
     QPoint   lastDrag_, pressPos_;
+    int      link_ = -1;            // linked-highlight address (-1 = none)
+    int      hoverEmit_ = -2;       // last address broadcast via hoverAddress
     std::vector<Row> rows_;         // rows from the last paint (hit-testing)
 };

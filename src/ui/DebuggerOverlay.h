@@ -16,6 +16,8 @@ public:
     void followPc();                 // scroll disasm so PC is visible
     void setDisasmAddr(uint16_t a) { disasmTop_ = a; update(); } // jump disasm to addr
     void setMemAddr(uint16_t a) { memAddr_ = a; update(); }
+    // Linked highlighting: mark the disasm line at `addr` (-1 = none).
+    void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
     void scrollDisasm(int lines);    // move the disasm window
     void scrollMem(int rows);
 
@@ -30,6 +32,7 @@ private:
     uint16_t memAddr_   = 01000;     // first address shown in the memory panel
     int lineH_ = 14;                 // pixel height of a text line (recomputed)
     int disasmLines_ = 20;
+    int link_ = -1;                  // linked-highlight address (-1 = none)
 
     // Layout rectangles (computed each paint) used by the mouse handlers.
     QRect disasmRect_;

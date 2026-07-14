@@ -288,6 +288,13 @@ void MainWindow::openMemVis() {
     memvis_->raise();
 }
 
+void MainWindow::broadcastHighlight(int addr, QWidget* src) {
+    if (hotpath_   && hotpath_   != src) hotpath_->setHighlight(addr);
+    if (callgraph_ && callgraph_ != src) callgraph_->setHighlight(addr);
+    if (flame_     && flame_     != src) flame_->setHighlight(addr);
+    if (overlay_) overlay_->setHighlight(addr);   // debugger disasm is always a receiver
+}
+
 void MainWindow::openHotPath() {
     if (!hotpath_) {
         hotpath_ = new HotPathWidget(board_.get());
@@ -299,6 +306,8 @@ void MainWindow::openHotPath() {
             overlay_->setDisasmAddr(addr);   // …so set the picked address after it
             overlay_->update();
         });
+        connect(hotpath_, &HotPathWidget::hoverAddress, this,
+                [this](int a) { broadcastHighlight(a, hotpath_); });
     }
     board_->trace().setEnabled(true);
     hotpath_->show();
@@ -315,6 +324,8 @@ void MainWindow::openCallGraph() {
             overlay_->setDisasmAddr(addr);
             overlay_->update();
         });
+        connect(callgraph_, &CallGraphWidget::hoverAddress, this,
+                [this](int a) { broadcastHighlight(a, callgraph_); });
     }
     board_->trace().setEnabled(true);
     callgraph_->show();
@@ -330,6 +341,8 @@ void MainWindow::openFlame() {
             overlay_->setDisasmAddr(addr);
             overlay_->update();
         });
+        connect(flame_, &FlameWidget::hoverAddress, this,
+                [this](int a) { broadcastHighlight(a, flame_); });
     }
     board_->trace().setEnabled(true);
     board_->trace().setFlameEnabled(true);

@@ -48,6 +48,9 @@ private slots:
 private:
     void updateTitle();
     void renderScreen();
+    // Linked highlighting: relay a hovered address to every profiler window (and
+    // the debugger's disassembler) except the one it came from.
+    void broadcastHighlight(int addr, QWidget* src);
     void setPaused(bool paused);
     void setSuspended(bool suspended);   // simple pause (Pause key), no debugger
     void stepInto();

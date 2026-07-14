@@ -17,9 +17,11 @@ class FlameWidget : public QWidget {
 public:
     explicit FlameWidget(bk::Board* board, QWidget* parent = nullptr);
     void refresh();
+    void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
 
 signals:
     void addressPicked(uint16_t addr);
+    void hoverAddress(int addr);   // routine under the cursor (-1 = none)
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -42,5 +44,7 @@ private:
     double   contentH_ = 0.0;
     uint32_t lastBuild_ = 0;
     int      rowH_ = 18;
+    int      link_ = -1;            // linked-highlight function address (-1 = none)
+    int      hoverEmit_ = -2;       // last address broadcast via hoverAddress
     std::vector<Box> boxes_;        // laid-out boxes from the last paint (hit test)
 };

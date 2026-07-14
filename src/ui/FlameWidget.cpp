@@ -1,5 +1,6 @@
 #include "FlameWidget.h"
 #include "Board.h"
+#include "Disasm.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -88,15 +89,19 @@ void FlameWidget::paintEvent(QPaintEvent*) {
 
         if (y + rowH_ >= top && y <= height()) {
             double frac = double(incl_[fr.node]) / double(total_);
-            QColor c = flameColor(f[fr.node].func, fr.node == hover_);
+            bool hl = ((int)f[fr.node].func == link_ && fr.node != 0);
+            QColor c = flameColor(f[fr.node].func, fr.node == hover_ || hl);
             p.fillRect(r, c);
-            p.setPen(QColor(20, 20, 28));
+            p.setPen(hl ? QPen(QColor(255, 245, 150), 2.0) : QPen(QColor(20, 20, 28)));
             p.drawRect(r);
             if (r.width() > 34) {
                 double pct = 100.0 * frac;
                 QString lbl = (f[fr.node].func == 0 && fr.node == 0)
                     ? QString("ВСЁ  %1%").arg(pct, 0, 'f', 0)
                     : QString("%1  %2%").arg(oct6(f[fr.node].func)).arg(pct, 0, 'f', pct >= 10 ? 0 : 1);
+                // Semantic zoom: wider boxes also reveal the routine's first instruction.
+                if (r.width() > 120 && f[fr.node].func != 0)
+                    lbl += "   " + QString::fromStdString(bk::disasm(board_->memory(), f[fr.node].func).text);
                 p.setPen(QColor(25, 20, 15));
                 p.drawText(r.adjusted(4, 0, -2, 0), Qt::AlignVCenter | Qt::AlignLeft,
                            fm.elidedText(lbl, Qt::ElideRight, int(r.width() - 6)));
@@ -154,9 +159,17 @@ void FlameWidget::mouseMoveEvent(QMouseEvent* e) {
     int h = -1;
     for (const Box& b : boxes_) if (b.rect.contains(e->pos())) { h = b.node; break; }
     if (h != hover_) { hover_ = h; update(); }
+    const auto& f = board_->trace().flame();
+    int addr = (h >= 0 && h < (int)f.size()) ? int(f[h].func) : -1;
+    if (addr == 0) addr = -1;                       // root has no address
+    if (addr != hoverEmit_) { hoverEmit_ = addr; setHighlight(addr); emit hoverAddress(addr); }
 }
 
-void FlameWidget::leaveEvent(QEvent*) { if (hover_ != -1) { hover_ = -1; update(); } }
+void FlameWidget::leaveEvent(QEvent*) {
+    if (hover_ != -1) { hover_ = -1; update(); }
+    if (hoverEmit_ != -1) { hoverEmit_ = -1; emit hoverAddress(-1); }
+    setHighlight(-1);
+}
 
 void FlameWidget::wheelEvent(QWheelEvent* e) {
     scroll_ -= e->angleDelta().y() * 0.5;
