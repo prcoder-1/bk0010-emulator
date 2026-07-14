@@ -6,6 +6,7 @@
 #include <QWheelEvent>
 #include <QFontDatabase>
 #include <cstdio>
+#include <cmath>
 
 using bk::Board;
 
@@ -14,6 +15,8 @@ DebuggerOverlay::DebuggerOverlay(Board* board, QWidget* parent)
     setAttribute(Qt::WA_NoSystemBackground);
     setAutoFillBackground(false);
     disasmTop_ = board_->cpu().pc();
+    // Record execution so the disassembler can tint hot (frequently-run) code.
+    board_->trace().setEnabled(true);
 }
 
 void DebuggerOverlay::followPc() {
@@ -73,6 +76,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
 
     auto& cpu = board_->cpu();
     auto& mem = board_->memory();
+    auto& tr  = board_->trace();
 
     int margin = fs;
     int W = width(), H = height();
@@ -118,10 +122,17 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         bool isPc = (a == cpu.pc());
         bool isBp = board_->hasBreakpoint(a);
         int x = disasmRect_.x() + 6;
-        if (isPc) {
-            p.fillRect(QRect(disasmRect_.x() + 2, y - lineH_ + 3,
-                             disasmRect_.width() - 4, lineH_), QColor(60, 60, 0, 160));
+        QRect lineRect(disasmRect_.x() + 2, y - lineH_ + 3, disasmRect_.width() - 4, lineH_);
+        // Tint frequently-executed ("warm") code: log-scaled exec count → an
+        // orange-to-red bar that deepens with heat.
+        uint32_t ec = tr.execCount(a);
+        if (ec && tr.execMax() > 0) {
+            double heat = std::log(double(ec) + 1.0) / std::log(double(tr.execMax()) + 1.0);
+            QColor warm = QColor::fromHsvF(float((28.0 - 28.0 * heat) / 360.0), 0.90f, 0.55f);
+            warm.setAlpha(int(35 + 150 * heat));
+            p.fillRect(lineRect, warm);
         }
+        if (isPc) p.fillRect(lineRect, QColor(60, 60, 0, 160));
         p.setPen(isBp ? bpCol : fg);
         p.drawText(x, y, isBp ? "●" : (isPc ? "►" : " "));
         // raw words
