@@ -4,6 +4,7 @@
 #include "MemVisWidget.h"
 #include "HotPathWidget.h"
 #include "CallGraphWidget.h"
+#include "FlameWidget.h"
 #include "HotChartWidget.h"
 #include "AudioOut.h"
 #include "Disasm.h"
@@ -56,6 +57,7 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
     dbg->addAction("Горячий &путь…", this, &MainWindow::openHotPath, QKeySequence("Ctrl+G"));
     dbg->addAction("Граф &вызовов…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
+    dbg->addAction("&Пламенный граф…", this, &MainWindow::openFlame, QKeySequence("Ctrl+F"));
     dbg->addAction("Горячие инструкции во &времени…", this, &MainWindow::openHotChart, QKeySequence("Ctrl+H"));
     dbg->addSeparator();
     dbg->addAction("&Сохранить состояние…", this, &MainWindow::saveState, QKeySequence("Ctrl+S"));
@@ -107,6 +109,7 @@ void MainWindow::onTick() {
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
     if (hotpath_ && hotpath_->isVisible()) hotpath_->refresh();
     if (callgraph_ && callgraph_->isVisible()) callgraph_->refresh();
+    if (flame_ && flame_->isVisible()) flame_->refresh();
     if (hotchart_ && hotchart_->isVisible()) hotchart_->refresh();
 }
 
@@ -316,6 +319,22 @@ void MainWindow::openCallGraph() {
     board_->trace().setEnabled(true);
     callgraph_->show();
     callgraph_->raise();
+}
+
+void MainWindow::openFlame() {
+    if (!flame_) {
+        flame_ = new FlameWidget(board_.get());
+        flame_->resize(820, 560);
+        connect(flame_, &FlameWidget::addressPicked, this, [this](uint16_t addr) {
+            if (!paused_) setPaused(true);
+            overlay_->setDisasmAddr(addr);
+            overlay_->update();
+        });
+    }
+    board_->trace().setEnabled(true);
+    board_->trace().setFlameEnabled(true);
+    flame_->show();
+    flame_->raise();
 }
 
 void MainWindow::openHotChart() {

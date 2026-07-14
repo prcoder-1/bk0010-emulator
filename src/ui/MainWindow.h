@@ -11,6 +11,7 @@ class DebuggerOverlay;
 class MemVisWidget;
 class HotPathWidget;
 class CallGraphWidget;
+class FlameWidget;
 class HotChartWidget;
 class AudioOut;
 class QTimer;
@@ -39,6 +40,7 @@ private slots:
     void openMemVis();
     void openHotPath();
     void openCallGraph();
+    void openFlame();
     void openHotChart();
     void saveState();
     void loadState();
@@ -57,6 +59,7 @@ private:
     MemVisWidget* memvis_ = nullptr;
     HotPathWidget* hotpath_ = nullptr;
     CallGraphWidget* callgraph_ = nullptr;
+    FlameWidget* flame_ = nullptr;
     HotChartWidget* hotchart_ = nullptr;
     AudioOut* audio_ = nullptr;
     QTimer* timer_ = nullptr;
