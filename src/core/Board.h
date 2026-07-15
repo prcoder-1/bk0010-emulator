@@ -87,6 +87,18 @@ public:
     // (or a breakpoint) was reached.
     bool runUntil(uint16_t addr, int maxTicks);
 
+    // Run (with 50 Hz interrupts) until the call stack becomes shallower than
+    // `targetDepth` (i.e. the current subroutine returns), a breakpoint, HALT, or
+    // the tick limit. For "step out". Needs the flame/CCT tracker enabled.
+    bool runUntilReturn(size_t targetDepth, int maxTicks);
+
+    // I/O-register write log (0177600..0177776), captured only while enabled — for
+    // debugging how a game programs the keyboard / timer / sound / port.
+    struct IoWrite { uint16_t addr, value; uint64_t tick; };
+    void setIoLog(bool on) { ioLogOn_ = on; }
+    void clearIoLog() { ioLog_.clear(); }
+    const std::deque<IoWrite>& ioLog() const { return ioLog_; }
+
     // Execute exactly one instruction (for the debugger). Returns ticks.
     int  stepInstruction();
 
@@ -171,6 +183,9 @@ private:
     void recordFrameBoundary();
 
     std::deque<EmtOp> emtLog_;   // recent EMT 36 file operations (capped ring)
+
+    std::deque<IoWrite> ioLog_;  // recent I/O-register writes (capped ring)
+    bool ioLogOn_ = false;
 
     std::set<uint16_t> breakpoints_;
     std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
