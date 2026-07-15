@@ -7,6 +7,7 @@
 #include <QKeyEvent>
 #include <algorithm>
 #include <vector>
+#include <climits>
 
 using bk::Board;
 
@@ -29,7 +30,11 @@ FlameChartWidget::FlameChartWidget(Board* board, QWidget* parent)
     board_->trace().setSpansEnabled(true);
 }
 
-void FlameChartWidget::refresh() { update(); }
+// Called every 50 Hz emulation tick. A full repaint of the chart is expensive, so
+// throttle the periodic refresh to ~16 Hz — the emulation runs in the same GUI
+// thread, and repainting at 50 Hz starves it (esp. with a wide time window).
+// Interactive repaints (zoom/scroll/hover) call update() directly and are unaffected.
+void FlameChartWidget::refresh() { if (++refreshTick_ >= 3) { refreshTick_ = 0; update(); } }
 
 void FlameChartWidget::paintEvent(QPaintEvent*) {
     QPainter p(this);
@@ -62,6 +67,13 @@ void FlameChartWidget::paintEvent(QPaintEvent*) {
     bars_.clear();
     maxDepth_ = 0;
 
+    // Sub-pixel coalescing: with a wide window (10 s = 30M ticks over ~1000 px)
+    // thousands of short calls collapse onto the same pixel column. Drawing each is
+    // pointless and is what makes the chart choke the emulator, so keep only the
+    // first (newest) bar per (depth, pixel-column) among sub-pixel spans. Wider bars
+    // always draw. This bounds draw calls to ~pixels×depth regardless of span count.
+    std::vector<int> lastCol;                           // last drawn column per depth
+
     auto drawSpan = [&](uint16_t func, int depth, uint64_t s, uint64_t e) {
         if (func == 0) return;                          // skip the synthetic root
         double a = std::max<double>(s, t0), b = std::min<double>(e, t1);
@@ -70,6 +82,10 @@ void FlameChartWidget::paintEvent(QPaintEvent*) {
         double y = top + depth * rowH_ - scroll_;
         maxDepth_ = std::max(maxDepth_, depth);
         if (y + rowH_ < top || y > bottom) return;
+        int col = int(x0);
+        if (x1 - x0 < 1.0 && depth < (int)lastCol.size() && lastCol[depth] == col) return;
+        if (depth >= (int)lastCol.size()) lastCol.resize(depth + 1, INT_MIN);
+        lastCol[depth] = col;
         QRectF r(x0, y, std::max(1.0, x1 - x0), rowH_ - 1);
         bars_.push_back({ r, func });
         bool hl = ((int)func == link_);
