@@ -221,8 +221,8 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     const int srx = sregRect.x() + 10, srw = sregRect.width() - 16;
     // Column headers over the two value columns (written / read), on the title row.
     p.setPen(QColor(150, 180, 230));
-    p.drawText(srx + 20 * cw, sregRect.y() + lineH_, "зап");
-    p.drawText(srx + 27 * cw, sregRect.y() + lineH_, "чит");
+    p.drawText(srx + 20 * cw, sregRect.y() + lineH_, "запись");
+    p.drawText(srx + 27 * cw, sregRect.y() + lineH_, "чтение");
     int gy = sregRect.y() + lineH_ + lineH_;
     for (const auto& sr : sregs) {
         if (gy > sregRect.bottom()) break;
