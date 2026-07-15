@@ -26,6 +26,7 @@ FlameChartWidget::FlameChartWidget(Board* board, QWidget* parent)
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     board_->trace().setFlameEnabled(true);
+    board_->trace().setSpansEnabled(true);
 }
 
 void FlameChartWidget::refresh() { update(); }
@@ -85,12 +86,16 @@ void FlameChartWidget::paintEvent(QPaintEvent*) {
     };
 
     // Completed spans (iterate from the newest until they fall before the window),
-    // then the currently-open frames extending to "now".
+    // then the currently-open frames extending to "now". Clamp the window bounds to
+    // unsigned: t0 can be negative (window wider than the elapsed time / zoomed out),
+    // and casting a negative double to uint64_t would wrap to a huge value.
+    const uint64_t t0u = t0 > 0.0 ? static_cast<uint64_t>(t0) : 0;
+    const uint64_t t1u = static_cast<uint64_t>(t1);
     const auto& spans = tr.spans();
     int scanned = 0;
     for (auto it = spans.rbegin(); it != spans.rend() && scanned < 200000; ++it, ++scanned) {
-        if (it->end < uint64_t(t0)) break;
-        if (it->start >= uint64_t(t1)) continue;
+        if (it->end < t0u) break;
+        if (it->start >= t1u) continue;
         drawSpan(it->func, it->depth, it->start, it->end);
     }
     std::vector<bk::Trace::Span> open;

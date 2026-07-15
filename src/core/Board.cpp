@@ -41,8 +41,7 @@ void Board::timerCheck() {
         timerStart_ += delta * timerPeriod_;
         return;
     }
-    // Counter reached / passed zero — this is the frame-sync tick a game waits on.
-    recordFrameBoundary();
+    // Counter reached / passed zero.
     if (timerCsr_ & TIM_ENBEND) timerCsr_ |= TIM_END;
     if ((timerCsr_ & TIM_ONCE) && !(timerCsr_ & TIM_CONTINUOUS)) {
         timerCount_ = 0;
@@ -68,6 +67,9 @@ void Board::timerCheck() {
         uint32_t rem = static_cast<uint32_t>((delta - timerCount_) % period);
         timerCount_ = static_cast<uint16_t>(timerLimit_ - rem);
         timerStart_ += delta * timerPeriod_;
+        // Only reload-mode underflow is a genuine frame pacer; free-running / one-shot
+        // crossings aren't per-game-frame, so we don't mark them as frame boundaries.
+        recordFrameBoundary();
     }
 }
 

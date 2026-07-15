@@ -368,6 +368,7 @@ void MainWindow::openFlameChart() {
     }
     board_->trace().setEnabled(true);
     board_->trace().setFlameEnabled(true);
+    board_->trace().setSpansEnabled(true);
     flamechart_->show();
     flamechart_->raise();
 }
