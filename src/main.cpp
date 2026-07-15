@@ -278,9 +278,14 @@ int main(int argc, char** argv) {
     // GL contexts (both the QRhi backing store and our QOpenGLWidget) with
     // EGL_BAD_MATCH (3009). Route through XWayland/GLX, which is reliable, whenever
     // an X display is available and the user hasn't chosen a platform explicitly.
-    // Also prefer desktop GL over GLES. Both must be set before QApplication.
+    // Linux-only: on macOS the native plugin is "cocoa" and on Windows "windows" —
+    // forcing "xcb" there aborts startup ("Could not find the Qt platform plugin
+    // xcb"), and DISPLAY may well be set on macOS via XQuartz.
+#if defined(Q_OS_LINUX)
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") && !qEnvironmentVariableIsEmpty("DISPLAY"))
         qputenv("QT_QPA_PLATFORM", "xcb");
+#endif
+    // Prefer desktop GL over GLES. Must be set before QApplication.
     qputenv("QT_OPENGL", "desktop");
     QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
 
