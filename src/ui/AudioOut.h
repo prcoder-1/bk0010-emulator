@@ -30,5 +30,6 @@ private:
     bk::Speaker* spk_;
     QAudioSink* sink_ = nullptr;
     int16_t last_ = 0;
+    int channels_ = 1;   // output channels; the mono signal is fanned out to all
 };
 #endif // HAVE_QT_MULTIMEDIA
