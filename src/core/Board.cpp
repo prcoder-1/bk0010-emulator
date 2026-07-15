@@ -186,6 +186,7 @@ void Board::reset() {
     timerPeriod_ = TIMER_BASE_PERIOD;
     frameTicks_.clear();
     emtLog_.clear();
+    ioLog_.clear();
     speaker_ = 0;
     framesSinceReset_ = 0;
     std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));
@@ -269,6 +270,22 @@ bool Board::runUntil(uint16_t addr, int maxTicks) {
             breakHit_ = true; screen_.setScroll(scroll_); return true;
         }
         if (breakHit_) { screen_.setScroll(scroll_); return true; }  // watchpoint
+    }
+    screen_.setScroll(scroll_);
+    return false;
+}
+
+bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
+    int done = 0, frameTicks = 0;
+    while (done < maxTicks) {
+        if (cpu_.halted()) { screen_.setScroll(scroll_); return false; }
+        if (frameTicks == 0) deliverFrameInterrupts();   // keep the 50 Hz IRQ alive
+        int t = stepCore();
+        done += t; frameTicks += t;
+        if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
+        if (trace_.stackDepth() < targetDepth) { screen_.setScroll(scroll_); return true; }
+        if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc()) && breakAllows(cpu_.pc())) breakHit_ = true;
+        if (breakHit_) { screen_.setScroll(scroll_); return true; }
     }
     screen_.setScroll(scroll_);
     return false;
@@ -491,6 +508,10 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
 
 bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     if (addr >= ADDR_IO_PAGE) ioLastWrite_[(addr - ADDR_IO_PAGE) >> 1] = value; // for the debugger
+    if (ioLogOn_ && addr >= ADDR_IO_PAGE) {
+        ioLog_.push_back({addr, value, totalTicks_});
+        if (ioLog_.size() > 2048) ioLog_.pop_front();
+    }
     switch (addr) {
     case REG_SCROLL:    scroll_ = value & 0777; return true;
     case REG_TIMER_LIM: timerLimit_ = value; return true;

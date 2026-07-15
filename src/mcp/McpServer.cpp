@@ -6,6 +6,8 @@
 #include <QTextStream>
 #include <QRegularExpression>
 #include <QImage>
+#include <QBuffer>
+#include <tuple>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -170,6 +172,8 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_step", "Execute N single instructions.",
         schema({{"count", P("integer", "Instruction count (default 1)")}})));
     t.append(tool("bk_step_over", "Step one instruction, stepping over JSR/EMT calls.", schema({})));
+    t.append(tool("bk_step_out", "Run until the current subroutine returns to its caller (finish).",
+        schema({{"max_ticks", P("integer", "CPU-tick limit (default 20000000)")}})));
     t.append(tool("bk_regs", "Read the CPU registers R0-R7, SP, PC and PSW (with flags).", schema({})));
     t.append(tool("bk_set_reg", "Set a register (R0..R7, SP, PC, PSW).",
         schema({{"name", P("string", "R0..R7 / SP / PC / PSW")}, {"value", P("string", "New value")}}, {"name", "value"})));
@@ -195,8 +199,9 @@ QJsonArray McpServer::toolDefs() const {
                   "hold=false (code optional) to release.",
         schema({{"code", P("integer", "BK key code, e.g. 012=Enter, 040=Space, 031=right, 010=left, 032=up, 033=down")},
                 {"hold", P("boolean", "Hold the key physically down across frames (default false = tap)")}}, {})));
-    t.append(tool("bk_screenshot", "Render the BK screen to a PNG file.",
-        schema({{"path", P("string", "Output PNG path")}, {"mono", P("boolean", "512x256 monochrome (default false=colour)")}}, {"path"})));
+    t.append(tool("bk_screenshot", "Render the BK screen and return it as an inline PNG image (so you "
+                  "can see it directly); optionally also write it to a file.",
+        schema({{"path", P("string", "Optional output PNG path")}, {"mono", P("boolean", "512x256 monochrome (default false=colour)")}})));
     t.append(tool("bk_audio", "Run frames while capturing the speaker (piezo, 0177716 bit 6) "
                   "to a mono 16-bit WAV file, and report peak level, active fraction and rough "
                   "pitch. Lets you verify sound output (drive events with bk_key/bk_run first).",
@@ -255,6 +260,16 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_emt_log", "List intercepted EMT 36 tape/disk file operations (which files the "
                   "game loaded/saved, load address, length, and result). Useful for multi-part loaders.",
         schema({{"count", P("integer", "How many recent ops to show (default 40)")}})));
+    t.append(tool("bk_xrefs", "Cross-references from the recorded control-flow edges: who calls/jumps/"
+                  "branches TO an address, and where it goes FROM there, with counts.",
+        schema({{"addr", addrArg}}, {"addr"})));
+    t.append(tool("bk_io_state", "Decode the current I/O-register state (keyboard, scroll, timer, "
+                  "port, system/speaker) — a hardware snapshot.", schema({})));
+    t.append(tool("bk_io_log", "Log writes to the I/O registers (0177600..0177776). enable=true starts "
+                  "capture (clears first), enable=false stops; call with no args to dump the buffer. "
+                  "See how a game programs the keyboard / timer / sound / port.",
+        schema({{"enable", P("boolean", "Start (true) / stop (false) capture")},
+                {"count", P("integer", "How many recent writes to dump (default 60)")}})));
     return t;
 }
 
@@ -536,11 +551,24 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
     if (name == "bk_screenshot") {
         board_.screen().setColorMode(!args.value("mono").toBool(false));
         board_.screen().render(board_.memory());
-        QImage img(reinterpret_cast<const uchar*>(board_.screen().pixels()),
-                   bk::Screen::TEX_W, bk::Screen::TEX_H, QImage::Format_ARGB32);
-        QString path = args.value("path").toString();
-        if (!img.copy().save(path)) return fail("cannot write " + path);
-        return textContent("Wrote screenshot to " + path);
+        QImage img = QImage(reinterpret_cast<const uchar*>(board_.screen().pixels()),
+                            bk::Screen::TEX_W, bk::Screen::TEX_H, QImage::Format_ARGB32).copy();
+        QString path = args.value("path").toString(), note = "BK screen";
+        if (!path.isEmpty()) { if (!img.save(path)) return fail("cannot write " + path); note += " (also written to " + path + ")"; }
+        QByteArray png; QBuffer buf(&png); buf.open(QIODevice::WriteOnly); img.save(&buf, "PNG"); buf.close();
+        QJsonObject txt{{"type", "text"}, {"text", note}};
+        QJsonObject im{{"type", "image"}, {"data", QString::fromLatin1(png.toBase64())}, {"mimeType", "image/png"}};
+        return QJsonObject{{"content", QJsonArray{txt, im}}, {"isError", false}};
+    }
+    if (name == "bk_step_out") {
+        size_t d = board_.trace().stackDepth();
+        if (d <= 1) { board_.stepInstruction(); return textContent("At top level; stepped one instruction.\n" + regsText() + "\n" + disasmText(board_.cpu().pc(), 3)); }
+        bool ret = board_.runUntilReturn(d, args.value("max_ticks").toInt(20000000));
+        QString extra;
+        if (board_.breakHit()) { extra = board_.watchHit() ? "\n(stopped on a watchpoint)" : "\n(stopped on a breakpoint)"; board_.clearBreakHit(); }
+        return textContent(QString("%1%2\n%3\n%4")
+            .arg(ret ? "Returned to caller." : "Did not return within the tick limit.").arg(extra)
+            .arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
     }
     if (name == "bk_audio") {
         // Run `frames` 50 Hz frames while capturing the speaker (0177716 bit 6)
@@ -888,6 +916,78 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                        .arg(e.response < 4 ? resp[e.response] : "?");
         }
         if (log.empty()) out += "  (none — no EMT 36 file I/O yet)\n";
+        return textContent(out);
+    }
+
+    if (name == "bk_xrefs") {
+        uint16_t target; QString err; if (!resolveAddr(args, "addr", target, err)) return fail(err);
+        const bk::Memory& mem = board_.memory();
+        auto sym = [&](uint16_t x) { auto it = symName_.find(x); return it != symName_.end() ? QString(" <%1>").arg(QString::fromStdString(it->second)) : QString(); };
+        auto kind = [&](uint16_t ir) -> const char* {
+            if (ir >= 0004000 && ir <= 0004777) return "call";
+            if (ir >= 0000100 && ir <= 0000177) return "jmp";
+            if ((ir >= 0000400 && ir <= 0003477) || (ir >= 0100000 && ir <= 0103777)) return "branch";
+            if ((ir >= 0000200 && ir <= 0000207) || ir == 02 || ir == 06) return "return";
+            return "flow";
+        };
+        std::vector<std::tuple<uint32_t, uint16_t, const char*>> to, from;
+        for (auto& e : board_.trace().edges()) {
+            uint16_t f = e.first >> 16, t2 = e.first & 0xFFFF;
+            if (t2 == target) to.push_back({e.second, f, kind(mem.peekWord(f))});
+            if (f == target)  from.push_back({e.second, t2, kind(mem.peekWord(f))});
+        }
+        std::sort(to.rbegin(), to.rend()); std::sort(from.rbegin(), from.rend());
+        QString out = QString("Cross-references for %1%2:\n  TO here (callers/jumps):\n").arg(oct6(target)).arg(sym(target));
+        for (auto& x : to)   out += QString("    %1%2  %3  x%4\n").arg(oct6(std::get<1>(x))).arg(sym(std::get<1>(x))).arg(std::get<2>(x)).arg(std::get<0>(x));
+        if (to.empty()) out += "    (none recorded)\n";
+        out += "  FROM here (targets):\n";
+        for (auto& x : from) out += QString("    %1%2  %3  x%4\n").arg(oct6(std::get<1>(x))).arg(sym(std::get<1>(x))).arg(std::get<2>(x)).arg(std::get<0>(x));
+        if (from.empty()) out += "    (none recorded)\n";
+        return textContent(out);
+    }
+    if (name == "bk_io_state") {
+        auto r = [&](uint16_t a) { return board_.peekReg(a); };
+        uint16_t csr = r(0177712);
+        QString timerBits;
+        if (csr & 0020) timerBits += "RUN ";
+        if (csr & 0002) timerBits += "CAP(free) ";
+        if (csr & 0010) timerBits += "OS(oneshot) ";
+        if (csr & 0004) timerBits += "MON ";
+        if (csr & 0200) timerBits += "FL(underflow) ";
+        uint16_t sys = r(0177716);
+        return textContent(QString(
+            "I/O state:\n"
+            "  Keyboard  status 0177660=%1  data 0177662=%2  (%3)\n"
+            "  Scroll    0177664=%4\n"
+            "  Timer     limit 0177706=%5  count 0177710=%6  csr 0177712=%7 [%8]\n"
+            "  Port      0177714=%9\n"
+            "  System    0177716=%10  (key-held bit6=%11)")
+            .arg(oct6(r(0177660))).arg(oct6(r(0177662))).arg(board_.keyReady() ? "code ready" : "empty")
+            .arg(oct6(r(0177664)))
+            .arg(oct6(r(0177706))).arg(oct6(r(0177710))).arg(oct6(csr)).arg(timerBits.trimmed().isEmpty() ? "stopped" : timerBits.trimmed())
+            .arg(oct6(r(0177714)))
+            .arg(oct6(sys)).arg((sys & 0100) ? "1(up)" : "0(down)"));
+    }
+    if (name == "bk_io_log") {
+        if (args.contains("enable")) {
+            bool on = args.value("enable").toBool();
+            if (on) board_.clearIoLog();
+            board_.setIoLog(on);
+        }
+        static const std::map<uint16_t, const char*> nm = {
+            {0177660, "kbd.status"}, {0177662, "kbd.data"}, {0177664, "scroll"},
+            {0177706, "timer.limit"}, {0177710, "timer.count"}, {0177712, "timer.csr"},
+            {0177714, "port"}, {0177716, "system/speaker"}};
+        int count = args.value("count").toInt(60);
+        const auto& log = board_.ioLog();
+        QString out = QString("I/O writes (%1 captured):\n").arg(log.size());
+        int startIdx = std::max(0, (int)log.size() - count);
+        for (int i = startIdx; i < (int)log.size(); ++i) {
+            auto it = nm.find(log[i].addr);
+            out += QString("  %1 = %2   %3\n").arg(oct6(log[i].addr)).arg(oct6(log[i].value))
+                       .arg(it != nm.end() ? it->second : "");
+        }
+        if (log.empty()) out += "  (buffer empty — enable capture with {\"enable\":true}, run, then dump)\n";
         return textContent(out);
     }
 

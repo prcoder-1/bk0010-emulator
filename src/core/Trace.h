@@ -91,6 +91,7 @@ public:
     // profiler was on). Currently-open frames are appended (end = now) by openFrames.
     const std::deque<Span>& spans() const { return spans_; }
     uint64_t flameTick() const { return flameTick_; }
+    size_t   stackDepth() const { return fstack_.size(); }   // current call depth (for step-out)
     void openFrames(std::vector<Span>& out) const {
         for (size_t i = 1; i < fstack_.size(); ++i)
             out.push_back({flame_[fstack_[i].node].func,

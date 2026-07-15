@@ -53,11 +53,12 @@ Two layers, deliberately decoupled:
   (single-threaded — emulation runs in the GUI thread; one frame = ~60000 ticks is
   fast enough), and hosts `GlScreen` + the debugger widgets.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
-  as ~35 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
-  run/step, regs/mem, break (optionally conditional) / watch (data watchpoints),
-  backtrace, search/diff memory, type, callers/callees, frames, coverage, profile
-  (speedscope folded stacks), vram (ASCII-art screen), emt-log (EMT 36 file I/O),
-  hotspots, screenshot/audio, state save/load.
+  as ~40 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
+  run/step/step-over/step-out, regs/mem, break (optionally conditional) / watch
+  (data watchpoints), backtrace, xrefs, search/diff memory, type, callers/callees,
+  frames, coverage, profile (speedscope folded stacks), vram (ASCII-art screen),
+  io-state / io-log, emt-log (EMT 36 file I/O), hotspots, screenshot (inline PNG) /
+  audio, state save/load.
   Owns its own `Board`, reuses only the `Board`/`Cpu`/`Memory`/`Screen`/`Trace`
   public API + `bk::disasm`. Entered at the very top of `main()` before any GUI
   setup; runs under an offscreen `QGuiApplication` so `bk_screenshot` can save PNGs.
