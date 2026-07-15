@@ -85,6 +85,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
         || !dbgShot.isEmpty() || !faShot.isEmpty() || !fcShot.isEmpty())
         board.trace().setEnabled(true);
     if (!faShot.isEmpty() || !fcShot.isEmpty()) board.trace().setFlameEnabled(true);
+    if (!fcShot.isEmpty()) board.trace().setSpansEnabled(true);
     // Let the monitor ROM initialise (vectors, stack, display driver) before
     // jumping into a game.
     for (int i = 0; i < 25; ++i) board.runFrame();

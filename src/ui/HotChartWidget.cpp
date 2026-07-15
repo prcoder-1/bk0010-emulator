@@ -357,7 +357,8 @@ void HotChartWidget::keyPressEvent(QKeyEvent* e) {
         update(); return;
     case Qt::Key_G:                              // aggregate instructions ↔ subroutines
         aggregate_ = !aggregate_;
-        series_.clear();                         // keys change; rebuild lines
+        series_.clear();                         // keys change meaning; rebuild lines
+        excluded_.clear();                       // hidden keys aren't comparable across modes
         update(); return;
     case Qt::Key_S:                              // lines ↔ stacked area
         stacked_ = !stacked_;

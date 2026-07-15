@@ -82,6 +82,9 @@ public:
 
     void setFlameEnabled(bool e) { flameOn_ = e; if (flame_.empty()) flameReset(); }
     bool flameEnabled() const { return flameOn_; }
+    // Timestamped call spans (for the flame *chart*) are only recorded when this is
+    // on, so the flame *graph* (which needs the CCT but not spans) pays nothing.
+    void setSpansEnabled(bool e) { spansOn_ = e; }
     void flameClear() { flameReset(); }
     const std::vector<FlameNode>& flame() const { return flame_; }
     // Time-ordered spans + the running flame-tick clock (ticks charged while the
@@ -103,8 +106,10 @@ public:
         if (!flameOn_) return;
         if (ticks > 0) { flameTick_ += static_cast<uint64_t>(ticks); flame_[fstack_.back().node].self += static_cast<uint64_t>(ticks); }
         while (fstack_.size() > 1 && sp > fstack_.back().second()) {
-            const FStack& top = fstack_.back();          // returned → emit its span
-            spanPush(flame_[top.node].func, static_cast<uint16_t>(flame_[top.node].depth), top.start, flameTick_);
+            if (spansOn_) {                              // returned → emit its span
+                const FStack& top = fstack_.back();
+                spanPush(flame_[top.node].func, static_cast<uint16_t>(flame_[top.node].depth), top.start, flameTick_);
+            }
             fstack_.pop_back();
         }
         if (ir >= 0004000 && ir <= 0004777) flamePush(pcNow, sp);   // JSR
@@ -116,6 +121,7 @@ public:
 private:
     struct FStack { int node; uint16_t sp_; uint64_t start; uint16_t second() const { return sp_; } };
     bool flameOn_ = false;
+    bool spansOn_ = false;                            // record timestamped call spans
     uint64_t flameTick_ = 0;                          // ticks charged while profiling
     std::vector<FlameNode> flame_;                    // flame_[0] = root
     std::vector<FStack> fstack_;                       // active call stack
