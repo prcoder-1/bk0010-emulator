@@ -53,13 +53,17 @@ CallGraphWidget::CallGraphWidget(Board* board, QWidget* parent)
 
 void CallGraphWidget::refresh() {
     // Rebuild at most ~once per second (the layout is expensive and jitters if
-    // reordered every frame); repaint every tick so panning stays smooth. The
-    // GUI caller already gates this on isVisible(); headless callers drive it
-    // directly.
+    // reordered every frame). The GUI caller already gates this on isVisible();
+    // headless callers drive it directly.
     uint32_t now = board_->trace().now();
     // Don't reorder nodes_ while the user is dragging a box (indices must stay put).
-    if (!draggingNode_ && (nodes_.empty() || now - lastBuild_ >= 50)) { rebuild(); lastBuild_ = now; }
-    update();
+    bool rebuilt = false;
+    if (!draggingNode_ && (nodes_.empty() || now - lastBuild_ >= 50)) { rebuild(); lastBuild_ = now; rebuilt = true; }
+    // Repaint immediately on rebuild; otherwise the layout is static and only the
+    // node/edge colours fade, so throttle that animation to ~16 Hz instead of the
+    // full 50 Hz — the emulation shares this GUI thread. Interactive events
+    // (drag/pan/zoom/hover) repaint directly and bypass the throttle.
+    if (rebuilt || ++refreshTick_ >= 3) { refreshTick_ = 0; update(); }
 }
 
 // ---------------------------------------------------------------------------

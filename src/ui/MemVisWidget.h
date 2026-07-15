@@ -34,4 +34,5 @@ public:
     void refresh();
 private:
     MemCanvas* canvas_;
+    int refreshTick_ = 0;   // throttles the heatmap repaint to ~16 Hz
 };

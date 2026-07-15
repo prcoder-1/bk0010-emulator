@@ -92,6 +92,7 @@ private:
 
     int      topN_ = 12;            // show only the N costliest blocks (+/- adjust)
     uint32_t lastBuild_ = 0;        // trace clock at last rebuild (throttle)
+    int      refreshTick_ = 0;      // throttles the fade-animation repaint to ~16 Hz
 
     double  zoom_ = 1.0;
     QPointF pan_{0, 0};             // view offset (px)
