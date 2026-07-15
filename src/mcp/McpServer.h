@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <map>
+#include <vector>
 #include <cstdint>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -25,6 +26,7 @@ private:
     QString     lastBin_;
     std::map<uint16_t, std::string> symName_; // addr -> symbol
     std::map<std::string, uint16_t> symAddr_; // symbol -> addr
+    std::vector<uint8_t> memSnap_;            // RAM snapshot for bk_diff_mem
 
     // --- JSON-RPC plumbing ---
     void send(const QJsonObject& msg) const;

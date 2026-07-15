@@ -100,8 +100,12 @@ void Board::timerSetMode(uint8_t mode) {
 
 Board::Board() {
     mem_.setIoBus(this);
-    // Feed the access heatmap (no-op unless the trace is enabled).
-    mem_.setAccessHook([this](uint16_t a, bool w, bool b) { trace_.access(a, w, b); });
+    // Feed the access heatmap (no-op unless the trace is enabled) and the
+    // data watchpoints (no-op unless any are set).
+    mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
+        trace_.access(a, w, b);
+        if (!watchpoints_.empty()) checkWatch(a, w, b);
+    });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
 }
@@ -110,7 +114,9 @@ Board::Board() {
 int Board::stepCore() {
     uint16_t pcBefore = cpu_.pc();
     trace_.exec(pcBefore);
+    watchArmed_ = false;
     int t = cpu_.step();
+    if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
     totalTicks_ += static_cast<uint64_t>(t);
     sound_.feed(speaker_ & 1, t);
     if (trace_.enabled()) {
@@ -120,6 +126,20 @@ int Board::stepCore() {
         trace_.profileStep(mem_.peekWord(pcBefore), pcNow, cpu_.sp(), t); // flame-graph CCT
     }
     return t;
+}
+
+// Memory-access hook for data watchpoints: fires while an instruction executes,
+// so it sets breakHit_ (and arms watchPc_ capture in stepCore) to stop the run.
+void Board::checkWatch(uint16_t addr, bool write, bool isByte) {
+    auto hit = [&](uint16_t a) {
+        auto it = watchpoints_.find(a);
+        if (it != watchpoints_.end() && (it->second & (write ? 2 : 1))) {
+            watchHit_ = true; watchAddr_ = a; watchWrite_ = write;
+            watchArmed_ = true; breakHit_ = true;
+        }
+    };
+    hit(addr);
+    if (!isByte) hit(static_cast<uint16_t>(addr + 1));
 }
 
 bool Board::loadRoms(const std::string& romDir) {
@@ -211,6 +231,7 @@ int Board::runTicks(int ticks) {
             breakHit_ = true;
             break;
         }
+        if (breakHit_) break;   // data watchpoint fired inside the instruction
         if (cpu_.waiting()) { // idle: consume the rest of the frame quietly
             cpu_.clearWait();
             break;
@@ -230,6 +251,7 @@ bool Board::runUntil(uint16_t addr, int maxTicks) {
         if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc())) {
             breakHit_ = true; screen_.setScroll(scroll_); return true;
         }
+        if (breakHit_) { screen_.setScroll(scroll_); return true; }  // watchpoint
     }
     screen_.setScroll(scroll_);
     return false;
