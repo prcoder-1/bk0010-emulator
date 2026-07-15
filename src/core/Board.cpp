@@ -185,6 +185,7 @@ void Board::reset() {
     timerStart_ = 0;
     timerPeriod_ = TIMER_BASE_PERIOD;
     frameTicks_.clear();
+    emtLog_.clear();
     speaker_ = 0;
     framesSinceReset_ = 0;
     std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));
@@ -386,7 +387,16 @@ bool Board::handleEmt36() {
     while (n > 0 && (raw[n - 1] == ' ' || raw[n - 1] == '\0')) --n;
     std::string name(raw, raw + n);
 
-    auto respond = [&](uint8_t code) { mem_.pokeByte(base + 1, code); return true; };
+    auto respond = [&](uint8_t code) {
+        mem_.pokeByte(base + 1, code);
+        if (cmd >= CMD_WRITE) {   // log actual file operations (not motor STOP/START)
+            uint16_t la = mem_.peekWord(base + 2), ll = mem_.peekWord(base + 4);
+            if (cmd != CMD_WRITE && code == RSP_OK) { la = mem_.peekWord(base + 026); ll = mem_.peekWord(base + 030); }
+            emtLog_.push_back({cmd, code, name, la, ll, totalTicks_});
+            if (emtLog_.size() > 256) emtLog_.pop_front();
+        }
+        return true;
+    };
 
     switch (cmd) {
     case CMD_STOP:

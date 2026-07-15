@@ -111,6 +111,11 @@ public:
     // the profiler can mark real per-game frame boundaries on its time axis.
     const std::deque<uint64_t>& frameBoundaries() const { return frameTicks_; }
 
+    // Log of intercepted EMT 36 file operations (WRITE/READ/FICT), so a debugger
+    // can see which tape/disk files a game loaded or saved and with what result.
+    struct EmtOp { uint8_t cmd, response; std::string name; uint16_t addr, len; uint64_t tick; };
+    const std::deque<EmtOp>& emtLog() const { return emtLog_; }
+
     // Side-effect-free snapshot of a system I/O register (0177660..0177716) for
     // the debugger — returns the value ioRead would yield, without the side
     // effects (no ready-flag clear, no timer advance). Unknown addr -> raw peek.
@@ -164,6 +169,8 @@ private:
     // Tick timestamps of recent timer-underflow (frame-sync) events (capped ring).
     std::deque<uint64_t> frameTicks_;
     void recordFrameBoundary();
+
+    std::deque<EmtOp> emtLog_;   // recent EMT 36 file operations (capped ring)
 
     std::set<uint16_t> breakpoints_;
     std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
