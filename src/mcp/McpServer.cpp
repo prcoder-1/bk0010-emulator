@@ -252,6 +252,9 @@ QJsonArray McpServer::toolDefs() const {
                   "'see' the display without a PNG. Also reports non-black pixel count / bounding box.",
         schema({{"width", P("integer", "Output width in characters (default 64)")},
                 {"mono", P("boolean", "Interpret as 512x256 mono (default false=colour)")}})));
+    t.append(tool("bk_emt_log", "List intercepted EMT 36 tape/disk file operations (which files the "
+                  "game loaded/saved, load address, length, and result). Useful for multi-part loaders.",
+        schema({{"count", P("integer", "How many recent ops to show (default 40)")}})));
     return t;
 }
 
@@ -867,6 +870,25 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         QString head = QString("Screen %1x%2, non-black %3 px").arg(W).arg(H).arg(nonblack);
         if (maxx >= 0) head += QString(", bbox (%1,%2)-(%3,%4)").arg(minx).arg(miny).arg(maxx).arg(maxy);
         return textContent(head + ":\n" + grid);
+    }
+
+    if (name == "bk_emt_log") {
+        int count = args.value("count").toInt(40);
+        const auto& log = board_.emtLog();
+        static const char* cmds[] = {"STOP", "START", "WRITE", "READ", "FICT_READ"};
+        static const char* resp[] = {"OK", "INCORRECT_NAME", "CRC_ERROR", "STOP"};
+        QString out = QString("EMT 36 file operations (%1 recorded):\n").arg(log.size());
+        int shown = 0, startIdx = std::max(0, (int)log.size() - count);
+        for (int i = startIdx; i < (int)log.size(); ++i, ++shown) {
+            const auto& e = log[i];
+            out += QString("  %1 '%2'  addr=%3 len=%4  -> %5\n")
+                       .arg(e.cmd < 5 ? cmds[e.cmd] : "?", -9)
+                       .arg(QString::fromStdString(e.name), -16)
+                       .arg(oct6(e.addr)).arg(oct6(e.len))
+                       .arg(e.response < 4 ? resp[e.response] : "?");
+        }
+        if (log.empty()) out += "  (none — no EMT 36 file I/O yet)\n";
+        return textContent(out);
     }
 
     return fail("unknown tool: " + name);
