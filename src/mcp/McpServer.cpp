@@ -59,7 +59,8 @@ static bool parseNumber(const QJsonValue& v, long& out) {
 McpServer::McpServer(std::string romDir) : romDir_(std::move(romDir)) {
     romsOk_ = board_.loadRoms(romDir_);
     board_.reset();
-    board_.trace().setEnabled(true); // collect hot-spot data from the start
+    board_.trace().setEnabled(true);      // collect hot-spot data from the start
+    board_.trace().setFlameEnabled(true); // maintain the shadow call stack (bk_backtrace)
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +205,34 @@ QJsonArray McpServer::toolDefs() const {
         schema({{"path", P("string", "Path to the .map file")}}, {"path"})));
     t.append(tool("bk_hotspots", "List the most-executed instructions (hot code) from the trace.",
         schema({{"count", P("integer", "How many (default 20)")}})));
+    t.append(tool("bk_watch", "Set a data watchpoint: stop the next bk_run/bk_run_until when an "
+                  "address is read and/or written. Great for finding who touches a variable.",
+        schema({{"addr", addrArg},
+                {"mode", P("string", "read|write|rw (default write)")}}, {"addr"})));
+    t.append(tool("bk_unwatch", "Remove a data watchpoint (or all).",
+        schema({{"addr", addrArg}, {"all", P("boolean", "Remove all watchpoints")}})));
+    t.append(tool("bk_watchpoints", "List active data watchpoints.", schema({})));
+    t.append(tool("bk_backtrace", "Reconstruct the call stack at the current PC by scanning the "
+                  "hardware stack (R6) for return addresses left by JSR. Shows how execution got here.",
+        schema({{"depth", P("integer", "Max frames to report (default 24)")}})));
+    t.append(tool("bk_search_mem", "Search memory for a value or string. Give ONE of: word, byte, "
+                  "bytes (array), or text. Returns matching octal addresses.",
+        schema({{"word", P("string", "16-bit word to find (dec/hex/octal)")},
+                {"byte", P("string", "single byte to find")},
+                {"bytes", P("array", "sequence of bytes to find")},
+                {"text", P("string", "ASCII/KOI-7 string to find")},
+                {"start", addrArg}, {"end", addrArg},
+                {"max", P("integer", "Max hits to list (default 64)")}})));
+    t.append(tool("bk_diff_mem", "Find changed memory. action=save snapshots RAM; action=diff lists "
+                  "cells that changed since the snapshot. Snapshot before an action (e.g. a keypress), "
+                  "diff after, to locate the variable it changed.",
+        schema({{"action", P("string", "save|diff (default diff)")},
+                {"start", addrArg}, {"end", addrArg},
+                {"max", P("integer", "Max changed cells to list (default 64)")}})));
+    t.append(tool("bk_type", "Type an ASCII string through the keyboard (one char per few frames, "
+                  "like real typing). Newline = Enter. Use to drive menus / text entry.",
+        schema({{"text", P("string", "String to type")},
+                {"max_frames", P("integer", "Frame budget (default 600)")}}, {"text"})));
     return t;
 }
 
@@ -316,14 +345,25 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
     }
     if (name == "bk_run") {
         int maxFrames = args.value("max_frames").toInt(200);
-        QString reason = "frame-limit"; int ran = 0;
+        QString reason = "frame-limit", extra; int ran = 0;
         for (; ran < maxFrames; ++ran) {
             board_.runFrame();
-            if (board_.breakHit()) { board_.clearBreakHit(); reason = "breakpoint"; ++ran; break; }
+            if (board_.breakHit()) {
+                ++ran;
+                if (board_.watchHit()) {
+                    reason = "watchpoint";
+                    extra = QString("\nWatch %1 %2 by PC=%3  %4")
+                        .arg(oct6(board_.watchAddr())).arg(board_.watchWrite() ? "WRITE" : "READ")
+                        .arg(oct6(board_.watchPc()))
+                        .arg(QString::fromStdString(bk::disasm(board_.memory(), board_.watchPc()).text));
+                } else reason = "breakpoint";
+                board_.clearBreakHit();
+                break;
+            }
             if (board_.cpu().halted()) { reason = "halted"; ++ran; break; }
         }
-        return textContent(QString("Stopped (%1) after %2 frames.\n%3\n%4")
-            .arg(reason).arg(ran).arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
+        return textContent(QString("Stopped (%1) after %2 frames.%3\n%4\n%5")
+            .arg(reason).arg(ran).arg(extra).arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
     }
     if (name == "bk_run_until") {
         uint16_t target; QString err;
@@ -524,6 +564,141 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             out += QString("%1%2  %3  x%4\n").arg(oct6(a)).arg(sym).arg(QString::fromStdString(d.text)).arg(hot[i].first);
         }
         return textContent(out);
+    }
+
+    if (name == "bk_watch") {
+        uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+        QString mode = args.value("mode").toString("write").toLower();
+        bool r = (mode == "read" || mode == "rw"), w = (mode == "write" || mode == "rw");
+        if (!r && !w) w = true;
+        board_.addWatch(a, r, w);
+        return textContent(QString("Watch set at %1 (%2%3). Run bk_run / bk_run_until to trigger.")
+            .arg(oct6(a)).arg(r ? "R" : "").arg(w ? "W" : ""));
+    }
+    if (name == "bk_unwatch") {
+        if (args.value("all").toBool()) { board_.clearWatches(); return textContent("All watchpoints removed."); }
+        uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+        board_.removeWatch(a);
+        return textContent("Watch removed at " + oct6(a));
+    }
+    if (name == "bk_watchpoints") {
+        QString out = "Watchpoints:\n";
+        for (auto& kv : board_.watchpoints())
+            out += QString("  %1  %2%3\n").arg(oct6(kv.first))
+                       .arg(kv.second & 1 ? "R" : "").arg(kv.second & 2 ? "W" : "");
+        if (board_.watchpoints().empty()) out += "  (none)\n";
+        return textContent(out);
+    }
+    if (name == "bk_backtrace") {
+        int depth = args.value("depth").toInt(24);
+        const bk::Memory& mem = board_.memory();
+        auto sym = [&](uint16_t x) {
+            auto it = symName_.find(x);
+            return it != symName_.end() ? QString(" <%1>").arg(QString::fromStdString(it->second)) : QString();
+        };
+        auto isJsr = [](uint16_t ir) { return ir >= 0004000 && ir <= 0004777; };
+        uint16_t pc = board_.cpu().pc();
+
+        // Preferred: the exact shadow call stack from the call tracker (JSR/return
+        // + SP resync). Falls back to a heuristic stack scan if it's empty.
+        std::vector<bk::Trace::Span> open;
+        board_.trace().openFrames(open);
+        if (!open.empty()) {
+            QString out = "Call stack (from the call tracker, innermost first):\n";
+            out += QString("  #0  PC=%1%2  %3\n").arg(oct6(pc)).arg(sym(pc))
+                       .arg(QString::fromStdString(bk::disasm(mem, pc).text));
+            int frame = 1;
+            for (auto it = open.rbegin(); it != open.rend() && frame <= depth; ++it, ++frame)
+                out += QString("  #%1  %2%3  (depth %4)\n").arg(frame).arg(oct6(it->func)).arg(sym(it->func)).arg(it->depth);
+            return textContent(out);
+        }
+
+        QString out = "Call stack (heuristic, scanning the stack for JSR return addresses):\n";
+        out += QString("  #0  %1%2  %3   ; PC\n").arg(oct6(pc)).arg(sym(pc))
+                   .arg(QString::fromStdString(bk::disasm(mem, pc).text));
+        int frame = 1;
+        uint16_t sp = board_.cpu().sp();
+        for (int i = 0; i < 1024 && frame < depth; i += 2) {
+            uint16_t addr = (uint16_t)(sp + i);
+            if (addr < sp) break;                       // wrapped past the top of memory
+            uint16_t w = mem.peekWord(addr);
+            if (w & 1) continue;                        // return addresses are even
+            uint16_t jsrAt = 0; bool ok = false;        // JSR whose length lands exactly at w
+            for (int back = 2; back <= 4; back += 2) {
+                uint16_t j = (uint16_t)(w - back);
+                if (isJsr(mem.peekWord(j)) && (uint16_t)(j + bk::disasm(mem, j).words * 2) == w) { jsrAt = j; ok = true; break; }
+            }
+            if (!ok) continue;
+            out += QString("  #%1  %2%3  (call at %4)\n").arg(frame).arg(oct6(w)).arg(sym(w)).arg(oct6(jsrAt));
+            ++frame;
+        }
+        if (frame == 1) out += "  (no return addresses found — leaf routine or non-JSR flow)\n";
+        return textContent(out);
+    }
+    if (name == "bk_search_mem") {
+        const bk::Memory& mem = board_.memory();
+        uint16_t start = 0, end = 0177777; QString err;
+        if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
+        if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
+        int maxHits = args.value("max").toInt(64);
+        std::vector<uint8_t> pat;
+        if (args.contains("text")) { QByteArray b = args.value("text").toString().toLatin1(); for (char c : b) pat.push_back((uint8_t)c); }
+        else if (args.contains("bytes")) { for (auto v : args.value("bytes").toArray()) pat.push_back((uint8_t)(v.toInt() & 0xFF)); }
+        else if (args.contains("byte")) { long n; if (!parseNumber(args.value("byte"), n)) return fail("bad byte"); pat.push_back((uint8_t)(n & 0xFF)); }
+        else if (args.contains("word")) { long n; if (!parseNumber(args.value("word"), n)) return fail("bad word"); pat.push_back((uint8_t)(n & 0xFF)); pat.push_back((uint8_t)((n >> 8) & 0xFF)); }
+        else return fail("give one of: word, byte, bytes, text");
+        QString out = QString("Search (%1 bytes) in [%2..%3]:\n").arg(pat.size()).arg(oct6(start)).arg(oct6(end));
+        int hits = 0;
+        for (uint32_t a = start; pat.size() && a + pat.size() - 1 <= end && hits < maxHits; ++a) {
+            bool m = true;
+            for (size_t k = 0; k < pat.size(); ++k) if (mem.peekByte((uint16_t)(a + k)) != pat[k]) { m = false; break; }
+            if (m) { out += "  " + oct6((uint16_t)a) + "\n"; ++hits; }
+        }
+        out += hits ? (hits >= maxHits ? QString("  ... (stopped at %1)\n").arg(maxHits) : QString())
+                    : QString("  (no matches)\n");
+        return textContent(out);
+    }
+    if (name == "bk_diff_mem") {
+        const bk::Memory& mem = board_.memory();
+        QString action = args.value("action").toString("diff").toLower();
+        if (action == "save") {
+            memSnap_.assign(0x10000, 0);
+            for (int a = 0; a < 0x10000; ++a) memSnap_[a] = mem.peekByte((uint16_t)a);
+            return textContent("Snapshot saved (64 KB). Do an action, then bk_diff_mem action=diff.");
+        }
+        if (memSnap_.size() != 0x10000) return fail("no snapshot — call bk_diff_mem action=save first");
+        uint16_t start = 0, end = 0177777; QString err;
+        if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
+        if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
+        int maxCells = args.value("max").toInt(64);
+        QString out = QString("Changed bytes in [%1..%2]:\n").arg(oct6(start)).arg(oct6(end));
+        int n = 0;
+        for (uint32_t a = start; a <= end && n < maxCells; ++a) {
+            uint8_t cur = mem.peekByte((uint16_t)a);
+            if (cur != memSnap_[a]) {
+                out += QString("  %1: %2 -> %3\n").arg(oct6((uint16_t)a))
+                           .arg(QString::asprintf("%03o", memSnap_[a])).arg(QString::asprintf("%03o", cur));
+                ++n;
+            }
+        }
+        out += n ? (n >= maxCells ? QString("  ... (stopped at %1; narrow with start/end)\n").arg(maxCells) : QString())
+                 : QString("  (no changes)\n");
+        return textContent(out);
+    }
+    if (name == "bk_type") {
+        QByteArray b = args.value("text").toString().toLatin1();
+        int budget = args.value("max_frames").toInt(600);
+        int idx = 0, frames = 0;
+        while (idx < b.size() && frames < budget) {
+            if (!board_.keyReady()) {
+                char c = b[idx++];
+                board_.pressKey(c == '\n' ? 012 : (uint16_t)((uint8_t)c & 0177));
+            }
+            board_.runFrame(); ++frames;
+        }
+        for (int k = 0; k < 12 && board_.keyReady() && frames < budget; ++k) { board_.runFrame(); ++frames; }
+        return textContent(QString("Typed %1/%2 chars in %3 frames.\n%4")
+            .arg(idx).arg(b.size()).arg(frames).arg(regsText()));
     }
 
     return fail("unknown tool: " + name);

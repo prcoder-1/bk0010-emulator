@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <set>
+#include <map>
 #include <deque>
 #include "Memory.h"
 #include "Cpu.h"
@@ -59,7 +60,21 @@ public:
     bool hasBreakpoint(uint16_t addr) const { return breakpoints_.count(addr) != 0; }
     const std::set<uint16_t>& breakpoints() const { return breakpoints_; }
     bool breakHit() const { return breakHit_; }
-    void clearBreakHit() { breakHit_ = false; }
+    void clearBreakHit() { breakHit_ = false; watchHit_ = false; }
+
+    // --- Data watchpoints: stop when an address is read and/or written ---
+    // mode bits: 1 = on read, 2 = on write. The access hook sets breakHit_ so the
+    // run loops stop right after the accessing instruction.
+    void addWatch(uint16_t addr, bool onRead, bool onWrite) {
+        watchpoints_[addr] = (uint8_t)((onRead ? 1 : 0) | (onWrite ? 2 : 0));
+    }
+    void removeWatch(uint16_t addr) { watchpoints_.erase(addr); }
+    void clearWatches() { watchpoints_.clear(); }
+    const std::map<uint16_t, uint8_t>& watchpoints() const { return watchpoints_; }
+    bool     watchHit()   const { return watchHit_; }   // last stop was a watchpoint
+    uint16_t watchAddr()  const { return watchAddr_; }   // address that was accessed
+    bool     watchWrite() const { return watchWrite_; }  // true = write, false = read
+    uint16_t watchPc()    const { return watchPc_; }     // instruction that accessed it
 
     // Run until a breakpoint is hit, `addr` is reached, or `maxTicks` elapse.
     // Used for "step over" (stop at the return address). Returns true if `addr`
@@ -146,6 +161,12 @@ private:
 
     std::set<uint16_t> breakpoints_;
     bool     breakHit_ = false;
+
+    // Data watchpoints (addr -> mode bits: 1=read, 2=write) and last-hit info.
+    std::map<uint16_t, uint8_t> watchpoints_;
+    bool     watchHit_ = false, watchWrite_ = false, watchArmed_ = false;
+    uint16_t watchAddr_ = 0, watchPc_ = 0;
+    void checkWatch(uint16_t addr, bool write, bool isByte);
 
     void deliverFrameInterrupts(); // 50 Hz IRQ (vector 0100) + keyboard (0060)
     int  stepCore();               // one instruction + sound/trace bookkeeping
