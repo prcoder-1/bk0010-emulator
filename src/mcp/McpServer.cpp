@@ -182,7 +182,10 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_disasm", "Disassemble instructions.",
         schema({{"addr", P("string", "Address/symbol, or 'pc' for the current PC (default pc)")},
                 {"count", P("integer", "Instruction count (default 16)")}})));
-    t.append(tool("bk_break", "Set a breakpoint at an address/symbol.", schema({{"addr", addrArg}}, {"addr"})));
+    t.append(tool("bk_break", "Set a breakpoint at an address/symbol, optionally conditional: it "
+                  "only stops when `when` holds. Syntax: 'Rn OP v', '@addr OP v' (word) or "
+                  "'@addr.b OP v' (byte); OP is == != < > >= <=.",
+        schema({{"addr", addrArg}, {"when", P("string", "Optional condition, e.g. 'R0==5' or '@035120.b>3'")}}, {"addr"})));
     t.append(tool("bk_unbreak", "Remove a breakpoint (or all).",
         schema({{"addr", addrArg}, {"all", P("boolean", "Remove all breakpoints")}})));
     t.append(tool("bk_breakpoints", "List active breakpoints.", schema({})));
@@ -233,6 +236,22 @@ QJsonArray McpServer::toolDefs() const {
                   "like real typing). Newline = Enter. Use to drive menus / text entry.",
         schema({{"text", P("string", "String to type")},
                 {"max_frames", P("integer", "Frame budget (default 600)")}}, {"text"})));
+    t.append(tool("bk_callers", "List subroutines that call a function (from the recorded call edges), "
+                  "with call counts.", schema({{"addr", addrArg}}, {"addr"})));
+    t.append(tool("bk_callees", "List subroutines called from within a function, with call counts.",
+        schema({{"addr", addrArg}}, {"addr"})));
+    t.append(tool("bk_frames", "Report game-frame timing from the programmable timer: frame count, "
+                  "average/min/max duration (ms), frame rate and jitter.", schema({})));
+    t.append(tool("bk_coverage", "Code-coverage summary from the trace: how many instructions ran, "
+                  "and the largest un-executed gaps in a range (find dead / untested code).",
+        schema({{"start", addrArg}, {"end", addrArg}, {"gaps", P("integer", "How many gaps to list (default 12)")}})));
+    t.append(tool("bk_profile", "Export the call profile as Brendan-Gregg folded stacks to a file "
+                  "(open in speedscope / flamegraph.pl). Weight = self CPU ticks.",
+        schema({{"path", P("string", "Output .folded path")}}, {"path"})));
+    t.append(tool("bk_vram", "Render the screen and return a downsampled ASCII-art view, so you can "
+                  "'see' the display without a PNG. Also reports non-black pixel count / bounding box.",
+        schema({{"width", P("integer", "Output width in characters (default 64)")},
+                {"mono", P("boolean", "Interpret as 512x256 mono (default false=colour)")}})));
     return t;
 }
 
@@ -447,7 +466,33 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
     if (name == "bk_break") {
         uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
         board_.addBreakpoint(a);
-        return textContent(QString("Breakpoint set at %1.").arg(oct6(a)));
+        QString when = args.value("when").toString().trimmed();
+        if (!when.isEmpty()) {
+            bk::Board::BreakCond c{};
+            static const char* ops[] = {">=", "<=", "==", "!=", ">", "<"};
+            static const uint8_t opc[] = {4, 5, 0, 1, 3, 2};
+            int oi = -1, pos = -1;
+            for (int k = 0; k < 6; ++k) { int p = when.indexOf(ops[k]); if (p >= 0) { oi = k; pos = p; break; } }
+            if (oi < 0) return fail("condition needs one of == != < > >= <=");
+            c.op = opc[oi];
+            QString lhs = when.left(pos).trimmed();
+            QString rhs = when.mid(pos + (int)QString(ops[oi]).size()).trimmed();
+            long val; if (!parseNumber(QJsonValue(rhs), val)) return fail("bad value in condition");
+            c.val = (uint16_t)(val & 0xFFFF);
+            if (lhs.size() == 2 && (lhs[0] == 'R' || lhs[0] == 'r') && lhs[1].isDigit()) {
+                c.kind = 0; c.a = lhs[1].digitValue();
+            } else if (lhs.startsWith('@')) {
+                bool byte = lhs.endsWith(".b");
+                QString as = lhs.mid(1, lhs.size() - 1 - (byte ? 2 : 0)).trimmed();
+                c.kind = byte ? 2 : 1;
+                long n;
+                if (parseNumber(QJsonValue(as), n)) c.a = (uint16_t)(n & 0xFFFF);
+                else { auto it = symAddr_.find(as.toStdString()); if (it == symAddr_.end()) return fail("bad address in condition"); c.a = it->second; }
+            } else return fail("condition LHS must be Rn or @addr");
+            board_.setBreakCond(a, c);
+        }
+        return textContent(QString("Breakpoint set at %1%2.").arg(oct6(a))
+            .arg(when.isEmpty() ? QString() : QString(" when %1").arg(when)));
     }
     if (name == "bk_unbreak") {
         if (args.value("all").toBool(false)) {
@@ -699,6 +744,129 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         for (int k = 0; k < 12 && board_.keyReady() && frames < budget; ++k) { board_.runFrame(); ++frames; }
         return textContent(QString("Typed %1/%2 chars in %3 frames.\n%4")
             .arg(idx).arg(b.size()).arg(frames).arg(regsText()));
+    }
+
+    if (name == "bk_callers" || name == "bk_callees") {
+        uint16_t target; QString err; if (!resolveAddr(args, "addr", target, err)) return fail(err);
+        const bk::Memory& mem = board_.memory();
+        auto isJsr = [](uint16_t ir) { return ir >= 0004000 && ir <= 0004777; };
+        std::set<uint16_t> subs;                         // subroutine entries = JSR targets
+        for (auto& e : board_.trace().edges())
+            if (isJsr(mem.peekWord(e.first >> 16))) subs.insert(e.first & 0xFFFF);
+        auto funcOf = [&](uint16_t x) -> uint16_t { auto it = subs.upper_bound(x); if (it == subs.begin()) return 0; --it; return *it; };
+        auto sym = [&](uint16_t x) { auto it = symName_.find(x); return it != symName_.end() ? QString(" <%1>").arg(QString::fromStdString(it->second)) : QString(); };
+        std::map<uint16_t, uint32_t> agg;
+        for (auto& e : board_.trace().edges()) {
+            uint16_t from = e.first >> 16, to = e.first & 0xFFFF;
+            if (!isJsr(mem.peekWord(from))) continue;
+            if (name == "bk_callers") { if (to == target) agg[funcOf(from)] += e.second; }
+            else                      { if (funcOf(from) == target) agg[to] += e.second; }
+        }
+        std::vector<std::pair<uint32_t, uint16_t>> v;
+        for (auto& kv : agg) v.push_back({kv.second, kv.first});
+        std::sort(v.rbegin(), v.rend());
+        QString out = QString(name == "bk_callers" ? "Callers of %1%2:\n" : "Callees of %1%2:\n").arg(oct6(target)).arg(sym(target));
+        for (auto& p : v) out += QString("  %1%2  x%3\n").arg(oct6(p.second)).arg(sym(p.second)).arg(p.first);
+        if (v.empty()) out += "  (none recorded — run the game so calls are traced)\n";
+        return textContent(out);
+    }
+    if (name == "bk_frames") {
+        const auto& fb = board_.frameBoundaries();
+        if (fb.size() < 2) return textContent("Not enough frame boundaries recorded "
+            "(the game may pace in free-running mode, or hasn't run yet).");
+        uint64_t avg = (fb.back() - fb.front()) / (fb.size() - 1), mn = ~0ull, mx = 0;
+        for (size_t i = 1; i < fb.size(); ++i) { uint64_t d = fb[i] - fb[i - 1]; mn = std::min(mn, d); mx = std::max(mx, d); }
+        auto ms = [](uint64_t t) { return t / 3000.0; };
+        return textContent(QString("Frames: %1  avg %2 ms (%3 fps)  min %4 ms  max %5 ms  jitter %6 ms")
+            .arg(fb.size()).arg(ms(avg), 0, 'f', 2).arg(avg ? 3.0e6 / avg : 0, 0, 'f', 1)
+            .arg(ms(mn), 0, 'f', 2).arg(ms(mx), 0, 'f', 2).arg(ms(mx - mn), 0, 'f', 2));
+    }
+    if (name == "bk_coverage") {
+        uint16_t start = 0, end = 0177777; QString err;
+        if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
+        if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
+        int nGaps = args.value("gaps").toInt(12);
+        auto& tr = board_.trace();
+        int nWords = (end - start) / 2 + 1;
+        std::vector<char> covered(nWords, 0);
+        uint64_t execInstrs = 0;
+        for (uint32_t a = start; a <= end; a += 2) {
+            uint32_t c = tr.execCount((uint16_t)a);
+            if (!c) continue;
+            execInstrs += c;
+            int len = bk::disasm(board_.memory(), (uint16_t)a).words;   // cover all instruction words
+            for (int w = 0; w < len; ++w) { uint32_t wa = a + w * 2; if (wa >= start && wa <= end) covered[(wa - start) / 2] = 1; }
+        }
+        int cov = 0; for (char x : covered) cov += x;
+        std::vector<std::pair<uint16_t, int>> gaps;
+        int gs = -1;
+        for (int i = 0; i < nWords; ++i) {
+            if (!covered[i]) { if (gs < 0) gs = i; }
+            else if (gs >= 0) { gaps.push_back({(uint16_t)(start + gs * 2), i - gs}); gs = -1; }
+        }
+        if (gs >= 0) gaps.push_back({(uint16_t)(start + gs * 2), nWords - gs});
+        std::sort(gaps.begin(), gaps.end(), [](auto& x, auto& y) { return x.second > y.second; });
+        QString out = QString("Coverage [%1..%2]: %3/%4 words are code (%5%), %6 instructions executed.\n"
+                              "Largest un-executed gaps (data or dead code):\n")
+            .arg(oct6(start)).arg(oct6(end)).arg(cov).arg(nWords)
+            .arg(nWords ? 100.0 * cov / nWords : 0, 0, 'f', 1).arg(execInstrs);
+        for (int i = 0; i < nGaps && i < (int)gaps.size(); ++i)
+            out += QString("  %1..%2  (%3 words)\n").arg(oct6(gaps[i].first))
+                       .arg(oct6((uint16_t)(gaps[i].first + gaps[i].second * 2 - 2))).arg(gaps[i].second);
+        if (gaps.empty()) out += "  (none)\n";
+        return textContent(out);
+    }
+    if (name == "bk_profile") {
+        QString path = args.value("path").toString();
+        const auto& flame = board_.trace().flame();
+        if (flame.size() < 2) return fail("no profile data — the call tree is empty (run the game first)");
+        FILE* f = std::fopen(path.toStdString().c_str(), "wb");
+        if (!f) return fail("cannot open " + path);
+        auto label = [&](uint16_t fn) -> std::string {
+            auto it = symName_.find(fn); if (it != symName_.end()) return it->second;
+            char b[8]; std::snprintf(b, sizeof(b), "%06o", fn); return b;
+        };
+        int lines = 0;
+        for (size_t i = 1; i < flame.size(); ++i) {
+            if (flame[i].self == 0) continue;
+            std::vector<uint16_t> path;                  // node -> root
+            for (int cur = (int)i; cur > 0; cur = flame[cur].parent) path.push_back(flame[cur].func);
+            std::string stack = "root";
+            for (auto it = path.rbegin(); it != path.rend(); ++it) { stack += ";"; stack += label(*it); }
+            std::fprintf(f, "%s %llu\n", stack.c_str(), (unsigned long long)flame[i].self);
+            ++lines;
+        }
+        std::fclose(f);
+        return textContent(QString("Wrote %1 folded-stack lines to %2 (open in speedscope or flamegraph.pl).").arg(lines).arg(path));
+    }
+    if (name == "bk_vram") {
+        int cols = std::clamp(args.value("width").toInt(64), 16, 160);
+        bool mono = args.value("mono").toBool(false);
+        board_.screen().setColorMode(!mono);
+        board_.screen().render(board_.memory());
+        const uint32_t* px = board_.screen().pixels();
+        const int W = bk::Screen::TEX_W, H = bk::Screen::TEX_H;
+        int nonblack = 0, minx = W, miny = H, maxx = -1, maxy = -1;
+        for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x)
+            if (px[y * W + x] & 0xFFFFFF) { ++nonblack; minx = std::min(minx, x); maxx = std::max(maxx, x); miny = std::min(miny, y); maxy = std::max(maxy, y); }
+        int rows = std::max(1, cols * H / (W * 2));       // chars are ~2x taller than wide
+        const char* ramp = " .:-=+*#%@";
+        QString grid;
+        for (int cy = 0; cy < rows; ++cy) {
+            for (int cx = 0; cx < cols; ++cx) {
+                int x0 = cx * W / cols, x1 = (cx + 1) * W / cols, y0 = cy * H / rows, y1 = (cy + 1) * H / rows;
+                long sum = 0, cnt = 0;
+                for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
+                    uint32_t p = px[y * W + x];
+                    sum += (((p >> 16) & 255) * 30 + ((p >> 8) & 255) * 59 + (p & 255) * 11) / 100; ++cnt;
+                }
+                grid += ramp[std::clamp(int(cnt ? sum / cnt : 0) * 9 / 255, 0, 9)];
+            }
+            grid += "\n";
+        }
+        QString head = QString("Screen %1x%2, non-black %3 px").arg(W).arg(H).arg(nonblack);
+        if (maxx >= 0) head += QString(", bbox (%1,%2)-(%3,%4)").arg(minx).arg(miny).arg(maxx).arg(maxy);
+        return textContent(head + ":\n" + grid);
     }
 
     return fail("unknown tool: " + name);

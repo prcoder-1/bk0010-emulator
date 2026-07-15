@@ -56,7 +56,13 @@ public:
         if (breakpoints_.count(addr)) breakpoints_.erase(addr); else breakpoints_.insert(addr);
     }
     void addBreakpoint(uint16_t addr) { breakpoints_.insert(addr); }
-    void removeBreakpoint(uint16_t addr) { breakpoints_.erase(addr); }
+    void removeBreakpoint(uint16_t addr) { breakpoints_.erase(addr); breakConds_.erase(addr); }
+
+    // Optional condition on a breakpoint: only stop when it holds. kind: 0=register
+    // Ra, 1=memory word @a, 2=memory byte @a. op: 0 ==, 1 !=, 2 <, 3 >, 4 >=, 5 <=.
+    struct BreakCond { uint8_t kind, op; uint16_t a, val; };
+    void setBreakCond(uint16_t addr, BreakCond c) { breakConds_[addr] = c; }
+    bool breakAllows(uint16_t pc) const;   // true if pc's breakpoint (if any) should fire
     bool hasBreakpoint(uint16_t addr) const { return breakpoints_.count(addr) != 0; }
     const std::set<uint16_t>& breakpoints() const { return breakpoints_; }
     bool breakHit() const { return breakHit_; }
@@ -160,6 +166,7 @@ private:
     void recordFrameBoundary();
 
     std::set<uint16_t> breakpoints_;
+    std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
     bool     breakHit_ = false;
 
     // Data watchpoints (addr -> mode bits: 1=read, 2=write) and last-hit info.

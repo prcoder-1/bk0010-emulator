@@ -128,6 +128,22 @@ int Board::stepCore() {
     return t;
 }
 
+// Evaluate a breakpoint's optional condition (unconditional breakpoints allow).
+bool Board::breakAllows(uint16_t pc) const {
+    auto it = breakConds_.find(pc);
+    if (it == breakConds_.end()) return true;
+    const BreakCond& c = it->second;
+    uint32_t lhs = c.kind == 0 ? cpu_.r[c.a & 7]
+                 : c.kind == 1 ? mem_.peekWord(c.a)
+                               : mem_.peekByte(c.a);
+    switch (c.op) {
+    case 0: return lhs == c.val;   case 1: return lhs != c.val;
+    case 2: return lhs <  c.val;   case 3: return lhs >  c.val;
+    case 4: return lhs >= c.val;   case 5: return lhs <= c.val;
+    }
+    return true;
+}
+
 // Memory-access hook for data watchpoints: fires while an instruction executes,
 // so it sets breakHit_ (and arms watchPc_ capture in stepCore) to stop the run.
 void Board::checkWatch(uint16_t addr, bool write, bool isByte) {
@@ -227,7 +243,7 @@ int Board::runTicks(int ticks) {
         if (cpu_.halted()) break;
         int t = stepCore();
         done += t;
-        if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc())) {
+        if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc()) && breakAllows(cpu_.pc())) {
             breakHit_ = true;
             break;
         }
@@ -248,7 +264,7 @@ bool Board::runUntil(uint16_t addr, int maxTicks) {
         int t = stepCore();
         done += t;
         if (cpu_.pc() == addr) { screen_.setScroll(scroll_); return true; }
-        if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc())) {
+        if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc()) && breakAllows(cpu_.pc())) {
             breakHit_ = true; screen_.setScroll(scroll_); return true;
         }
         if (breakHit_) { screen_.setScroll(scroll_); return true; }  // watchpoint
