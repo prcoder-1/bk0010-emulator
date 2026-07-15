@@ -132,18 +132,24 @@ void HotChartWidget::refresh() {
     // frame clock. Detect the clock running backwards and drop our accumulated
     // state, otherwise the next sample would compute deltas via unsigned underflow
     // (a spurious off-scale spike). See the code-review note.
+    bool changed = false;
     if (tr.now() < lastNow_) {
         series_.clear();
         sampleTicks_.clear();
         lastTotalTicks_ = 0;
         lastNow_ = 0;
+        changed = true;
     }
-    // Sample on emulated time (frozen while paused), not wall-clock.
+    // Sample on emulated time (frozen while paused), not wall-clock. Repaint only
+    // when a new sample was taken (or state was reset) — between samples the chart
+    // is identical, so repainting at the full 50 Hz just steals time from the
+    // emulation on this same GUI thread. Interactive pan/zoom repaint directly.
     if (tr.now() - lastNow_ >= static_cast<uint32_t>(SAMPLE_FRAMES)) {
         lastNow_ = tr.now();
         sample();
+        changed = true;
     }
-    update();
+    if (changed) update();
 }
 
 void HotChartWidget::paintEvent(QPaintEvent*) {

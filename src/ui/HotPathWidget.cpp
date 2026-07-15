@@ -54,8 +54,12 @@ HotPathWidget::HotPathWidget(Board* board, QWidget* parent)
 
 void HotPathWidget::refresh() {
     uint32_t now = board_->trace().now();
-    if (instrs_.empty() || now - lastBuild_ >= 50) { rebuild(); lastBuild_ = now; }
-    update();
+    // Repaint only when the profile is re-snapshotted — layout/labels change only
+    // then. Interactive changes (scroll/expand/hover/highlight) repaint on their
+    // own. Repainting at the full 50 Hz otherwise redrew an identical image (with a
+    // disasm() per visible row) many times per update, stealing time from the
+    // emulation in this same GUI thread.
+    if (instrs_.empty() || now - lastBuild_ >= 50) { rebuild(); lastBuild_ = now; update(); }
 }
 
 // ---------------------------------------------------------------------------

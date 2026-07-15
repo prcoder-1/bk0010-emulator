@@ -32,8 +32,12 @@ FlameWidget::FlameWidget(Board* board, QWidget* parent)
 
 void FlameWidget::refresh() {
     uint32_t now = board_->trace().now();
-    if (incl_.empty() || now - lastBuild_ >= 25) { rebuild(); lastBuild_ = now; }
-    update();
+    // The layout only changes when the profile is re-snapshotted, so repaint *only*
+    // then. Interactive changes (hover/click/scroll/zoom/highlight) repaint on their
+    // own. Previously refresh() repainted at the full 50 Hz while the data changed
+    // far slower — redrawing an identical image many times per update and stealing
+    // time from the emulation, which runs in this same GUI thread.
+    if (incl_.empty() || now - lastBuild_ >= 12) { rebuild(); lastBuild_ = now; update(); }
 }
 
 // Inclusive ticks per node = self + Σ children. A child is always created after

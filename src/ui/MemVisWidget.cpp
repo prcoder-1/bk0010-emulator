@@ -190,4 +190,8 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     resize(560, 640);
 }
 
-void MemVisWidget::refresh() { canvas_->update(); }
+// Throttle the periodic repaint to ~16 Hz. Rebuilding the ~48 KB heatmap image
+// every 50 Hz tick is costly and steals time from the emulation on this same GUI
+// thread; the access-age fade is slow enough that 16 Hz looks identical.
+// Interactive control changes call canvas_->update() directly and are unaffected.
+void MemVisWidget::refresh() { if (++refreshTick_ >= 3) { refreshTick_ = 0; canvas_->update(); } }
