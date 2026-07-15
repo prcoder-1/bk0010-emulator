@@ -657,43 +657,63 @@ void Cpu::buildTable() {
 // Instruction timing (ports timing.c)
 // ---------------------------------------------------------------------------
 int Cpu::timingFor(uint16_t ir) const {
-    static const int a_time[8]  = {0, 12, 12, 20, 12, 20, 20, 28};
-    static const int b_time[8]  = {0, 20, 20, 32, 20, 32, 32, 40};
-    static const int ab_time[8] = {0, 16, 16, 24, 16, 24, 24, 32};
-    static const int a2_time[8] = {0, 20, 20, 28, 20, 28, 28, 36};
-    static const int ds_time[8] = {0, 32, 32, 40, 32, 40, 40, 48};
+    // Timings measured on a real БК-0010.01 (Manwe's "clock cycles meter" + the XOP
+    // timing test suite), FAST (main) memory. Screen-RAM (0o40000..0o77777)
+    // wait-states are address-dependent and added on top in Cpu::step().
+    //
+    // Two-operand: 12 + SRC[sm] + DST[dm], where DST depends on whether the source
+    // is a register (sm==0) or memory (sm!=0) and on the op class (read/write/rmw).
+    static const int SRC[8]   = {0, 16, 16, 28, 16, 28, 28, 40}; // source-operand read
+    static const int MOV_R[8] = {0, 20, 24, 32, 24, 32, 32, 44}, MOV_M[8] = {0, 12, 12, 20, 12, 20, 20, 32};
+    static const int CMP_R[8] = {0, 20, 20, 32, 20, 32, 32, 44}, CMP_M[8] = {0,  8,  8, 20,  8, 20, 20, 32};
+    static const int RMW_R[8] = {0, 24, 24, 36, 24, 36, 36, 48}, RMW_M[8] = {0, 12, 12, 24, 12, 24, 24, 36};
+    // One-operand: 12 + table[dm].
+    static const int OP_W[8]  = {0, 16, 16, 28, 20, 32, 28, 40}; // clr/com/inc/dec/neg/adc/sbc/ror/rol/asr/asl/sxt/swab/mfps
+    static const int OP_R[8]  = {0, 12, 12, 24, 16, 28, 24, 36}; // tst
+    static const int XOR_D[8] = {0, 20, 20, 32, 20, 32, 32, 44};
+    static const int MTPS_D[8]= {12, 20, 20, 32, 24, 36, 32, 44};
+    static const int JMP_D[8] = {0, 24, 24, 32, 24, 36, 32, 44};
+    static const int JSR_D[8] = {0, 32, 36, 40, 36, 44, 40, 52};
     const int REGREG = 12;
     int sm = (ir & 07000) >> 9, dm = (ir & 070) >> 3;
     int idx = ir >> 6;
+    int grp = idx >> 6;
 
-    // Two-operand groups: 01xx-06xx and 011xx-016xx (mov/cmp/bit/bic/bis/add/sub + byte)
-    int grp = idx >> 6; // top part
-    auto dstT = [&](void) { return sm ? ab_time[dm] : b_time[dm]; };
-    auto cmpT = [&](void) { return sm ? a_time[dm] : a2_time[dm]; };
+    // Two-operand: mov/cmp/bit/bic/bis/add/sub (+ byte variants), same timing as word.
+    auto two = [&](const int* R, const int* M) { return REGREG + SRC[sm] + (sm ? M : R)[dm]; };
     switch (grp) {
-    case 001: case 011: return REGREG + a_time[sm] + dstT();  // mov/movb
-    case 002: case 012: return REGREG + a_time[sm] + cmpT();  // cmp/cmpb
-    case 003: case 013: return REGREG + a_time[sm] + cmpT();  // bit/bitb
-    case 004: case 014: return REGREG + a_time[sm] + dstT();  // bic/bicb
-    case 005: case 015: return REGREG + a_time[sm] + dstT();  // bis/bisb
-    case 006: case 016: return REGREG + a_time[sm] + dstT();  // add/sub
+    case 001: case 011: return two(MOV_R, MOV_M);   // mov/movb
+    case 002: case 012: return two(CMP_R, CMP_M);   // cmp/cmpb
+    case 003: case 013: return two(CMP_R, CMP_M);   // bit/bitb
+    case 004: case 014: return two(RMW_R, RMW_M);   // bic/bicb
+    case 005: case 015: return two(RMW_R, RMW_M);   // bis/bisb
+    case 006: case 016: return two(RMW_R, RMW_M);   // add/sub
     }
-    // Branches
-    if ((idx >= 001 && idx <= 003) || (idx >= 004 && idx <= 037) ||
-        (idx >= 01000 && idx <= 01037)) {
-        if (idx == 001) return a2_time[dm];   // JMP
-        if (idx == 002) return 12;            // RTS/CCC/SCC (approx)
-        if (idx == 003) return REGREG + ab_time[dm]; // SWAB
-        return 16;                            // conditional/unconditional branches
+
+    if (idx == 001) return JMP_D[dm];                       // JMP
+    if (idx == 002) return (ir >= 0200 && ir <= 0207) ? 32 : 12; // RTS ; NOP/CCC/SCC
+    if (idx == 003) return REGREG + OP_W[dm];               // SWAB
+    if ((idx >= 004 && idx <= 037) || (idx >= 01000 && idx <= 01037)) return 16; // branches
+    if (idx >= 040 && idx <= 047) return JSR_D[dm];         // JSR
+    if (idx >= 050 && idx <= 067) {                          // single-operand word
+        if (idx == 057) return REGREG + OP_R[dm];           // TST
+        if (idx == 064) return 32;                          // MARK
+        return REGREG + OP_W[dm];                           // clr..neg, adc, sbc, ror..asl, sxt
     }
-    if (idx >= 040 && idx <= 047) return ds_time[dm];   // JSR
-    if (idx >= 050 && idx <= 067) return REGREG + ab_time[dm]; // single-operand word
-    if (idx >= 0740 && idx <= 0747) return REGREG + a2_time[dm]; // XOR
-    if (idx >= 0770 && idx <= 0777) return 20;          // SOB
-    if (idx >= 01040 && idx <= 01047) return 68;        // EMT/TRAP
-    if (idx >= 01050 && idx <= 01067) return REGREG + ab_time[dm]; // single-operand byte
-    if (idx == 0) return 40;                            // 0000xx (rti/halt/...) approx
-    return 40;                                          // default/illegal fallback
+    if (idx >= 0740 && idx <= 0747) return REGREG + XOR_D[dm]; // XOR
+    if (idx >= 0770 && idx <= 0777) return 20;              // SOB
+    if (idx >= 01040 && idx <= 01047) return 64;           // EMT/TRAP
+    if (idx >= 01050 && idx <= 01067) {                     // single-operand byte
+        if (idx == 01057) return REGREG + OP_R[dm];        // TSTB
+        if (idx == 01064) return 12 + MTPS_D[dm];          // MTPS
+        return REGREG + OP_W[dm];                          // clrb..negb, ror..asl b, mfps
+    }
+    if (idx == 0) {                                         // 0000xx
+        if (ir == 0002 || ir == 0006) return 40;           // RTI/RTT
+        if (ir == 0003 || ir == 0004) return 64;           // BPT/IOT
+        return 40;                                          // HALT/WAIT/RESET (approx)
+    }
+    return 40;                                              // fallback
 }
 
 // ---------------------------------------------------------------------------
