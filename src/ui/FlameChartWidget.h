@@ -43,4 +43,5 @@ private:
     bool   dragging_ = false;
     QPoint pressPos_, lastDrag_;
     std::vector<Bar> bars_;      // laid-out bars from the last paint (hit test)
+    int    refreshTick_ = 0;     // throttles the 50 Hz periodic repaint to ~16 Hz
 };
