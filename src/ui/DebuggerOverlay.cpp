@@ -54,16 +54,17 @@ void DebuggerOverlay::snapshotRegs() {
 
 void DebuggerOverlay::moveCursor(int lines) {
     const bk::Memory& mem = board_->memory();
-    if (lines > 0) {
-        for (int i = 0; i < lines; ++i) cursorAddr_ += bk::disasm(mem, cursorAddr_).words * 2;
-    } else {
-        cursorAddr_ += lines * 2;                 // approximate backward move (1 word/line)
-    }
+    auto stepFwd = [&](uint16_t a) -> uint16_t {
+        if (const bk::DataItem* di = board_->dataAt(a)) return a + (di->len ? di->len : 2);
+        return a + bk::disasm(mem, a).words * 2;
+    };
+    if (lines > 0) { for (int i = 0; i < lines; ++i) cursorAddr_ = stepFwd(cursorAddr_); }
+    else           { cursorAddr_ += lines * 2; }   // approximate backward move (1 word/line)
     // Re-anchor the disasm window if the cursor scrolled out of view.
     uint16_t a = disasmTop_; bool vis = false;
     for (int i = 0; i < disasmLines_; ++i) {
         if (a == cursorAddr_) { vis = true; break; }
-        a += bk::disasm(mem, a).words * 2;
+        a = stepFwd(a);
     }
     if (!vis) disasmTop_ = cursorAddr_;
     update();
@@ -112,6 +113,32 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         QString s = QString::fromStdString(nm);
         if (a != base) s += "+" + QString::number(a - base, 8);
         return s;
+    };
+    // Render a region marked as data (byte/word/string/pointer) instead of code.
+    auto formatData = [&](uint16_t a, const bk::DataItem& di) -> QString {
+        switch (di.type) {
+        case bk::DataType::Byte: {
+            QString s = ".byte "; int n = di.len;
+            for (int i = 0; i < n && i < 12; ++i) s += QString("%1 ").arg(mem.peekByte(a + i), 3, 8, QChar('0'));
+            return n > 12 ? s + "…" : s;
+        }
+        case bk::DataType::Word: {
+            QString s = ".word "; int n = di.len / 2;
+            for (int i = 0; i < n && i < 8; ++i) s += oct6(mem.peekWord(a + i * 2)) + " ";
+            return n > 8 ? s + "…" : s;
+        }
+        case bk::DataType::String: {
+            QString s = ".ascii \"";
+            for (int i = 0; i < di.len; ++i) { uint8_t c = mem.peekByte(a + i); s += (c >= 32 && c < 127) ? QChar(c) : QChar('.'); }
+            return s + "\"";
+        }
+        case bk::DataType::Ptr: {
+            uint16_t w = mem.peekWord(a);
+            QString lbl = symLabel(w);
+            return ".word " + oct6(w) + (lbl.isEmpty() ? QString() : "  " + lbl);
+        }
+        }
+        return QString();
     };
 
     int margin = fs;
@@ -204,7 +231,14 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     uint16_t a = disasmTop_;
     int y = disasmRect_.y() + lineH_ + lineH_;
     for (int i = 0; i < disasmLines_; ++i) {
-        bk::DisasmLine d = bk::disasm(mem, a, &syms);
+        // A region marked as data renders as data; otherwise disassemble.
+        int itemBytes, dwords; QString dtext;
+        if (const bk::DataItem* di = board_->dataAt(a)) {
+            itemBytes = di->len; dwords = (di->len + 1) / 2; dtext = formatData(a, *di);
+        } else {
+            bk::DisasmLine d = bk::disasm(mem, a, &syms);
+            itemBytes = d.words * 2; dwords = d.words; dtext = QString::fromStdString(d.text);
+        }
         bool isPc = (a == cpu.pc());
         bool isBp = board_->hasBreakpoint(a);
         int x = disasmRect_.x() + 6;
@@ -230,15 +264,14 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         }
         p.setPen(isBp ? bpCol : fg);
         p.drawText(x, y, isBp ? "●" : (isPc ? "►" : " "));
-        // raw words
+        // raw words (capped so a big data item doesn't overrun the column)
         QString raw;
-        for (int w = 0; w < d.words; ++w) raw += oct6(mem.peekWord(a + w * 2)) + " ";
+        for (int w = 0; w < dwords && w < 3; ++w) raw += oct6(mem.peekWord(a + w * 2)) + " ";
         p.setPen(isPc ? hi : fg);
         p.drawText(x + cw * 2, y, oct6(a));
         p.setPen(QColor(140, 150, 190));
         p.drawText(x + cw * 9, y, raw);
         int textX = x + cw * 9 + cw * 8 * 3;
-        QString dtext = QString::fromStdString(d.text);
         p.setPen(isPc ? hi : fg);
         p.drawText(textX, y, dtext);
         int rightLimit = disasmRect_.right() - 6;
@@ -259,7 +292,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
             }
         }
         y += lineH_;
-        a += d.words * 2;
+        a += itemBytes ? itemBytes : 2;
     }
 
     // ---- Right column: memory / stack / system registers, stacked vertically.
@@ -365,8 +398,8 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     QFontMetrics hfm(helpFont);
     p.setPen(QColor(180, 200, 255));
     QString help = QString::fromUtf8(
-        "F12-выход  F7/F8-шаг  F9-тчк(PC)  Esc-продолжить  колесо/PgUp/PgDn/↑↓-дизасм  "
-        "[/]-память  дизасм: ЛКМ-выбор ПКМ-тчк N-имя ;-коммент  ·  панель тчк: ЛКМ-переход ПКМ-удалить");
+        "F12-выход  F7/F8-шаг  F9-тчк  Esc-продолжить  PgUp/PgDn/↑↓-дизасм  [/]-память  "
+        "дизасм: ЛКМ-выбор ПКМ-тчк N-имя ;-коммент  данные: B-байт W-слово S-строка P-указ U-код");
     p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
 }
 
