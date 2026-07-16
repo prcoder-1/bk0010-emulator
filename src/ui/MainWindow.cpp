@@ -97,6 +97,11 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
         loadAnnotations(p);
         status_->setText("Аннотации загружены: " + p);
     });
+    dbg->addAction("&Автоанализ процедур (JSR + трасса)", this, [this] {
+        int n = overlay_->analyzeProcedures();
+        status_->setText(QString("Автоанализ: добавлено процедур sub_… — %1").arg(n));
+        if (paused_) overlay_->update();
+    });
 
     status_ = new QLabel("Готов", this);
     statusBar()->addWidget(status_);
