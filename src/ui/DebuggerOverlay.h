@@ -27,6 +27,9 @@ public:
     bool followTarget();             // follow the branch/call target of the selected line
     // Addresses whose instruction branches/calls/jumps to `target` (a static scan).
     std::vector<uint16_t> xrefsTo(uint16_t target) const;
+    // Seed procedure symbols (sub_oooooo) from JSR call targets and the live call
+    // trace. Returns how many new symbols were created.
+    int analyzeProcedures();
     void setMemAddr(uint16_t a) { memAddr_ = a; update(); }
     // Linked highlighting: mark the disasm line at `addr` (-1 = none).
     void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }

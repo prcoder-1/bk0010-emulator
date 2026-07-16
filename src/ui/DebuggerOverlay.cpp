@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <set>
 
 using bk::Board;
 
@@ -100,6 +101,34 @@ bool DebuggerOverlay::followTarget() {
     if (!targetOf(cursorAddr_, t)) return false;
     navigateTo(t);
     return true;
+}
+
+int DebuggerOverlay::analyzeProcedures() {
+    const bk::Memory& mem = board_->memory();
+    std::set<uint16_t> cands;
+    // Live trace: procedures that actually got called (flame CCT), if a profiler
+    // has been collecting. RAM only — skip monitor-ROM routines.
+    for (const auto& n : board_->trace().flame())
+        if (n.func && n.func < 0100000) cands.insert(n.func);
+    // Static: every JSR call target throughout memory (calls, not plain jumps).
+    uint16_t t;
+    for (uint32_t a = 0; a <= 0177776; a += 2) {
+        uint16_t ir = mem.peekWord(static_cast<uint16_t>(a));
+        int idx = ir >> 6;
+        if (idx >= 040 && idx <= 047 && targetOf(static_cast<uint16_t>(a), t) && t < 0100000)
+            cands.insert(t);
+    }
+    int added = 0;
+    for (uint16_t c : cands) {
+        if (c < 01000 || (c & 1)) continue;   // skip vectors/system area and misaligned targets
+        if (!board_->symbols().nameAt(c)) {
+            char nm[16]; std::snprintf(nm, sizeof(nm), "sub_%06o", c);
+            board_->symbols().set(c, nm);
+            ++added;
+        }
+    }
+    if (added) update();
+    return added;
 }
 
 std::vector<uint16_t> DebuggerOverlay::xrefsTo(uint16_t target) const {
