@@ -61,6 +61,7 @@ private:
     // Interactive-disassembler annotations (symbols + comments).
     void nameCursorSymbol();             // N: name/rename the symbol at the cursor
     void commentCursor();                // ;: edit the comment at the cursor
+    void markData(bk::DataType t);       // B/W/S/P: mark the cursor as data of a type
     void saveAnnotations(const QString& path);
     void loadAnnotations(const QString& path);
     QString annotationsPath() const;     // "<loaded .bin>.bkdb", or empty

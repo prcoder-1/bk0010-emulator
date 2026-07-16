@@ -252,6 +252,25 @@ void MainWindow::commentCursor() {
     overlay_->update();
 }
 
+void MainWindow::markData(bk::DataType t) {
+    if (!paused_) return;
+    uint16_t a = overlay_->cursorAddr();
+    uint16_t len = (t == bk::DataType::Word || t == bk::DataType::Ptr) ? 2 : 1;
+    if (t == bk::DataType::String) {
+        // Auto-length: printable run up to (and including) a terminating NUL, capped.
+        len = 0;
+        for (int i = 0; i < 80; ++i) {
+            uint8_t c = board_->memory().peekByte(a + i);
+            if (c == 0) { ++len; break; }
+            if (c < 32 || c >= 127) break;
+            ++len;
+        }
+        if (len == 0) len = 1;
+    }
+    board_->setData(a, t, len);
+    overlay_->update();
+}
+
 QString MainWindow::annotationsPath() const {
     return lastBin_.isEmpty() ? QString() : lastBin_ + ".bkdb";
 }
@@ -267,8 +286,13 @@ void MainWindow::saveAnnotations(const QString& path) {
         QJsonObject o; o["a"] = int(kv.first); o["c"] = QString::fromStdString(kv.second);
         coms.append(o);
     }
-    if (syms.isEmpty() && coms.isEmpty()) return;   // nothing worth writing
-    QJsonObject root; root["symbols"] = syms; root["comments"] = coms;
+    QJsonArray dat;
+    for (const auto& kv : board_->dataItems()) {
+        QJsonObject o; o["a"] = int(kv.first); o["t"] = int(kv.second.type); o["l"] = int(kv.second.len);
+        dat.append(o);
+    }
+    if (syms.isEmpty() && coms.isEmpty() && dat.isEmpty()) return;   // nothing worth writing
+    QJsonObject root; root["symbols"] = syms; root["comments"] = coms; root["data"] = dat;
     QFile f(path);
     if (f.open(QIODevice::WriteOnly))
         f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -286,6 +310,10 @@ void MainWindow::loadAnnotations(const QString& path) {
     for (const QJsonValue& v : root["comments"].toArray()) {
         QJsonObject o = v.toObject();
         board_->setComment(uint16_t(o["a"].toInt()), o["c"].toString().toStdString());
+    }
+    for (const QJsonValue& v : root["data"].toArray()) {
+        QJsonObject o = v.toObject();
+        board_->setData(uint16_t(o["a"].toInt()), bk::DataType(o["t"].toInt()), uint16_t(o["l"].toInt()));
     }
     if (overlay_) overlay_->update();
 }
@@ -366,6 +394,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         case Qt::Key_Down:     overlay_->moveCursor(1); return;
         case Qt::Key_N:        nameCursorSymbol(); return;   // name/rename the selected line
         case Qt::Key_Semicolon: commentCursor(); return;     // comment the selected line
+        case Qt::Key_B:        markData(bk::DataType::Byte);   return;  // mark data types
+        case Qt::Key_W:        markData(bk::DataType::Word);   return;
+        case Qt::Key_S:        markData(bk::DataType::String); return;
+        case Qt::Key_P:        markData(bk::DataType::Ptr);    return;
+        case Qt::Key_U:        board_->clearData(overlay_->cursorAddr()); overlay_->update(); return; // back to code
         case Qt::Key_BracketLeft:  overlay_->scrollMem(-8); return;
         case Qt::Key_BracketRight: overlay_->scrollMem(8); return;
         default: e->accept(); return; // swallow other keys while debugging

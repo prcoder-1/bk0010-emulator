@@ -12,6 +12,13 @@
 
 namespace bk {
 
+// Interactive-disassembler data markup: a region marked as data (rather than
+// code) with a type. `len` is the total byte count it covers (an array/string of
+// several elements is one item). The disassembler view renders these as data and
+// skips over them.
+enum class DataType : uint8_t { Byte = 0, Word = 1, String = 2, Ptr = 3 };
+struct DataItem { DataType type; uint16_t len; };
+
 // The BK-0010 "motherboard": wires the CPU, memory, screen and the internal
 // I/O registers together and drives the emulation. Pure C++ (no Qt) so it can
 // run in a worker thread owned by the GUI.
@@ -79,6 +86,16 @@ public:
     }
     const std::map<uint16_t, std::string>& comments() const { return comments_; }
     void clearComments() { comments_.clear(); }
+
+    // --- Data markup: address -> {type, byte-length}. The disassembler view shows
+    // marked regions as data instead of code.
+    void setData(uint16_t a, DataType t, uint16_t len) { data_[a] = {t, static_cast<uint16_t>(len ? len : 1)}; }
+    void clearData(uint16_t a) { data_.erase(a); }
+    const DataItem* dataAt(uint16_t a) const {
+        auto it = data_.find(a); return it == data_.end() ? nullptr : &it->second;
+    }
+    const std::map<uint16_t, DataItem>& dataItems() const { return data_; }
+    void clearAllData() { data_.clear(); }
     bool breakHit() const { return breakHit_; }
     void clearBreakHit() { breakHit_ = false; watchHit_ = false; }
 
@@ -206,6 +223,7 @@ private:
     bool     breakHit_ = false;
     SymbolTable symbols_;                        // linker-map symbols (address <-> name)
     std::map<uint16_t, std::string> comments_;   // interactive per-address comments
+    std::map<uint16_t, DataItem> data_;          // interactive code/data markup
 
     // Data watchpoints (addr -> mode bits: 1=read, 2=write) and last-hit info.
     std::map<uint16_t, uint8_t> watchpoints_;
