@@ -35,6 +35,22 @@ public:
     std::size_t size() const { return byAddr_.size(); }
     const std::map<uint16_t, std::string>& all() const { return byAddr_; }
 
+    // Interactive editing. set() adds or renames the symbol at `a`; a name maps to
+    // a single address, so any prior use of that name is dropped.
+    void set(uint16_t a, const std::string& name) {
+        auto old = byAddr_.find(a);
+        if (old != byAddr_.end()) byName_.erase(old->second);
+        auto dup = byName_.find(name);
+        if (dup != byName_.end()) byAddr_.erase(dup->second);
+        byAddr_[a] = name; byName_[name] = a;
+    }
+    void remove(uint16_t a) {
+        auto it = byAddr_.find(a);
+        if (it == byAddr_.end()) return;
+        byName_.erase(it->second); byAddr_.erase(it);
+    }
+    void clear() { byAddr_.clear(); byName_.clear(); }
+
     // Exact symbol at `a` (nullptr if none).
     const std::string* nameAt(uint16_t a) const {
         auto it = byAddr_.find(a);

@@ -52,6 +52,23 @@ void DebuggerOverlay::snapshotRegs() {
     havePrev_ = true;
 }
 
+void DebuggerOverlay::moveCursor(int lines) {
+    const bk::Memory& mem = board_->memory();
+    if (lines > 0) {
+        for (int i = 0; i < lines; ++i) cursorAddr_ += bk::disasm(mem, cursorAddr_).words * 2;
+    } else {
+        cursorAddr_ += lines * 2;                 // approximate backward move (1 word/line)
+    }
+    // Re-anchor the disasm window if the cursor scrolled out of view.
+    uint16_t a = disasmTop_; bool vis = false;
+    for (int i = 0; i < disasmLines_; ++i) {
+        if (a == cursorAddr_) { vis = true; break; }
+        a += bk::disasm(mem, a).words * 2;
+    }
+    if (!vis) disasmTop_ = cursorAddr_;
+    update();
+}
+
 static QString flagsStr(uint16_t psw) {
     auto b = [&](uint16_t m, char c) { return (psw & m) ? c : '-'; };
     char buf[8];
@@ -202,6 +219,10 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
             p.fillRect(lineRect, warm);
         }
         if (isPc) p.fillRect(lineRect, QColor(60, 60, 0, 160));
+        if (a == cursorAddr_) {  // selected line (naming/commenting target)
+            p.setPen(QPen(QColor(120, 200, 255), 1.3)); p.setBrush(Qt::NoBrush);
+            p.drawRect(lineRect);
+        }
         if ((int)a == link_) {   // linked highlight from another profiler window
             p.fillRect(lineRect, QColor(255, 245, 150, 45));
             p.setPen(QPen(QColor(255, 245, 150), 1.3)); p.setBrush(Qt::NoBrush);
@@ -216,13 +237,26 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         p.drawText(x + cw * 2, y, oct6(a));
         p.setPen(QColor(140, 150, 190));
         p.drawText(x + cw * 9, y, raw);
+        int textX = x + cw * 9 + cw * 8 * 3;
+        QString dtext = QString::fromStdString(d.text);
         p.setPen(isPc ? hi : fg);
-        p.drawText(x + cw * 9 + cw * 8 * 3, y, QString::fromStdString(d.text));
-        // If a symbol is defined at this line, show its name right-aligned.
+        p.drawText(textX, y, dtext);
+        int rightLimit = disasmRect_.right() - 6;
+        // Symbol defined at this line: its name, right-aligned.
         if (const std::string* ln = syms.nameAt(a)) {
             QString name = QString::fromStdString(*ln);
-            p.setPen(symCol);
-            p.drawText(disasmRect_.right() - 6 - fm.horizontalAdvance(name), y, name);
+            int nx = rightLimit - fm.horizontalAdvance(name);
+            p.setPen(symCol); p.drawText(nx, y, name);
+            rightLimit = nx - cw;                 // comment must not run into the symbol
+        }
+        // User comment, after the instruction text.
+        if (const std::string* cm = board_->comment(a)) {
+            int cx = textX + fm.horizontalAdvance(dtext) + cw * 2;
+            if (cx < rightLimit) {
+                p.setPen(QColor(150, 165, 130));
+                p.drawText(cx, y, fm.elidedText("; " + QString::fromStdString(*cm),
+                                                Qt::ElideRight, rightLimit - cx));
+            }
         }
         y += lineH_;
         a += d.words * 2;
@@ -331,8 +365,8 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     QFontMetrics hfm(helpFont);
     p.setPen(QColor(180, 200, 255));
     QString help = QString::fromUtf8(
-        "F12-выход  F7-шаг(в)  F8-шаг(через)  F9-тчк.останова  Esc-продолжить  "
-        "колесо/PgUp/PgDn-дизасм  [/]-память  тчк.ост: ЛКМ-переход ПКМ-удалить");
+        "F12-выход  F7/F8-шаг  F9-тчк(PC)  Esc-продолжить  колесо/PgUp/PgDn/↑↓-дизасм  "
+        "[/]-память  дизасм: ЛКМ-выбор ПКМ-тчк N-имя ;-коммент  ·  панель тчк: ЛКМ-переход ПКМ-удалить");
     p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
 }
 
@@ -350,15 +384,17 @@ void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
         }
         return;
     }
-    // Click on a disasm line toggles a breakpoint there (left button only).
-    if (e->button() == Qt::LeftButton && disasmRect_.contains(pos)) {
+    // Disasm line: left click selects it (for naming/commenting via N / ;), right
+    // click toggles a breakpoint there.
+    if (disasmRect_.contains(pos)) {
         int rel = pos.y() - (disasmRect_.y() + lineH_ + lineH_) + lineH_;
         int idx = rel / lineH_;
         if (idx >= 0 && idx < disasmLines_) {
             uint16_t a = disasmTop_;
             for (int i = 0; i < idx; ++i)
                 a += bk::disasm(board_->memory(), a).words * 2;
-            board_->toggleBreakpoint(a);
+            if (e->button() == Qt::RightButton) board_->toggleBreakpoint(a);
+            else                                 cursorAddr_ = a;
             update();
         }
     }

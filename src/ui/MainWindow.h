@@ -32,6 +32,7 @@ protected:
     void keyPressEvent(QKeyEvent* e) override;
     void keyReleaseEvent(QKeyEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
+    void closeEvent(QCloseEvent* e) override;   // auto-save annotations
 
 private slots:
     void onTick();
@@ -57,6 +58,12 @@ private:
     void setSuspended(bool suspended);   // simple pause (Pause key), no debugger
     void stepInto();
     void stepOver();
+    // Interactive-disassembler annotations (symbols + comments).
+    void nameCursorSymbol();             // N: name/rename the symbol at the cursor
+    void commentCursor();                // ;: edit the comment at the cursor
+    void saveAnnotations(const QString& path);
+    void loadAnnotations(const QString& path);
+    QString annotationsPath() const;     // "<loaded .bin>.bkdb", or empty
 
     std::unique_ptr<bk::Board> board_;
     GlScreen* screen_ = nullptr;
