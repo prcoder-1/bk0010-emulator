@@ -16,6 +16,7 @@ public:
     explicit DebuggerOverlay(bk::Board* board, QWidget* parent = nullptr);
 
     void followPc();                 // scroll disasm so PC is visible
+    void snapshotRegs();             // remember current regs so the next paint can highlight changes
     void setDisasmAddr(uint16_t a) { disasmTop_ = a; update(); } // jump disasm to addr
     void setMemAddr(uint16_t a) { memAddr_ = a; update(); }
     // Linked highlighting: mark the disasm line at `addr` (-1 = none).
@@ -36,6 +37,9 @@ private:
     int disasmLines_ = 20;
     int link_ = -1;                  // linked-highlight address (-1 = none)
     int bpScroll_ = 0;               // index of the first breakpoint shown (wheel-scroll)
+    uint16_t prevR_[8] = {0};        // registers at the last snapshot (changed-reg highlight)
+    uint16_t prevPsw_ = 0;
+    bool havePrev_ = false;
 
     // Layout rectangles (computed each paint) used by the mouse handlers.
     QRect disasmRect_;

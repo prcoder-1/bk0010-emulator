@@ -1,4 +1,5 @@
 #include "Disasm.h"
+#include "Symbols.h"
 #include <cstdio>
 
 namespace bk {
@@ -16,10 +17,17 @@ std::string oct(uint16_t v) {
     return buf;
 }
 
+// A target address rendered as its symbol name if one matches, else octal.
+std::string symOrOct(uint16_t v, const SymbolTable* syms) {
+    if (syms) { const std::string* n = syms->nameAt(v); if (n) return *n; }
+    return oct(v);
+}
+
 // Format one operand (mode+reg). Consumes an extra word from mem for modes 6/7
 // and for PC-relative immediate/absolute (modes 2/3 with reg==7). `pc` points
 // at the word following the current instruction word and is advanced.
-std::string operand(const Memory& mem, int mode, int reg, uint16_t& pc, int& words) {
+std::string operand(const Memory& mem, int mode, int reg, uint16_t& pc, int& words,
+                    const SymbolTable* syms) {
     char buf[32];
     switch (mode) {
     case 0: return regName(reg);
@@ -35,8 +43,7 @@ std::string operand(const Memory& mem, int mode, int reg, uint16_t& pc, int& wor
     case 3:
         if (reg == 7) { // absolute: @#n
             uint16_t a = mem.peekWord(pc); pc += 2; words++;
-            std::snprintf(buf, sizeof(buf), "@#%s", oct(a).c_str());
-            return buf;
+            return "@#" + symOrOct(a, syms);
         }
         std::snprintf(buf, sizeof(buf), "@(%s)+", regName(reg));
         return buf;
@@ -44,38 +51,29 @@ std::string operand(const Memory& mem, int mode, int reg, uint16_t& pc, int& wor
     case 5: std::snprintf(buf, sizeof(buf), "@-(%s)", regName(reg)); return buf;
     case 6: {
         uint16_t disp = mem.peekWord(pc); pc += 2; words++;
-        if (reg == 7) { // PC-relative address
-            uint16_t target = (uint16_t)(pc + disp);
-            std::snprintf(buf, sizeof(buf), "%s", oct(target).c_str());
-        } else {
-            std::snprintf(buf, sizeof(buf), "%s(%s)", oct(disp).c_str(), regName(reg));
-        }
+        if (reg == 7) return symOrOct((uint16_t)(pc + disp), syms); // PC-relative address
+        std::snprintf(buf, sizeof(buf), "%s(%s)", oct(disp).c_str(), regName(reg));
         return buf;
     }
     case 7: {
         uint16_t disp = mem.peekWord(pc); pc += 2; words++;
-        if (reg == 7) {
-            uint16_t target = (uint16_t)(pc + disp);
-            std::snprintf(buf, sizeof(buf), "@%s", oct(target).c_str());
-        } else {
-            std::snprintf(buf, sizeof(buf), "@%s(%s)", oct(disp).c_str(), regName(reg));
-        }
+        if (reg == 7) return "@" + symOrOct((uint16_t)(pc + disp), syms);
+        std::snprintf(buf, sizeof(buf), "@%s(%s)", oct(disp).c_str(), regName(reg));
         return buf;
     }
     }
     return "?";
 }
 
-std::string branchTarget(uint16_t pcAfter, uint16_t ir) {
+std::string branchTarget(uint16_t pcAfter, uint16_t ir, const SymbolTable* syms) {
     int off = ir & 0377;
     if (off & 0200) off |= 0177400;
-    uint16_t target = (uint16_t)(pcAfter + off * 2);
-    return oct(target);
+    return symOrOct((uint16_t)(pcAfter + off * 2), syms);
 }
 
 } // namespace
 
-DisasmLine disasm(const Memory& mem, uint16_t addr) {
+DisasmLine disasm(const Memory& mem, uint16_t addr, const SymbolTable* syms) {
     DisasmLine out;
     out.addr = addr;
     uint16_t ir = mem.peekWord(addr);
@@ -87,18 +85,18 @@ DisasmLine disasm(const Memory& mem, uint16_t addr) {
     char buf[96];
 
     auto twoOp = [&](const char* m) {
-        std::string s = operand(mem, sm, sr, pc, words);
-        std::string d = operand(mem, dm, dr, pc, words);
+        std::string s = operand(mem, sm, sr, pc, words, syms);
+        std::string d = operand(mem, dm, dr, pc, words, syms);
         std::snprintf(buf, sizeof(buf), "%-6s%s, %s", m, s.c_str(), d.c_str());
         return std::string(buf);
     };
     auto oneOp = [&](const char* m) {
-        std::string d = operand(mem, dm, dr, pc, words);
+        std::string d = operand(mem, dm, dr, pc, words, syms);
         std::snprintf(buf, sizeof(buf), "%-6s%s", m, d.c_str());
         return std::string(buf);
     };
     auto branch = [&](const char* m) {
-        std::snprintf(buf, sizeof(buf), "%-6s%s", m, branchTarget(pc, ir).c_str());
+        std::snprintf(buf, sizeof(buf), "%-6s%s", m, branchTarget(pc, ir, syms).c_str());
         return std::string(buf);
     };
 
@@ -147,7 +145,7 @@ DisasmLine disasm(const Memory& mem, uint16_t addr) {
         else if (idx >= 030 && idx <= 033) t = branch("BGT");
         else if (idx >= 034 && idx <= 037) t = branch("BLE");
         else if (idx >= 040 && idx <= 047) { // JSR
-            std::string d = operand(mem, dm, dr, pc, words);
+            std::string d = operand(mem, dm, dr, pc, words, syms);
             std::snprintf(buf, sizeof(buf), "%-6s%s, %s", "JSR", regName(sr), d.c_str());
             t = buf;
         }
@@ -166,14 +164,14 @@ DisasmLine disasm(const Memory& mem, uint16_t addr) {
         else if (idx == 064) { std::snprintf(buf, sizeof(buf), "MARK  %o", ir & 077); t = buf; }
         else if (idx == 067) t = oneOp("SXT");
         else if (idx >= 0740 && idx <= 0747) { // XOR
-            std::string d = operand(mem, dm, dr, pc, words);
+            std::string d = operand(mem, dm, dr, pc, words, syms);
             std::snprintf(buf, sizeof(buf), "%-6s%s, %s", "XOR", regName(sr), d.c_str());
             t = buf;
         }
         else if (idx >= 0770 && idx <= 0777) { // SOB
             int reg = (ir & 0700) >> 6;
             uint16_t target = (uint16_t)(pc - (ir & 077) * 2);
-            std::snprintf(buf, sizeof(buf), "%-6s%s, %s", "SOB", regName(reg), oct(target).c_str());
+            std::snprintf(buf, sizeof(buf), "%-6s%s, %s", "SOB", regName(reg), symOrOct(target, syms).c_str());
             t = buf;
         }
         else if (idx >= 01000 && idx <= 01003) t = branch("BPL");

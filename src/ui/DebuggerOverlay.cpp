@@ -45,6 +45,13 @@ void DebuggerOverlay::scrollDisasm(int lines) {
 
 void DebuggerOverlay::scrollMem(int rows) { memAddr_ += rows * 8; update(); }
 
+void DebuggerOverlay::snapshotRegs() {
+    auto& cpu = board_->cpu();
+    for (int i = 0; i < 8; ++i) prevR_[i] = cpu.r[i];
+    prevPsw_ = cpu.psw;
+    havePrev_ = true;
+}
+
 static QString flagsStr(uint16_t psw) {
     auto b = [&](uint16_t m, char c) { return (psw & m) ? c : '-'; };
     char buf[8];
@@ -74,10 +81,21 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     const QColor hi(255, 240, 120);            // current PC
     const QColor bpCol(255, 90, 90);           // breakpoint
     const QColor title(120, 200, 255);
+    const QColor chg(255, 180, 60);            // register changed since last step
+    const QColor symCol(120, 210, 170);        // symbol name annotation
 
     auto& cpu = board_->cpu();
     auto& mem = board_->memory();
     auto& tr  = board_->trace();
+    const bk::SymbolTable& syms = board_->symbols();
+    // "name" / "name+off" for a code address, or empty if no symbol is near.
+    auto symLabel = [&](uint16_t a) -> QString {
+        uint16_t base; std::string nm;
+        if (!syms.nearest(a, base, nm, 0x400)) return QString();
+        QString s = QString::fromStdString(nm);
+        if (a != base) s += "+" + QString::number(a - base, 8);
+        return s;
+    };
 
     int margin = fs;
     int W = width(), H = height();
@@ -92,16 +110,20 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     p.fillRect(regRect, panelBg);
     p.setPen(border); p.drawRect(regRect);
     p.setPen(title); p.drawText(regRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— РЕГИСТРЫ —");
-    p.setPen(fg);
     int rx = regRect.x() + 6, ry = regRect.y() + 2 * lineH_;
     for (int i = 0; i < 8; ++i) {
         static const char* nm[8] = {"R0", "R1", "R2", "R3", "R4", "R5", "SP", "PC"};
+        // A register that changed since the last step is drawn in the "changed"
+        // colour (classic Soft-ICE cue).
+        p.setPen(havePrev_ && cpu.r[i] != prevR_[i] ? chg : fg);
         QString s = QString("%1=%2").arg(nm[i]).arg(oct6(cpu.r[i]));
         int col = i % 4, row = i / 4;
         p.drawText(rx + col * cw * 11, ry + row * lineH_, s);
     }
+    p.setPen(havePrev_ && cpu.psw != prevPsw_ ? chg : fg);
     p.drawText(rx, ry + 2 * lineH_, QString("PSW=%1  [%2]")
         .arg(oct6(cpu.psw)).arg(flagsStr(cpu.psw)));
+    p.setPen(fg);
     p.drawText(rx + cw * 24, ry + 2 * lineH_,
         QString(cpu.halted() ? "СОСТ: ОСТАНОВ (HALT)" : "СОСТ: ПАУЗА"));
 
@@ -133,7 +155,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
                 bool isPc = (addr == cpu.pc());
                 p.setPen(bpCol); p.drawText(bx, by, "●");
                 p.setPen(isPc ? hi : fg);
-                QString s = oct6(addr) + "  " + QString::fromStdString(bk::disasm(mem, addr).text);
+                QString s = oct6(addr) + "  " + QString::fromStdString(bk::disasm(mem, addr, &syms).text);
                 p.drawText(bx + cw * 3, by, fm.elidedText(s, Qt::ElideRight, bpRect.width() - cw * 3 - 10));
                 bpVisible_.push_back(addr);
                 by += lineH_;
@@ -158,12 +180,14 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     disasmRect_ = QRect(margin, dTop, (W - 3 * margin) * 3 / 5, dH);
     p.fillRect(disasmRect_, panelBg);
     p.setPen(border); p.drawRect(disasmRect_);
-    p.setPen(title); p.drawText(disasmRect_.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— ДИЗАССЕМБЛЕР —");
+    QString disTitle = QString::fromUtf8("— ДИЗАССЕМБЛЕР —");
+    { QString pcSym = symLabel(cpu.pc()); if (!pcSym.isEmpty()) disTitle += "   PC: " + pcSym; }
+    p.setPen(title); p.drawText(disasmRect_.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, disTitle);
 
     uint16_t a = disasmTop_;
     int y = disasmRect_.y() + lineH_ + lineH_;
     for (int i = 0; i < disasmLines_; ++i) {
-        bk::DisasmLine d = bk::disasm(mem, a);
+        bk::DisasmLine d = bk::disasm(mem, a, &syms);
         bool isPc = (a == cpu.pc());
         bool isBp = board_->hasBreakpoint(a);
         int x = disasmRect_.x() + 6;
@@ -194,6 +218,12 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         p.drawText(x + cw * 9, y, raw);
         p.setPen(isPc ? hi : fg);
         p.drawText(x + cw * 9 + cw * 8 * 3, y, QString::fromStdString(d.text));
+        // If a symbol is defined at this line, show its name right-aligned.
+        if (const std::string* ln = syms.nameAt(a)) {
+            QString name = QString::fromStdString(*ln);
+            p.setPen(symCol);
+            p.drawText(disasmRect_.right() - 6 - fm.horizontalAdvance(name), y, name);
+        }
         y += lineH_;
         a += d.words * 2;
     }
@@ -237,8 +267,18 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     uint16_t sa = cpu.sp();
     int sy = stkRect.y() + lineH_ + lineH_;
     for (int r = 0; r < srows; ++r) {
-        p.drawText(stkRect.x() + 10, sy,
-            QString("%1: %2").arg(oct6(sa)).arg(oct6(mem.peekWord(sa))));
+        uint16_t val = mem.peekWord(sa);
+        QString line = QString("%1: %2").arg(oct6(sa)).arg(oct6(val));
+        // Resolve a stacked word that points at known code (e.g. a return address).
+        QString sym = symLabel(val);
+        if (!sym.isEmpty()) { p.setPen(fg); }
+        p.drawText(stkRect.x() + 10, sy, line);
+        if (!sym.isEmpty()) {
+            p.setPen(symCol);
+            int ax = stkRect.x() + 10 + fm.horizontalAdvance(line + "  ");
+            p.drawText(ax, sy, fm.elidedText(sym, Qt::ElideRight, stkRect.right() - 6 - ax));
+            p.setPen(fg);
+        }
         sy += lineH_;
         sa += 2;
     }

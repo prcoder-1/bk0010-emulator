@@ -64,6 +64,16 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     dbg->addSeparator();
     dbg->addAction("&Сохранить состояние…", this, &MainWindow::saveState, QKeySequence("Ctrl+S"));
     dbg->addAction("В&осстановить состояние…", this, &MainWindow::loadState, QKeySequence("Ctrl+L"));
+    dbg->addAction("Загрузить си&мволы (.map)…", this, [this] {
+        QString path = QFileDialog::getOpenFileName(this, "Загрузить символы (linker .map)",
+            lastBin_.isEmpty() ? QString() : lastBin_,
+            "Карты/символы (*.map *.sym *.lst);;Все файлы (*)");
+        if (path.isEmpty()) return;
+        int n = board_->loadSymbols(path.toStdString());
+        status_->setText(n < 0 ? QString("Не удалось открыть файл символов")
+                               : QString("Загружено символов: %1").arg(n));
+        overlay_->update();
+    });
 
     status_ = new QLabel("Готов", this);
     statusBar()->addWidget(status_);
@@ -125,6 +135,7 @@ void MainWindow::renderScreen() {
 void MainWindow::setPaused(bool paused) {
     paused_ = paused;
     if (paused_) {
+        overlay_->snapshotRegs();   // baseline for the changed-register highlight
         overlay_->setGeometry(screen_->rect());
         overlay_->followPc();
         overlay_->show();
@@ -155,6 +166,7 @@ void MainWindow::setSuspended(bool suspended) {
 }
 
 void MainWindow::stepInto() {
+    overlay_->snapshotRegs();   // so registers changed by this step are highlighted
     board_->stepInstruction();
     overlay_->followPc();
     renderScreen();
@@ -162,6 +174,7 @@ void MainWindow::stepInto() {
 }
 
 void MainWindow::stepOver() {
+    overlay_->snapshotRegs();   // so registers changed by this step are highlighted
     uint16_t pc = board_->cpu().pc();
     bk::DisasmLine d = bk::disasm(board_->memory(), pc);
     uint16_t ir = board_->memory().peekWord(pc);
