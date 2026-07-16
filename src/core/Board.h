@@ -8,6 +8,7 @@
 #include "Screen.h"
 #include "Speaker.h"
 #include "Trace.h"
+#include "Symbols.h"
 
 namespace bk {
 
@@ -65,6 +66,11 @@ public:
     bool breakAllows(uint16_t pc) const;   // true if pc's breakpoint (if any) should fire
     bool hasBreakpoint(uint16_t addr) const { return breakpoints_.count(addr) != 0; }
     const std::set<uint16_t>& breakpoints() const { return breakpoints_; }
+
+    // --- Symbols (linker .map) — address <-> name for the disassembler/debugger.
+    SymbolTable& symbols() { return symbols_; }
+    const SymbolTable& symbols() const { return symbols_; }
+    int loadSymbols(const std::string& path) { return symbols_.loadMap(path); }
     bool breakHit() const { return breakHit_; }
     void clearBreakHit() { breakHit_ = false; watchHit_ = false; }
 
@@ -190,6 +196,7 @@ private:
     std::set<uint16_t> breakpoints_;
     std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
     bool     breakHit_ = false;
+    SymbolTable symbols_;                        // linker-map symbols (address <-> name)
 
     // Data watchpoints (addr -> mode bits: 1=read, 2=write) and last-hit info.
     std::map<uint16_t, uint8_t> watchpoints_;
