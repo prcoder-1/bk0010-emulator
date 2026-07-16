@@ -167,6 +167,32 @@ bool DebuggerOverlay::targetOf(uint16_t addr, uint16_t& out) const {
     return false;
 }
 
+bool DebuggerOverlay::addrTokenAtX(const QString& text, int relX, const QFontMetrics& fm,
+                                   uint16_t& out) const {
+    auto isTok = [](QChar c) { return c.isLetterOrNumber() || c == '_' || c == '.' || c == '$'; };
+    const int n = text.size();
+    for (int i = 0; i < n; ) {
+        if (!isTok(text[i])) { ++i; continue; }
+        int start = i;
+        while (i < n && isTok(text[i])) ++i;
+        QString tok = text.mid(start, i - start);
+        bool hashed = (start > 0 && text[start - 1] == '#');   // immediate #n is a value, not an address
+        uint16_t addr = 0; bool ok = false;
+        if (board_->symbols().addrOf(tok.toStdString(), addr)) ok = true;
+        else if (!hashed) {                                    // a bare octal number
+            bool allOct = true;
+            for (QChar c : tok) if (c < '0' || c > '7') { allOct = false; break; }
+            if (allOct) { bool cvt = false; uint v = tok.toUInt(&cvt, 8); if (cvt) { addr = static_cast<uint16_t>(v); ok = true; } }
+        }
+        if (ok) {
+            int x0 = fm.horizontalAdvance(text.left(start));
+            int x1 = fm.horizontalAdvance(text.left(i));
+            if (relX >= x0 && relX <= x1) { out = addr; return true; }
+        }
+    }
+    return false;
+}
+
 static QString flagsStr(uint16_t psw) {
     auto b = [&](uint16_t m, char c) { return (psw & m) ? c : '-'; };
     char buf[8];
@@ -496,7 +522,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     p.setPen(QColor(180, 200, 255));
     QString help = QString::fromUtf8(
         "F12-выход  F7/F8-шаг  F9-тчк  Esc-продолж  ↑↓-курсор  G-переход  Enter-цель  X-ссылки  ←→-назад/вперёд  "
-        "N-имя ;-коммент  данные:B/W/S/P U-код  ПКМ-тчк");
+        "N-имя ;-коммент  данные:B/W/S/P U-код  ЛКМ-по адресу-переход  ПКМ-тчк");
     p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
 }
 
@@ -514,18 +540,31 @@ void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
         }
         return;
     }
-    // Disasm line: left click selects it (for naming/commenting via N / ;), right
-    // click toggles a breakpoint there.
+    // Disasm line. Right click toggles a breakpoint. Left click on an address in
+    // the instruction navigates the disassembler there; left click elsewhere on the
+    // line selects it (for naming/commenting via N / ;).
     if (disasmRect_.contains(pos)) {
         int rel = pos.y() - (disasmRect_.y() + lineH_ + lineH_) + lineH_;
         int idx = rel / lineH_;
         if (idx >= 0 && idx < disasmLines_) {
+            const bk::Memory& mem = board_->memory();
             uint16_t a = disasmTop_;
-            for (int i = 0; i < idx; ++i)
-                a += bk::disasm(board_->memory(), a).words * 2;
-            if (e->button() == Qt::RightButton) board_->toggleBreakpoint(a);
-            else                                 cursorAddr_ = a;
-            update();
+            for (int i = 0; i < idx; ++i) {     // advance like the display (skip data items)
+                if (const bk::DataItem* di = board_->dataAt(a)) a += di->len ? di->len : 2;
+                else a += bk::disasm(mem, a).words * 2;
+            }
+            if (e->button() == Qt::RightButton) { board_->toggleBreakpoint(a); update(); return; }
+            // Same font/metrics as paint, to locate the address token under the click.
+            QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+            mono.setPixelSize(qMax(10, height() / 48));
+            QFontMetrics fm(mono);
+            int textX = disasmRect_.x() + 6 + fm.horizontalAdvance('0') * 33;
+            uint16_t tgt;
+            if (!board_->dataAt(a) && pos.x() >= textX &&
+                addrTokenAtX(QString::fromStdString(bk::disasm(mem, a, &board_->symbols()).text),
+                             pos.x() - textX, fm, tgt))
+                navigateTo(tgt);
+            else { cursorAddr_ = a; update(); }
         }
     }
 }
