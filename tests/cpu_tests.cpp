@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <filesystem>
 
 using namespace bk;
 
@@ -148,14 +149,16 @@ int main() {
         b.cpu().r[3] = 07777;
         b.cpu().r[7] = 02000;
         b.cpu().psw = 017;
-        const char* tmp = "/tmp/claude-1000/bk_state_test.bkst";
-        bool saved = b.saveState(tmp);
+        // Use the platform temp directory (which always exists) rather than a
+        // hard-coded path, so the test passes on any machine.
+        std::string tmp = (std::filesystem::temp_directory_path() / "bk_state_test.bkst").string();
+        bool saved = b.saveState(tmp.c_str());
         CHECK(saved, "saveState succeeds");
         // Corrupt everything, then restore.
         b.memory().pokeWord(01000, 0);
         b.memory().pokeWord(042000, 0);
         b.cpu().r[3] = 0; b.cpu().r[7] = 0; b.cpu().psw = 0;
-        bool loaded = b.loadState(tmp);
+        bool loaded = b.loadState(tmp.c_str());
         CHECK(loaded, "loadState succeeds");
         CHECK(b.memory().peekWord(01000) == 0123456, "RAM restored");
         CHECK(b.memory().peekWord(042000) == 0154321, "video RAM restored");
