@@ -21,6 +21,13 @@
 #include <QFileInfo>
 #include <QKeySequence>
 #include <QKeyEvent>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QCloseEvent>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     : QMainWindow(parent) {
@@ -73,6 +80,21 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
         status_->setText(n < 0 ? QString("Не удалось открыть файл символов")
                                : QString("Загружено символов: %1").arg(n));
         overlay_->update();
+    });
+    dbg->addAction("Сохранить &аннотации (.bkdb)", this, [this] {
+        QString p = annotationsPath();
+        if (p.isEmpty()) p = QFileDialog::getSaveFileName(this, "Сохранить аннотации",
+            QString(), "Аннотации БК (*.bkdb)");
+        if (p.isEmpty()) return;
+        saveAnnotations(p);
+        status_->setText("Аннотации сохранены: " + p);
+    });
+    dbg->addAction("Загрузить а&ннотации (.bkdb)", this, [this] {
+        QString p = QFileDialog::getOpenFileName(this, "Загрузить аннотации",
+            annotationsPath(), "Аннотации БК (*.bkdb);;Все файлы (*)");
+        if (p.isEmpty()) return;
+        loadAnnotations(p);
+        status_->setText("Аннотации загружены: " + p);
     });
 
     status_ = new QLabel("Готов", this);
@@ -136,6 +158,7 @@ void MainWindow::setPaused(bool paused) {
     paused_ = paused;
     if (paused_) {
         overlay_->snapshotRegs();   // baseline for the changed-register highlight
+        overlay_->setCursor(board_->cpu().pc());   // selection starts at PC
         overlay_->setGeometry(screen_->rect());
         overlay_->followPc();
         overlay_->show();
@@ -198,6 +221,80 @@ void MainWindow::resizeEvent(QResizeEvent* e) {
     if (overlay_) overlay_->setGeometry(screen_->rect());
 }
 
+// ---- Interactive-disassembler annotations (symbols + comments) --------------
+static QString octAddr(uint16_t a) { return QString("%1").arg(a, 6, 8, QChar('0')); }
+
+void MainWindow::nameCursorSymbol() {
+    if (!paused_) return;
+    uint16_t a = overlay_->cursorAddr();
+    const std::string* cur = board_->symbols().nameAt(a);
+    bool ok = false;
+    QString name = QInputDialog::getText(this, "Символ",
+        QString("Имя для адреса %1 (пусто — удалить):").arg(octAddr(a)),
+        QLineEdit::Normal, cur ? QString::fromStdString(*cur) : QString(), &ok);
+    if (!ok) return;
+    name = name.trimmed();
+    if (name.isEmpty()) board_->symbols().remove(a);
+    else board_->symbols().set(a, name.toStdString());
+    overlay_->update();
+}
+
+void MainWindow::commentCursor() {
+    if (!paused_) return;
+    uint16_t a = overlay_->cursorAddr();
+    const std::string* cur = board_->comment(a);
+    bool ok = false;
+    QString text = QInputDialog::getText(this, "Комментарий",
+        QString("Комментарий к адресу %1 (пусто — удалить):").arg(octAddr(a)),
+        QLineEdit::Normal, cur ? QString::fromStdString(*cur) : QString(), &ok);
+    if (!ok) return;
+    board_->setComment(a, text.trimmed().toStdString());   // empty clears
+    overlay_->update();
+}
+
+QString MainWindow::annotationsPath() const {
+    return lastBin_.isEmpty() ? QString() : lastBin_ + ".bkdb";
+}
+
+void MainWindow::saveAnnotations(const QString& path) {
+    if (path.isEmpty()) return;
+    QJsonArray syms, coms;
+    for (const auto& kv : board_->symbols().all()) {
+        QJsonObject o; o["a"] = int(kv.first); o["n"] = QString::fromStdString(kv.second);
+        syms.append(o);
+    }
+    for (const auto& kv : board_->comments()) {
+        QJsonObject o; o["a"] = int(kv.first); o["c"] = QString::fromStdString(kv.second);
+        coms.append(o);
+    }
+    if (syms.isEmpty() && coms.isEmpty()) return;   // nothing worth writing
+    QJsonObject root; root["symbols"] = syms; root["comments"] = coms;
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly))
+        f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+}
+
+void MainWindow::loadAnnotations(const QString& path) {
+    if (path.isEmpty()) return;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return;
+    QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+    for (const QJsonValue& v : root["symbols"].toArray()) {
+        QJsonObject o = v.toObject();
+        board_->symbols().set(uint16_t(o["a"].toInt()), o["n"].toString().toStdString());
+    }
+    for (const QJsonValue& v : root["comments"].toArray()) {
+        QJsonObject o = v.toObject();
+        board_->setComment(uint16_t(o["a"].toInt()), o["c"].toString().toStdString());
+    }
+    if (overlay_) overlay_->update();
+}
+
+void MainWindow::closeEvent(QCloseEvent* e) {
+    saveAnnotations(annotationsPath());   // persist symbols/comments next to the .bin
+    QMainWindow::closeEvent(e);
+}
+
 void MainWindow::openBin() {
     QString path = QFileDialog::getOpenFileName(this, "Загрузить .BIN",
         lastBin_.isEmpty() ? QString() : lastBin_, "BK images (*.bin *.BIN);;Все файлы (*)");
@@ -215,6 +312,7 @@ bool MainWindow::loadBinFromPath(const QString& path) {
         return false;
     }
     lastBin_ = path;
+    loadAnnotations(annotationsPath());   // pick up "<bin>.bkdb" symbols/comments if present
     status_->setText(QString("Загружено %1: адрес %2, длина %3 (восьм.)")
         .arg(QFileInfo(path).fileName())
         .arg(QString::number(addr, 8))
@@ -264,6 +362,10 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         case Qt::Key_Escape:   setPaused(false); return;
         case Qt::Key_PageUp:   overlay_->scrollDisasm(-8); return;
         case Qt::Key_PageDown: overlay_->scrollDisasm(8); return;
+        case Qt::Key_Up:       overlay_->moveCursor(-1); return;
+        case Qt::Key_Down:     overlay_->moveCursor(1); return;
+        case Qt::Key_N:        nameCursorSymbol(); return;   // name/rename the selected line
+        case Qt::Key_Semicolon: commentCursor(); return;     // comment the selected line
         case Qt::Key_BracketLeft:  overlay_->scrollMem(-8); return;
         case Qt::Key_BracketRight: overlay_->scrollMem(8); return;
         default: e->accept(); return; // swallow other keys while debugging

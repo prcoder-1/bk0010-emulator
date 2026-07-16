@@ -71,6 +71,14 @@ public:
     SymbolTable& symbols() { return symbols_; }
     const SymbolTable& symbols() const { return symbols_; }
     int loadSymbols(const std::string& path) { return symbols_.loadMap(path); }
+
+    // --- Comments (interactive disassembler annotations): address -> free text.
+    void setComment(uint16_t a, const std::string& c) { if (c.empty()) comments_.erase(a); else comments_[a] = c; }
+    const std::string* comment(uint16_t a) const {
+        auto it = comments_.find(a); return it == comments_.end() ? nullptr : &it->second;
+    }
+    const std::map<uint16_t, std::string>& comments() const { return comments_; }
+    void clearComments() { comments_.clear(); }
     bool breakHit() const { return breakHit_; }
     void clearBreakHit() { breakHit_ = false; watchHit_ = false; }
 
@@ -197,6 +205,7 @@ private:
     std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
     bool     breakHit_ = false;
     SymbolTable symbols_;                        // linker-map symbols (address <-> name)
+    std::map<uint16_t, std::string> comments_;   // interactive per-address comments
 
     // Data watchpoints (addr -> mode bits: 1=read, 2=write) and last-hit info.
     std::map<uint16_t, uint8_t> watchpoints_;

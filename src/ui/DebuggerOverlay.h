@@ -18,6 +18,9 @@ public:
     void followPc();                 // scroll disasm so PC is visible
     void snapshotRegs();             // remember current regs so the next paint can highlight changes
     void setDisasmAddr(uint16_t a) { disasmTop_ = a; update(); } // jump disasm to addr
+    uint16_t cursorAddr() const { return cursorAddr_; }          // selected disasm line (for naming/commenting)
+    void setCursor(uint16_t a) { cursorAddr_ = a; update(); }
+    void moveCursor(int lines);      // move the selection up/down, keeping it visible
     void setMemAddr(uint16_t a) { memAddr_ = a; update(); }
     // Linked highlighting: mark the disasm line at `addr` (-1 = none).
     void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
@@ -32,6 +35,7 @@ protected:
 private:
     bk::Board* board_;
     uint16_t disasmTop_ = 0;         // first address shown in the disasm panel
+    uint16_t cursorAddr_ = 0;        // selected disasm line (naming/commenting target)
     uint16_t memAddr_   = 01000;     // first address shown in the memory panel
     int lineH_ = 14;                 // pixel height of a text line (recomputed)
     int disasmLines_ = 20;
