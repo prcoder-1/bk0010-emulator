@@ -1,6 +1,8 @@
 #pragma once
 #include <QWidget>
+#include <QRect>
 #include <cstdint>
+#include <vector>
 
 namespace bk { class Board; }
 
@@ -33,8 +35,11 @@ private:
     int lineH_ = 14;                 // pixel height of a text line (recomputed)
     int disasmLines_ = 20;
     int link_ = -1;                  // linked-highlight address (-1 = none)
+    int bpScroll_ = 0;               // index of the first breakpoint shown (wheel-scroll)
 
     // Layout rectangles (computed each paint) used by the mouse handlers.
     QRect disasmRect_;
     QRect memRect_;
+    QRect bpRect_;                   // breakpoints panel (top-right of the registers)
+    std::vector<uint16_t> bpVisible_; // breakpoint addresses currently drawn, row order (hit test)
 };
