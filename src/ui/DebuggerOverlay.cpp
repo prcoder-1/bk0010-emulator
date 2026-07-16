@@ -7,6 +7,7 @@
 #include <QFontDatabase>
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 
 using bk::Board;
 
@@ -81,9 +82,13 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     int margin = fs;
     int W = width(), H = height();
 
-    // ---- Registers panel (top strip) ----
-    // Title on its own line; three data rows below it (R0-3 / R4-7 / PSW).
-    QRect regRect(margin, margin, W - 2 * margin, lineH_ * 5);
+    // ---- Registers panel (top-left) ----
+    // Title on its own line; three data rows below it (R0-3 / R4-7 / PSW). Sized
+    // snugly to its content (widest row = "PSW=… [flags]" + "СОСТ: ОСТАНОВ (HALT)")
+    // plus inner padding, so the freed width to the right holds the breakpoints
+    // panel.
+    int regW = 44 * cw + 14;
+    QRect regRect(margin, margin, regW, lineH_ * 5);
     p.fillRect(regRect, panelBg);
     p.setPen(border); p.drawRect(regRect);
     p.setPen(title); p.drawText(regRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— РЕГИСТРЫ —");
@@ -99,6 +104,46 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         .arg(oct6(cpu.psw)).arg(flagsStr(cpu.psw)));
     p.drawText(rx + cw * 24, ry + 2 * lineH_,
         QString(cpu.halted() ? "СОСТ: ОСТАНОВ (HALT)" : "СОСТ: ПАУЗА"));
+
+    // ---- Breakpoints panel (top strip, right of the registers) ----
+    // Lists the installed breakpoints; LMB jumps the disassembler there, RMB
+    // removes it (handled in mousePressEvent), wheel scrolls the list.
+    bpVisible_.clear();
+    bpRect_ = QRect();
+    {
+        int bpX = regRect.right() + margin;
+        int bpW = W - margin - bpX;
+        if (bpW > 40) {
+            QRect bpRect(bpX, margin, bpW, regRect.height());
+            bpRect_ = bpRect;
+            p.fillRect(bpRect, panelBg);
+            p.setPen(border); p.drawRect(bpRect);
+            const auto& bps = board_->breakpoints();
+            p.setPen(title);
+            p.drawText(bpRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft,
+                       QString::fromUtf8("— ТОЧКИ ОСТАНОВА (%1) —").arg((int)bps.size()));
+            int bpRows = (bpRect.height() - lineH_ - 6) / lineH_;
+            if (bpRows < 1) bpRows = 1;
+            bpScroll_ = std::clamp(bpScroll_, 0, std::max(0, (int)bps.size() - bpRows));
+            int bx = bpRect.x() + 6, by = bpRect.y() + 2 * lineH_;
+            int idx = 0;
+            for (uint16_t addr : bps) {
+                if (idx++ < bpScroll_) continue;
+                if ((int)bpVisible_.size() >= bpRows) break;
+                bool isPc = (addr == cpu.pc());
+                p.setPen(bpCol); p.drawText(bx, by, "●");
+                p.setPen(isPc ? hi : fg);
+                QString s = oct6(addr) + "  " + QString::fromStdString(bk::disasm(mem, addr).text);
+                p.drawText(bx + cw * 3, by, fm.elidedText(s, Qt::ElideRight, bpRect.width() - cw * 3 - 10));
+                bpVisible_.push_back(addr);
+                by += lineH_;
+            }
+            if (bps.empty()) {
+                p.setPen(QColor(140, 150, 170));
+                p.drawText(bx, by, QString::fromUtf8("нет точек останова"));
+            }
+        }
+    }
 
     // ---- Disassembly panel (left) ----
     // Reserve a band at the bottom for the help line and size the panels snugly
@@ -240,17 +285,34 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         gy += lineH_;
     }
 
-    // ---- Help line ----
+    // ---- Help line ---- (slightly smaller font so all the hints fit on one line)
+    QFont helpFont = mono; helpFont.setPixelSize(qMax(9, fs * 3 / 4));
+    p.setFont(helpFont);
+    QFontMetrics hfm(helpFont);
     p.setPen(QColor(180, 200, 255));
-    p.drawText(margin, H - 4,
+    QString help = QString::fromUtf8(
         "F12-выход  F7-шаг(в)  F8-шаг(через)  F9-тчк.останова  Esc-продолжить  "
-        "колесо/PgUp/PgDn-дизасм  [/]-память");
+        "колесо/PgUp/PgDn-дизасм  [/]-память  тчк.ост: ЛКМ-переход ПКМ-удалить");
+    p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
 }
 
 void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
-    // Click on a disasm line toggles a breakpoint there.
-    if (disasmRect_.contains(e->pos())) {
-        int rel = e->pos().y() - (disasmRect_.y() + lineH_ + lineH_) + lineH_;
+    const QPoint pos = e->pos();
+    // Breakpoints panel: left click jumps the disassembler to the breakpoint,
+    // right click removes it.
+    if (bpRect_.contains(pos)) {
+        int idx = (pos.y() - (bpRect_.y() + 2 * lineH_) + lineH_) / lineH_;
+        if (idx >= 0 && idx < (int)bpVisible_.size()) {
+            uint16_t a = bpVisible_[idx];
+            if (e->button() == Qt::RightButton) board_->removeBreakpoint(a);
+            else                                 disasmTop_ = a;
+            update();
+        }
+        return;
+    }
+    // Click on a disasm line toggles a breakpoint there (left button only).
+    if (e->button() == Qt::LeftButton && disasmRect_.contains(pos)) {
+        int rel = pos.y() - (disasmRect_.y() + lineH_ + lineH_) + lineH_;
         int idx = rel / lineH_;
         if (idx >= 0 && idx < disasmLines_) {
             uint16_t a = disasmTop_;
@@ -270,6 +332,7 @@ void DebuggerOverlay::wheelEvent(QWheelEvent* e) {
     const QPoint pos = e->position().toPoint();
     if (disasmRect_.contains(pos))   scrollDisasm(-notches * 3); // wheel up = earlier addrs
     else if (memRect_.contains(pos)) scrollMem(-notches);
+    else if (bpRect_.contains(pos))  { bpScroll_ = std::max(0, bpScroll_ - notches); update(); }
     else { e->ignore(); return; }
     e->accept();
 }
