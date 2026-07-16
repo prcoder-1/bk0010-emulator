@@ -23,6 +23,7 @@
 #include <QKeyEvent>
 #include <QInputDialog>
 #include <QLineEdit>
+#include <QStringList>
 #include <QCloseEvent>
 #include <QFile>
 #include <QJsonDocument>
@@ -271,6 +272,45 @@ void MainWindow::markData(bk::DataType t) {
     overlay_->update();
 }
 
+void MainWindow::gotoDialog() {
+    if (!paused_) return;
+    // Editable picker: the sorted symbol names act as a function list; the field
+    // also accepts a typed address (octal by default, or 0x hex).
+    QStringList items;
+    for (const auto& kv : board_->symbols().all()) items << QString::fromStdString(kv.second);
+    items.sort();
+    bool ok = false;
+    QString sel = QInputDialog::getItem(this, "Перейти",
+        "Символ или адрес (восьмер., или 0x…):", items, 0, /*editable*/ true, &ok);
+    if (!ok) return;
+    sel = sel.trimmed();
+    uint16_t addr;
+    if (board_->symbols().addrOf(sel.toStdString(), addr)) { overlay_->navigateTo(addr); return; }
+    bool num = false; uint parsed = sel.startsWith("0x", Qt::CaseInsensitive)
+        ? sel.mid(2).toUInt(&num, 16) : sel.toUInt(&num, 8);
+    if (num) overlay_->navigateTo(static_cast<uint16_t>(parsed));
+    else status_->setText("Не найдено: " + sel);
+}
+
+void MainWindow::xrefsDialog() {
+    if (!paused_) return;
+    uint16_t t = overlay_->cursorAddr();
+    std::vector<uint16_t> refs = overlay_->xrefsTo(t);
+    QString what = QString("%1").arg(t, 6, 8, QChar('0'));
+    if (const std::string* nm = board_->symbols().nameAt(t)) what += " (" + QString::fromStdString(*nm) + ")";
+    if (refs.empty()) { status_->setText("Нет ссылок на " + what); return; }
+    QStringList items;
+    for (uint16_t a : refs)
+        items << QString("%1  %2").arg(a, 6, 8, QChar('0'))
+                     .arg(QString::fromStdString(bk::disasm(board_->memory(), a, &board_->symbols()).text));
+    bool ok = false;
+    QString sel = QInputDialog::getItem(this, "Ссылки на " + what,
+        QString("Кто ссылается (%1):").arg(refs.size()), items, 0, /*editable*/ false, &ok);
+    if (!ok) return;
+    bool num = false; uint a = sel.section(' ', 0, 0).toUInt(&num, 8);
+    if (num) overlay_->navigateTo(static_cast<uint16_t>(a));
+}
+
 QString MainWindow::annotationsPath() const {
     return lastBin_.isEmpty() ? QString() : lastBin_ + ".bkdb";
 }
@@ -399,6 +439,12 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         case Qt::Key_S:        markData(bk::DataType::String); return;
         case Qt::Key_P:        markData(bk::DataType::Ptr);    return;
         case Qt::Key_U:        board_->clearData(overlay_->cursorAddr()); overlay_->update(); return; // back to code
+        case Qt::Key_G:        gotoDialog(); return;                       // goto symbol/address
+        case Qt::Key_X:        xrefsDialog(); return;                      // who references the cursor
+        case Qt::Key_Return:
+        case Qt::Key_Enter:    overlay_->followTarget(); return;           // follow branch/call target
+        case Qt::Key_Left:     overlay_->navBack(); return;                // history back / forward
+        case Qt::Key_Right:    overlay_->navForward(); return;
         case Qt::Key_BracketLeft:  overlay_->scrollMem(-8); return;
         case Qt::Key_BracketRight: overlay_->scrollMem(8); return;
         default: e->accept(); return; // swallow other keys while debugging

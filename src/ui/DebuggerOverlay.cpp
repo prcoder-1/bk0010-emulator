@@ -70,6 +70,74 @@ void DebuggerOverlay::moveCursor(int lines) {
     update();
 }
 
+void DebuggerOverlay::navigateTo(uint16_t a) {
+    if (a == cursorAddr_) return;
+    navBack_.push_back(cursorAddr_);
+    if (navBack_.size() > 256) navBack_.erase(navBack_.begin());
+    navForward_.clear();
+    cursorAddr_ = a; disasmTop_ = a;
+    update();
+}
+
+void DebuggerOverlay::navBack() {
+    if (navBack_.empty()) return;
+    navForward_.push_back(cursorAddr_);
+    cursorAddr_ = navBack_.back(); navBack_.pop_back();
+    disasmTop_ = cursorAddr_;
+    update();
+}
+
+void DebuggerOverlay::navForward() {
+    if (navForward_.empty()) return;
+    navBack_.push_back(cursorAddr_);
+    cursorAddr_ = navForward_.back(); navForward_.pop_back();
+    disasmTop_ = cursorAddr_;
+    update();
+}
+
+bool DebuggerOverlay::followTarget() {
+    uint16_t t;
+    if (!targetOf(cursorAddr_, t)) return false;
+    navigateTo(t);
+    return true;
+}
+
+std::vector<uint16_t> DebuggerOverlay::xrefsTo(uint16_t target) const {
+    // Linear scan: every even address treated as a potential instruction start.
+    // Mid-instruction false positives are possible (no full flow analysis), but
+    // this catches essentially all real branch/call/jump references cheaply.
+    std::vector<uint16_t> refs;
+    uint16_t t;
+    for (uint32_t a = 0; a <= 0177776 && refs.size() < 500; a += 2)
+        if (targetOf(static_cast<uint16_t>(a), t) && t == target) refs.push_back(static_cast<uint16_t>(a));
+    return refs;
+}
+
+bool DebuggerOverlay::targetOf(uint16_t addr, uint16_t& out) const {
+    const bk::Memory& mem = board_->memory();
+    uint16_t ir = mem.peekWord(addr);
+    int idx = ir >> 6;
+    // Branches (idx 004..037 and 01000..01037): PC-relative signed byte offset.
+    if ((idx >= 0004 && idx <= 0037) || (idx >= 01000 && idx <= 01037)) {
+        int off = ir & 0377; if (off & 0200) off |= 0177400;
+        out = static_cast<uint16_t>(addr + 2 + off * 2); return true;
+    }
+    if (idx >= 0770 && idx <= 0777) {                    // SOB: backward
+        out = static_cast<uint16_t>(addr + 2 - (ir & 077) * 2); return true;
+    }
+    bool jmp = (idx == 001), jsr = (idx >= 040 && idx <= 047);
+    if (jmp || jsr) {                                    // destination operand
+        int dm = (ir & 070) >> 3, dr = ir & 07;
+        if (dr == 7) {
+            if (dm == 3) { out = mem.peekWord(addr + 2); return true; }               // @#abs
+            if (dm == 6) { out = static_cast<uint16_t>(addr + 4 + mem.peekWord(addr + 2)); return true; } // x(PC)
+            if (dm == 7) { out = mem.peekWord(static_cast<uint16_t>(addr + 4 + mem.peekWord(addr + 2))); return true; } // @x(PC)
+        }
+        // register-indirect (e.g. JMP (R0)) — not statically resolvable
+    }
+    return false;
+}
+
 static QString flagsStr(uint16_t psw) {
     auto b = [&](uint16_t m, char c) { return (psw & m) ? c : '-'; };
     char buf[8];
@@ -398,8 +466,8 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     QFontMetrics hfm(helpFont);
     p.setPen(QColor(180, 200, 255));
     QString help = QString::fromUtf8(
-        "F12-выход  F7/F8-шаг  F9-тчк  Esc-продолжить  PgUp/PgDn/↑↓-дизасм  [/]-память  "
-        "дизасм: ЛКМ-выбор ПКМ-тчк N-имя ;-коммент  данные: B-байт W-слово S-строка P-указ U-код");
+        "F12-выход  F7/F8-шаг  F9-тчк  Esc-продолж  ↑↓-курсор  G-переход  Enter-цель  X-ссылки  ←→-назад/вперёд  "
+        "N-имя ;-коммент  данные:B/W/S/P U-код  ПКМ-тчк");
     p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
 }
 
