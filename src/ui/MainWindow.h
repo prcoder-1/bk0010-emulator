@@ -62,6 +62,8 @@ private:
     void nameCursorSymbol();             // N: name/rename the symbol at the cursor
     void commentCursor();                // ;: edit the comment at the cursor
     void markData(bk::DataType t);       // B/W/S/P: mark the cursor as data of a type
+    void gotoDialog();                   // G: jump to a symbol (from a list) or a typed address
+    void xrefsDialog();                  // X: list who references the cursor address, jump to one
     void saveAnnotations(const QString& path);
     void loadAnnotations(const QString& path);
     QString annotationsPath() const;     // "<loaded .bin>.bkdb", or empty

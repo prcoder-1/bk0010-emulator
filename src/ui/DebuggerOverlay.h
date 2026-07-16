@@ -21,6 +21,12 @@ public:
     uint16_t cursorAddr() const { return cursorAddr_; }          // selected disasm line (for naming/commenting)
     void setCursor(uint16_t a) { cursorAddr_ = a; update(); }
     void moveCursor(int lines);      // move the selection up/down, keeping it visible
+    void navigateTo(uint16_t a);     // jump the cursor to an address, recording history
+    void navBack();                  // go back / forward through the navigation history
+    void navForward();
+    bool followTarget();             // follow the branch/call target of the selected line
+    // Addresses whose instruction branches/calls/jumps to `target` (a static scan).
+    std::vector<uint16_t> xrefsTo(uint16_t target) const;
     void setMemAddr(uint16_t a) { memAddr_ = a; update(); }
     // Linked highlighting: mark the disasm line at `addr` (-1 = none).
     void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
@@ -50,4 +56,9 @@ private:
     QRect memRect_;
     QRect bpRect_;                   // breakpoints panel (top-right of the registers)
     std::vector<uint16_t> bpVisible_; // breakpoint addresses currently drawn, row order (hit test)
+    std::vector<uint16_t> navBack_, navForward_;  // disasm navigation history
+
+    // Static branch/call/jump target of the instruction at `addr` (false if it is
+    // register-indirect or not a control-flow instruction).
+    bool targetOf(uint16_t addr, uint16_t& out) const;
 };
