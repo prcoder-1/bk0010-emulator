@@ -36,8 +36,9 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     bk::Trace& tr = board_->trace();
     tr.setEnabled(true); // ensure data is being collected while the view is open
 
+    const bool word16 = (bpp == 16);        // 16 bpp: one pixel per 16-bit word (RGB565)
     int pxPerByte = (bpp == 1) ? 8 : (bpp == 4 ? 2 : 1);
-    int imgW = bytesPerRow * pxPerByte;
+    int imgW = word16 ? (bytesPerRow / 2) : (bytesPerRow * pxPerByte);
     if (imgW <= 0) return;
 
     // Build the sequence of *visible* byte addresses, compacting out the hidden
@@ -65,68 +66,82 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     QImage img(imgW, imgH, QImage::Format_RGB32);
     img.fill(qRgb(0, 0, 0)); // trailing bytes of the last partial row stay black
 
+    // Access-recency helpers (heatmap). The dim "recently touched" brightness glow
+    // lingers (long FADE, sqrt curve); the coloured flash fades faster and sharper
+    // so the green/red/blue access trail clears quickly. heatAt() fills the four
+    // intensities for one byte; tint() applies them to a base colour.
+    const int FADE = 150;      // brightness glow: frames (~3 s)
+    const int FADE_COLOR = 30; // colour flash: frames (~0.6 s)
+    auto heatAt = [&](uint16_t a16, double& hr, double& hw, double& he, double& act) {
+        hr = hw = he = act = 0.0;
+        if (!heatmap) return;
+        auto flash = [&](uint32_t t) { double f = tr.fade(t, FADE_COLOR); return f * f; };
+        hr = flash(tr.lastRead(a16));
+        hw = flash(tr.lastWrite(a16));
+        he = flash(tr.lastExec(a16));
+        // A fetch also registers a read; show code as execution (blue), not a
+        // data-read (green).
+        if (tr.lastExec(a16) != 0 && tr.lastExec(a16) >= tr.lastRead(a16)) hr = 0;
+        act = std::max({std::sqrt(tr.fade(tr.lastExec(a16),  FADE)),
+                        std::sqrt(tr.fade(tr.lastRead(a16),   FADE)),
+                        std::sqrt(tr.fade(tr.lastWrite(a16),  FADE))});
+    };
+    auto tint = [&](QRgb base, double hr, double hw, double he, double act) -> QRgb {
+        if (!heatmap) return base;
+        double bright = 0.5 + 0.5 * act;   // idle memory dimmer so touched bytes stand out
+        int R = int(qRed(base)   * bright);
+        int G = int(qGreen(base) * bright);
+        int B = int(qBlue(base)  * bright);
+        R = qMin(255, R + int(235 * hw));  // write -> red
+        G = qMin(255, G + int(235 * hr));  // read  -> green
+        B = qMin(255, B + int(235 * he));  // exec  -> blue
+        return qRgb(R, G, B);
+    };
+
     for (int idx = 0; idx < static_cast<int>(vis.size()); ++idx) {
-        {
-            int row = idx / bytesPerRow, bx = idx % bytesPerRow;
-            uint16_t a16 = vis[idx];
-            uint8_t byte = mem.peekByte(a16);
+        int row = idx / bytesPerRow, bx = idx % bytesPerRow;
+        uint16_t a16 = vis[idx];
+        double hr, hw, he, act;
 
-            // Recency of read / write / execute for this byte (1 = just now).
-            // The dim "recently touched" brightness glow lingers (long FADE, sqrt
-            // curve); the coloured flash fades much faster and more sharply so the
-            // green/red/blue trail clears quickly after an access.
-            const int FADE = 150;      // brightness glow: frames (~3 s)
-            const int FADE_COLOR = 30; // colour flash: frames (~0.6 s)
-            double hr = 0, hw = 0, he = 0, act = 0; // colour intensities
-            if (heatmap) {
-                // Steeper-than-linear (square) curve on a short window: bright at
-                // the instant of access, then drops off rapidly.
-                auto flash = [&](uint32_t t) { double f = tr.fade(t, FADE_COLOR); return f * f; };
-                hr = flash(tr.lastRead(a16));
-                hw = flash(tr.lastWrite(a16));
-                he = flash(tr.lastExec(a16));
-                // An instruction fetch also registers a read; don't let that show
-                // as a data-read (green) — code should read as execution (blue).
-                if (tr.lastExec(a16) != 0 && tr.lastExec(a16) >= tr.lastRead(a16)) hr = 0;
-                // Brightness glow uses the long fade so touched bytes stay a touch
-                // brighter than idle memory well after the colour has gone.
-                act = std::max({std::sqrt(tr.fade(tr.lastExec(a16),  FADE)),
-                                std::sqrt(tr.fade(tr.lastRead(a16),   FADE)),
-                                std::sqrt(tr.fade(tr.lastWrite(a16),  FADE))});
+        if (word16) {                       // one pixel per 16-bit word
+            if (bx & 1) continue;           // odd byte handled with its even partner
+            if (bx / 2 >= imgW) continue;   // dangling byte of an odd-width row
+            heatAt(a16, hr, hw, he, act);
+            uint8_t lo = mem.peekByte(a16), hi = 0;
+            if (bx + 1 < bytesPerRow && idx + 1 < static_cast<int>(vis.size())) {
+                uint16_t a2 = vis[idx + 1];
+                hi = mem.peekByte(a2);
+                double hr2, hw2, he2, act2; // pixel heat = the hotter of the word's two bytes
+                heatAt(a2, hr2, hw2, he2, act2);
+                hr = std::max(hr, hr2); hw = std::max(hw, hw2);
+                he = std::max(he, he2); act = std::max(act, act2);
             }
+            uint16_t word = static_cast<uint16_t>(lo | (hi << 8));
+            QRgb base = color
+                ? qRgb(((word >> 11) & 0x1F) << 3, ((word >> 5) & 0x3F) << 2, (word & 0x1F) << 3)
+                : qRgb(word >> 8, word >> 8, word >> 8);   // Ч/Б: high byte as intensity
+            img.setPixel(bx / 2, row, tint(base, hr, hw, he, act));
+            continue;
+        }
 
-            auto tint = [&](QRgb base) -> QRgb {
-                if (!heatmap) return base;
-                // Unused memory is shown a bit dimmer so that recently-accessed
-                // bytes stand out: a fresh access brightens the byte and flashes a
-                // colour (green/red/blue) that fades over time.
-                double bright = 0.5 + 0.5 * act;
-                int R = int(qRed(base)   * bright);
-                int G = int(qGreen(base) * bright);
-                int B = int(qBlue(base)  * bright);
-                R = qMin(255, R + int(235 * hw));  // write -> red
-                G = qMin(255, G + int(235 * hr));  // read  -> green
-                B = qMin(255, B + int(235 * he));  // exec  -> blue
-                return qRgb(R, G, B);
-            };
-
-            int px = bx * pxPerByte;
-            if (bpp == 1) {
-                for (int b = 0; b < 8; ++b) {
-                    int v = (byte >> b) & 1;
-                    QRgb base = color ? colorMap(v ? 15 : 0) : (v ? qRgb(220,220,220) : qRgb(0,0,0));
-                    img.setPixel(px + b, row, tint(base));
-                }
-            } else if (bpp == 4) {
-                for (int n = 0; n < 2; ++n) {
-                    int v = (byte >> (n * 4)) & 15;
-                    QRgb base = color ? colorMap(v) : qRgb(v * 17, v * 17, v * 17);
-                    img.setPixel(px + n, row, tint(base));
-                }
-            } else { // 8 bpp
-                QRgb base = color ? colorMap(byte >> 4) : qRgb(byte, byte, byte);
-                img.setPixel(px, row, tint(base));
+        heatAt(a16, hr, hw, he, act);
+        uint8_t byte = mem.peekByte(a16);
+        int px = bx * pxPerByte;
+        if (bpp == 1) {
+            for (int b = 0; b < 8; ++b) {
+                int v = (byte >> b) & 1;
+                QRgb base = color ? colorMap(v ? 15 : 0) : (v ? qRgb(220,220,220) : qRgb(0,0,0));
+                img.setPixel(px + b, row, tint(base, hr, hw, he, act));
             }
+        } else if (bpp == 4) {
+            for (int n = 0; n < 2; ++n) {
+                int v = (byte >> (n * 4)) & 15;
+                QRgb base = color ? colorMap(v) : qRgb(v * 17, v * 17, v * 17);
+                img.setPixel(px + n, row, tint(base, hr, hw, he, act));
+            }
+        } else { // 8 bpp
+            QRgb base = color ? colorMap(byte >> 4) : qRgb(byte, byte, byte);
+            img.setPixel(px, row, tint(base, hr, hw, he, act));
         }
     }
 
@@ -149,7 +164,7 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     setWindowTitle("Визуализация памяти БК-0010");
     canvas_ = new MemCanvas(board, this);
 
-    auto* bpp = new QComboBox; bpp->addItems({"1 бит", "4 бита", "8 бит"}); bpp->setCurrentIndex(1);
+    auto* bpp = new QComboBox; bpp->addItems({"1 бит", "4 бита", "8 бит", "16 бит"}); bpp->setCurrentIndex(1);
     auto* mode = new QComboBox; mode->addItems({"Ч/Б", "Цвет"}); mode->setCurrentIndex(1);
     auto* heat = new QCheckBox("Тепловая карта"); heat->setChecked(true);
     auto* showRom = new QCheckBox("Показать ПЗУ"); // ROM hidden by default
@@ -159,7 +174,8 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     auto* row = new QSpinBox; row->setRange(8, 512); row->setValue(64); row->setPrefix("шир ");
 
     auto apply = [=] {
-        canvas_->bpp = (bpp->currentIndex() == 0) ? 1 : (bpp->currentIndex() == 1 ? 4 : 8);
+        static const int bppVals[4] = {1, 4, 8, 16};
+        canvas_->bpp = bppVals[std::clamp(bpp->currentIndex(), 0, 3)];
         canvas_->color = (mode->currentIndex() == 1);
         canvas_->heatmap = heat->isChecked();
         canvas_->hideRom = !showRom->isChecked();
