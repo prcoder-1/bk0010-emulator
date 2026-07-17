@@ -32,6 +32,12 @@ public:
     // Run at least `ticks` CPU ticks worth of instructions. Returns ticks run.
     int  runTicks(int ticks);
     void runFrame();
+    // Run one of `nslices` equal slices of a frame, spread across several timer
+    // ticks so audio is produced smoothly (not in one 20 ms burst). The 50 Hz frame
+    // interrupt is delivered at the first slice; the frame bookkeeping at the last.
+    // If the CPU goes idle (WAIT/HALT) it stays idle for the rest of the frame, just
+    // like runFrame(). Equivalent to runFrame() when run for all slices 0..nslices-1.
+    void runFrameSlice(int slice, int nslices);
     int  ticksPerFrame() const { return cpuFreqHz_ / frameHz_; }
 
     // Run enough frames for the monitor ROM to initialise (vectors, stack,
@@ -184,6 +190,8 @@ private:
     int cpuFreqHz_ = 3000000;
     int frameHz_   = 50;
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()
+    bool sliceIdle_ = false;     // CPU went idle (WAIT/HALT) mid-frame — skip its remaining slices
+    int  sliceFrameTicks_ = 0;   // ticks run so far this frame (across slices), for exact boundaries
 
     // Last value written to each I/O-page word (0177600..0177776), for the
     // debugger — hardware often reads back something different than was written.

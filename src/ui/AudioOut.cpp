@@ -23,11 +23,11 @@ void AudioOut::start() {
 
     sink_ = new QAudioSink(dev, fmt, this);
     // Output latency ≈ this buffer, since the sink is kept full (readData never
-    // starves it). Audio is produced in ~20 ms bursts (one BK frame per 50 Hz tick),
-    // consumed continuously; the buffer must cover a burst plus GUI-thread jitter
-    // (render + widgets) or it underruns — heard as short raspy drop-outs. 50 ms was
-    // too tight on some setups; ~80 ms is still low latency for a beeper but robust.
-    sink_->setBufferSize(fmt.bytesForDuration(80000)); // ~80 ms
+    // starves it). Audio is now produced in small ~5 ms slices (a quarter-frame per
+    // 200 Hz tick, see MainWindow), so the buffer only has to cover GUI-thread jitter
+    // (render spikes), not a whole 20 ms burst — ~60 ms is robust yet keeps latency
+    // low.
+    sink_->setBufferSize(fmt.bytesForDuration(60000)); // ~60 ms
     sink_->setVolume(0.6);
 
     spk_->clear();                  // drop samples accumulated during boot

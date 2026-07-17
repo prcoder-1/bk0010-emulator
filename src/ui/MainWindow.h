@@ -92,4 +92,5 @@ private:
     bool colorMode_ = true;
     bool paused_ = false;       // Soft-ICE debugger overlay active
     bool suspended_ = false;    // emulation frozen via the Pause key
+    int  phase_ = 0;            // emulation sub-slice within the current 50 Hz frame
 };

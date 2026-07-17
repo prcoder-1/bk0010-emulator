@@ -106,10 +106,14 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     status_ = new QLabel("Готов", this);
     statusBar()->addWidget(status_);
 
-    // --- 50 Hz emulation timer ---
+    // --- Emulation timer at 4× the 50 Hz frame rate (200 Hz). Each tick runs a
+    // quarter-frame so audio is fed continuously instead of in one 20 ms burst
+    // (which caused an audible wobble); the screen + profiler refresh stays at
+    // 50 Hz (once every 4 ticks). ---
     timer_ = new QTimer(this);
+    timer_->setTimerType(Qt::PreciseTimer);
     connect(timer_, &QTimer::timeout, this, &MainWindow::onTick);
-    timer_->start(20); // ~50 Hz
+    timer_->start(5); // 200 Hz
 
     // --- Audio (only if built with Qt6 Multimedia) ---
 #ifdef HAVE_QT_MULTIMEDIA
@@ -131,19 +135,25 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::onTick() {
+    static constexpr int kSlices = 4;   // sub-slices per 50 Hz frame (200 Hz timer)
     if (!paused_ && !suspended_) {
-        // Feed one buffered key into the register once it is free, so the BK
-        // controller sees a stream of single codes just like real hardware.
-        if (!keyFeed_.empty() && !board_->keyReady()) {
+        // Feed one buffered key into the register once it is free (once per full
+        // frame), so the BK controller sees single codes like real hardware.
+        if (phase_ == 0 && !keyFeed_.empty() && !board_->keyReady()) {
             board_->pressKey(keyFeed_.front());
             keyFeed_.pop_front();
         }
-        board_->runFrame();
+        board_->runFrameSlice(phase_, kSlices);
         if (board_->breakHit()) {          // stopped at a breakpoint
             board_->clearBreakHit();
             setPaused(true);
         }
     }
+    // The heavy per-frame work (screen render + profiler refresh) stays at 50 Hz:
+    // run it once every kSlices ticks. While paused/suspended nothing is emulated,
+    // but this still ticks so the overlay stays responsive.
+    if (++phase_ < kSlices) return;
+    phase_ = 0;
     renderScreen();
     if (paused_) overlay_->update();
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
@@ -162,6 +172,7 @@ void MainWindow::renderScreen() {
 
 void MainWindow::setPaused(bool paused) {
     paused_ = paused;
+    phase_ = 0;                     // start the next run at a fresh frame boundary
     if (paused_) {
         overlay_->snapshotRegs();   // baseline for the changed-register highlight
         overlay_->setCursor(board_->cpu().pc());   // selection starts at PC
@@ -185,6 +196,7 @@ void MainWindow::setPaused(bool paused) {
 // Soft-ICE overlay. The last frame stays on screen; the status bar shows PAUSED.
 void MainWindow::setSuspended(bool suspended) {
     suspended_ = suspended;
+    phase_ = 0;                     // resume at a fresh frame boundary
     // Drop any held/buffered keys so nothing is stuck down or replayed on resume.
     heldKeys_.clear();
     keyFeed_.clear();

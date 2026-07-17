@@ -298,6 +298,26 @@ void Board::runFrame() {
     ++framesSinceReset_;
 }
 
+void Board::runFrameSlice(int slice, int nslices) {
+    if (nslices < 1) nslices = 1;
+    if (slice <= 0) { deliverFrameInterrupts(); sliceIdle_ = false; sliceFrameTicks_ = 0; }
+    if (!sliceIdle_) {
+        // Run up to this slice's *cumulative* tick boundary, so per-slice overshoot
+        // is compensated in the next slice and the frame totals exactly ticksPerFrame
+        // — the whole frame then runs the identical instruction stream as runFrame().
+        int target = static_cast<int>(static_cast<int64_t>(ticksPerFrame()) * (slice + 1) / nslices);
+        int want = target - sliceFrameTicks_;
+        if (want > 0) {
+            int ran = runTicks(want);
+            sliceFrameTicks_ += ran;
+            // A short run means the CPU idled (WAIT/HALT) or a breakpoint stopped it;
+            // it stays idle for the rest of the frame, so skip the later slices.
+            if (ran < want) sliceIdle_ = true;
+        }
+    }
+    if (slice >= nslices - 1) { trace_.tick(); ++framesSinceReset_; }
+}
+
 // Delivered once per 50 Hz frame. On BK-0010 the video controller raises IRQ2
 // (vector 0100) every frame and the keyboard raises IRQ (vector 0060). Both are
 // blocked when the processor priority bit (PSW bit 7, 0200) is set.
