@@ -385,7 +385,18 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
     if (run) {
         cpu_.clearHalt();
         cpu_.clearWait();
-        cpu_.r[7] = addr; // jump to load address
+        // Обычно точка входа = адрес загрузки. Но игры, грузящиеся ниже 01000
+        // (штатная область программ), кладут в этот «доадресный» слот не код, а
+        // сам стартовый адрес (формат .BIN не умеет хранить его отдельно от адреса
+        // загрузки). Пример: VALLEY (→01000), БАТИСКАФ (→036576) — грузятся в 0760,
+        // а первое слово там указывает на реальную точку входа внутри образа.
+        uint16_t start = addr;
+        if (addr < 01000) {
+            uint16_t w = mem_.peekWord(addr);
+            const uint32_t end = static_cast<uint32_t>(addr) + got;
+            if (w >= addr && w < end) start = w; // валидная точка входа в образе
+        }
+        cpu_.r[7] = start; // точка входа
     }
     return true;
 }
