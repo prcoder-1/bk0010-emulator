@@ -24,7 +24,7 @@ void Speaker::feed(int bit, int ticks) {
         double v = filtered_ - dc_;
         if (v > 32767.0) v = 32767.0; else if (v < -32767.0) v = -32767.0;
         int16_t s = static_cast<int16_t>(v);
-        if (buf_.size() >= maxBuf) buf_.erase(buf_.begin(), buf_.begin() + maxBuf / 4);
+        if (buf_.size() >= maxBuf) for (size_t i = 0; i < maxBuf / 4; ++i) buf_.pop_front();
         buf_.push_back(s);
         acc_ -= 1.0;
     }
@@ -32,22 +32,20 @@ void Speaker::feed(int bit, int ticks) {
 
 size_t Speaker::read(int16_t* out, size_t maxSamples) {
     std::lock_guard<std::mutex> lk(mtx_);
-    // Latency guard: the QAudioSink's own buffer is the reservoir that absorbs the
-    // 20 ms production bursts, so this FIFO only needs to hand samples across. If
-    // the producer runs ahead (timer jitter / catch-up) and the backlog grows past
-    // ~1 frame, discard a small slice of the *oldest* samples per read so output
-    // latency is pulled back gradually instead of accumulating. The correction is a
-    // fraction of the excess (a few ms at most), which is inaudible for the 1-bit
-    // beeper — far better than a one-shot skip or an ever-growing delay.
+    // Latency guard: the QAudioSink's own buffer absorbs the 20 ms production bursts,
+    // so this FIFO only hands samples across and normally stays near-empty. Only if
+    // the producer runs well ahead (timer jitter / catch-up) does the backlog build;
+    // past ~3 frames, drop a small slice of the *oldest* samples per read to pull
+    // latency back gradually — inaudible for the 1-bit beeper, and far better than a
+    // one-shot skip or an ever-growing delay. The higher threshold keeps it from
+    // firing on ordinary jitter (which would add a raspy edge).
     const size_t reservoir = static_cast<size_t>(sampleRate_) / 50; // ~1 frame (20 ms)
-    if (buf_.size() > 2 * reservoir) {
-        size_t excess = buf_.size() - reservoir;
-        size_t drop = (excess >> 6) + 1;                            // ~1.5 % of the excess
-        buf_.erase(buf_.begin(), buf_.begin() + drop);
+    if (buf_.size() > 3 * reservoir) {
+        size_t drop = ((buf_.size() - reservoir) >> 6) + 1;
+        for (size_t i = 0; i < drop; ++i) buf_.pop_front();
     }
     size_t n = std::min(maxSamples, buf_.size());
-    std::copy(buf_.begin(), buf_.begin() + n, out);
-    buf_.erase(buf_.begin(), buf_.begin() + n);
+    for (size_t i = 0; i < n; ++i) { out[i] = buf_.front(); buf_.pop_front(); }  // O(1) per sample
     return n;
 }
 

@@ -1,6 +1,6 @@
 #pragma once
 #include <cstdint>
-#include <vector>
+#include <deque>
 #include <mutex>
 
 namespace bk {
@@ -32,7 +32,7 @@ private:
     double filtered_ = 0.0;     // RC low-pass state (smooths square edges)
     double dc_ = 0.0;           // slow DC tracker for the high-pass (idle -> silence)
     int level_ = 0;             // current speaker bit
-    std::vector<int16_t> buf_;  // FIFO of generated samples
+    std::deque<int16_t> buf_;   // FIFO of generated samples (O(1) push/pop at both ends)
     std::mutex mtx_;
 };
 
