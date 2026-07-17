@@ -316,6 +316,13 @@ void HotPathWidget::wheelEvent(QWheelEvent* e) {
 }
 
 void HotPathWidget::mousePressEvent(QMouseEvent* e) {
+    if (e->button() == Qt::RightButton) {
+        // Hide a swamping address (e.g. a hot delay loop). Handled on press — a
+        // press-only-on-left setup could otherwise never see the right release.
+        for (const Row& r : rows_)
+            if (r.rect.contains(e->pos())) { excluded_.insert(r.addr); rebuild(); update(); break; }
+        return;
+    }
     if (e->button() == Qt::LeftButton) { dragging_ = true; lastDrag_ = pressPos_ = e->pos(); }
 }
 
@@ -339,13 +346,7 @@ void HotPathWidget::leaveEvent(QEvent*) {
 }
 
 void HotPathWidget::mouseReleaseEvent(QMouseEvent* e) {
-    if (e->button() == Qt::RightButton) {
-        // Hide a swamping address (e.g. a hot delay loop).
-        for (const Row& r : rows_)
-            if (r.rect.contains(e->pos())) { excluded_.insert(r.addr); rebuild(); update(); return; }
-        return;
-    }
-    if (e->button() != Qt::LeftButton) return;
+    if (e->button() != Qt::LeftButton) return;   // right-click handled on press
     dragging_ = false;
     if ((e->pos() - pressPos_).manhattanLength() > 4) return;   // was a scroll-drag
     for (const Row& r : rows_) {
