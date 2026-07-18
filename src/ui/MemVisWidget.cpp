@@ -1,6 +1,7 @@
 #include "MemVisWidget.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 #include "Board.h"
 #include <QPainter>
@@ -26,7 +27,13 @@ static QRgb colorMap(int v /*0..15*/) {
 }
 
 MemCanvas::MemCanvas(Board* board, QWidget* parent)
-    : QWidget(parent), board_(board) { setMinimumSize(512, 400); }
+    : QWidget(parent), board_(board) {
+    // Небольшой минимум по высоте: раньше было 400, и в невысоком окне канва не могла
+    // ужаться до доступного места — её низ (самые высокие адреса: нижние строки экрана)
+    // вылезал за нижний край окна и обрезался. Теперь канва всегда влезает в окно, а
+    // вертикальное сжатие строк без потерь обеспечивает paintEvent (OR-объединение).
+    setMinimumSize(256, 96);
+}
 
 void MemCanvas::paintEvent(QPaintEvent*) {
     QPainter p(this);
@@ -52,7 +59,11 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     int scrBoundary = -1, romBoundary = -1; // compacted index where each region begins
     for (int a = startAddr; a < 0x10000; ++a) {
         uint16_t a16 = static_cast<uint16_t>(a);
-        if (hideRom && mem.isRom(a16)) continue;
+        // Скрывая ПЗУ, прячем и всё, что выше него (регистры ввода-вывода 0177600..
+        // 0177777) — иначе они висли двумя «лишними» строками под экраном, и нижняя
+        // строка экрана (самый высокий адрес видеопамяти) оказывалась не у нижнего
+        // края. Теперь при спрятанном ПЗУ видны ровно ОЗУ + экран (0..077777).
+        if (hideRom && a16 >= romStart) continue;
         if (hideScreen && a16 >= scrStart && a16 < romStart) continue;
         if (a16 == scrStart) scrBoundary = static_cast<int>(vis.size());
         if (a16 == romStart) romBoundary = static_cast<int>(vis.size());
@@ -145,9 +156,50 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         }
     }
 
-    // Scale to fill the widget width, preserve aspect, nearest-neighbour.
-    QImage scaled = img.scaled(width(), height(), Qt::IgnoreAspectRatio, Qt::FastTransformation);
-    p.drawImage(0, 0, scaled);
+    // Fit the byte grid into the widget. Horizontally we scale to the width with
+    // nearest-neighbour (keeps bytes crisp). Vertically we map every source row onto
+    // the window height ourselves instead of QImage::scaled: a plain nearest-neighbour
+    // downscale silently DROPS rows when there are more memory rows than pixels — and
+    // it never samples the very last row, so the highest-address memory (end of the
+    // shown range: last screen line, or end of ROM/I-O when ПЗУ is on) falls off the
+    // bottom of the window. Here each destination row OR-combines (brightest-wins) all
+    // source rows that map to it, so no byte is ever invisible and the last row always
+    // reaches the bottom edge.
+    //
+    // Строим целевое изображение в ФИЗИЧЕСКИХ пикселях (× devicePixelRatio) и помечаем
+    // его этим коэффициентом. При масштабировании экрана (HiDPI, напр. Mint 150 %)
+    // width()/height() — логические пиксели; если рисовать канву в логическом размере,
+    // нижние строки экрана (высокие адреса) обрезались. Теперь канва заполняется
+    // физически «пиксель-в-пиксель», и низ видеопамяти виден при любом масштабе.
+    const qreal dpr = devicePixelRatioF();
+    const int Hd = std::max(1, static_cast<int>(std::lround(height() * dpr)));
+    const int Wt = std::max(1, static_cast<int>(std::lround(width()  * dpr)));
+    QImage hs = (imgW == Wt) ? img
+              : img.scaled(Wt, imgH, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    const int Wd = hs.width();
+    QImage dst(Wd, Hd, QImage::Format_RGB32);
+    for (int dy = 0; dy < Hd; ++dy) {
+        int s0 = static_cast<int>(static_cast<int64_t>(dy) * imgH / Hd);
+        int s1 = static_cast<int>(static_cast<int64_t>(dy + 1) * imgH / Hd);
+        if (s1 <= s0) s1 = s0 + 1;
+        if (s1 > imgH) s1 = imgH;
+        auto* out = reinterpret_cast<QRgb*>(dst.scanLine(dy));
+        std::memcpy(out, hs.constScanLine(s0), static_cast<size_t>(Wd) * 4);
+        for (int sy = s0 + 1; sy < s1; ++sy) {   // fold extra rows in (downscale only)
+            const auto* src = reinterpret_cast<const QRgb*>(hs.constScanLine(sy));
+            for (int x = 0; x < Wd; ++x) {
+                QRgb a = out[x], b = src[x];
+                out[x] = qRgb(std::max(qRed(a),   qRed(b)),
+                              std::max(qGreen(a), qGreen(b)),
+                              std::max(qBlue(a),  qBlue(b)));
+            }
+        }
+    }
+    // Явно растягиваем всё изображение на весь ЛОГИЧЕСКИЙ прямоугольник канвы
+    // (target-версия drawImage), а не полагаемся на «естественный» размер картинки и
+    // её devicePixelRatio. Так канва гарантированно заполняется целиком при любом
+    // способе/дробности масштабирования дисплея — низ видеопамяти не обрезается.
+    p.drawImage(QRectF(0, 0, width(), height()), dst, QRectF(0, 0, Wd, Hd));
 
     // Mark the region boundaries at their compacted positions: video RAM start
     // (blue) and ROM start (orange). Skipped regions have no boundary to draw.
@@ -200,6 +252,9 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     controls->addStretch();
 
     auto* lay = new QVBoxLayout(this);
+    lay->setContentsMargins(2, 2, 2, 2);   // почти без отступа до рамки окна
+    lay->setSpacing(2);
+    controls->setContentsMargins(0, 0, 0, 0);
     lay->addLayout(controls);
     lay->addWidget(canvas_, 1);
     apply();
