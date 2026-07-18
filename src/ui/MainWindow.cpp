@@ -209,6 +209,23 @@ void MainWindow::setSuspended(bool suspended) {
 void MainWindow::stepInto() {
     overlay_->snapshotRegs();   // so registers changed by this step are highlighted
     board_->stepInstruction();
+    overlay_->setCursor(board_->cpu().pc());  // курсор — на исполняемую инструкцию
+    overlay_->followPc();
+    renderScreen();
+    overlay_->update();
+}
+
+// Прогнать эмуляцию до инструкции под курсором и остановиться на ней (клавиша F4).
+// Позволяет во время отладки поставить курсор ниже/выше и «дойти» туда автоматически.
+// По пути честно срабатывают обычные точки останова; если за отведённый бюджет тактов
+// курсор не достигнут, останавливаемся там, где оказались.
+void MainWindow::runToCursor() {
+    uint16_t target = overlay_->cursorAddr();
+    if (target == board_->cpu().pc()) return;  // уже на месте
+    overlay_->snapshotRegs();
+    board_->runUntil(target, 60'000'000);
+    board_->clearBreakHit();
+    overlay_->setCursor(board_->cpu().pc());   // курсор — куда реально дошли
     overlay_->followPc();
     renderScreen();
     overlay_->update();
@@ -229,6 +246,7 @@ void MainWindow::stepOver() {
     } else {
         board_->stepInstruction();
     }
+    overlay_->setCursor(board_->cpu().pc());  // курсор — на исполняемую инструкцию
     overlay_->followPc();
     renderScreen();
     overlay_->update();
@@ -441,6 +459,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     if (paused_) {
         // --- Debugger controls (SoftICE overlay is visible) ---
         switch (e->key()) {
+        case Qt::Key_F4:       runToCursor(); return;   // дойти до инструкции под курсором
         case Qt::Key_F7:       stepInto(); return;
         case Qt::Key_F8:       stepOver(); return;
         case Qt::Key_F9:       board_->toggleBreakpoint(board_->cpu().pc()); overlay_->update(); return;
