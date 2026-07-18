@@ -174,7 +174,7 @@ void Board::reset() {
     // Power-up: priority 7 (all interrupts masked). The monitor lowers the
     // priority itself once it has installed its interrupt vectors.
     cpu_.reset(START_VECTOR, 0340);
-    scroll_ = 0330;
+    scroll_ = 01330;   // 0330 + бит 9: полный экран (256 строк) по умолчанию
     kbdStatus_ = 0;    // bit 6 (0100) = interrupt MASK (0 => enabled), bit 7 = ready
     kbdData_ = 0;
     keyIntPending_ = false;
@@ -582,7 +582,7 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
         if (ioLog_.size() > 2048) ioLog_.pop_front();
     }
     switch (addr) {
-    case REG_SCROLL:    scroll_ = value & 0777; return true;
+    case REG_SCROLL:    scroll_ = value & 01777; return true;  // бит 9 (01000) = полный/малый экран
     case REG_TIMER_LIM: timerLimit_ = value; return true;
     case REG_TIMER_CNT: return true;                       // counter is read-only
     case REG_TIMER_CSR: timerSetMode(value & 0377); return true;
