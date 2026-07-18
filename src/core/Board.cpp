@@ -546,7 +546,7 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
     case REG_TIMER_LIM:  value = timerLimit_; return true;
     case REG_TIMER_CNT:  timerCheck(); value = timerCount_; return true;
     case REG_TIMER_CSR:  timerCheck(); value = 0177400 | timerCsr_; return true;
-    case REG_PORT:       value = 0; return true;
+    case REG_PORT:       value = joystick_; return true;   // джойстик на парал. порту
     case REG_SYS: {
         // BK-0010: bit15 set, high byte 0200 (serial idle). Bit 6 (0100) is the
         // "key pressed" indicator, active-low: 0 while a key is physically held.
@@ -594,7 +594,7 @@ uint16_t Board::peekReg(uint16_t addr) const {
     case REG_TIMER_LIM:  return timerLimit_;
     case REG_TIMER_CNT:  return timerCount_;                     // as of the last read
     case REG_TIMER_CSR:  return static_cast<uint16_t>(0177400 | timerCsr_);
-    case REG_PORT:       return 0;                               // input port, no device
+    case REG_PORT:       return joystick_;                       // джойстик на парал. порту
     case REG_SYS:        return static_cast<uint16_t>(0100000 | 0200 | (keyHeld_ ? 0 : 0100)); // bit6=0 while a key is held
     case 0176560:        return 0;   // ИРПС (последовательный порт) — не эмулируется
     default:             return mem_.peekWord(addr);

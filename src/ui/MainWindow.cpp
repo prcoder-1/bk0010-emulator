@@ -12,6 +12,7 @@
 #include <vector>
 #include <QMenuBar>
 #include <QMenu>
+#include <QActionGroup>
 #include <QAction>
 #include <QFileDialog>
 #include <QMessageBox>
@@ -61,6 +62,27 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     emu->addAction("Режим &цвет/ч-б", this, &MainWindow::toggleColorMode, QKeySequence("F10"));
     emu->addAction("&Пауза", this, [this]{ setSuspended(!suspended_); }, QKeySequence(Qt::Key_Pause));
     emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_); }, QKeySequence("F12"));
+
+    // Джойстик: геймпад через SDL2, порт 0177714. Раскладка выбирается — у БК их две
+    // (несовместимые). Если геймпад подключён — покажем его имя в подменю.
+    QMenu* joy = emu->addMenu("&Джойстик (геймпад)");
+    auto* joyGroup = new QActionGroup(this);
+    joyGroup->setExclusive(true);
+    auto* aStd = joy->addAction("Раскладка «Стандарт» (Джойвокс/gid, по умолч.)");
+    auto* aBH  = joy->addAction("Раскладка «Break House»");
+    auto* aSW  = joy->addAction("Раскладка «SWCorp»");
+    auto* aKl  = joy->addAction("Раскладка «Клад-2»");
+    for (auto* a : {aStd, aBH, aSW, aKl}) { a->setCheckable(true); joyGroup->addAction(a); }
+    aStd->setChecked(true);
+    connect(aStd, &QAction::triggered, this, [this]{ gamepad_.setStandard(Gamepad::Standard::Standard); });
+    connect(aBH,  &QAction::triggered, this, [this]{ gamepad_.setStandard(Gamepad::Standard::BreakHouse); });
+    connect(aSW,  &QAction::triggered, this, [this]{ gamepad_.setStandard(Gamepad::Standard::SWCorp); });
+    connect(aKl,  &QAction::triggered, this, [this]{ gamepad_.setStandard(Gamepad::Standard::Klad2); });
+    joy->addSeparator();
+    QAction* joyStatus = joy->addAction(gamepad_.connected()
+        ? QString::fromStdString("Подключён: " + gamepad_.name())
+        : QString::fromUtf8("Геймпад не найден"));
+    joyStatus->setEnabled(false);
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
@@ -137,6 +159,9 @@ MainWindow::~MainWindow() = default;
 void MainWindow::onTick() {
     static constexpr int kSlices = 4;   // sub-slices per 50 Hz frame (200 Hz timer)
     if (!paused_ && !suspended_) {
+        // Опросить геймпад раз в кадр и обновить байт джойстика (порт 0177714) до
+        // прогона кадра, чтобы игра увидела актуальное состояние в своём ISR.
+        if (phase_ == 0) board_->setJoystick(gamepad_.poll());
         // Feed one buffered key into the register once it is free (once per full
         // frame), so the BK controller sees single codes like real hardware.
         if (phase_ == 0 && !keyFeed_.empty() && !board_->keyReady()) {

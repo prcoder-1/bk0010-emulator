@@ -65,6 +65,13 @@ public:
     void setKeyHeld(bool held) { keyHeld_ = held; }
     bool keyHeld() const { return keyHeld_; }
 
+    // Джойстик на параллельном порту 0177714 (активный уровень — высокий: нажато = 1).
+    // Значение 16-битное: часть игр читают порт словом, а раскладка SWCorp держит
+    // ВЛЕВО/ВВЕРХ в старшем байте (01000/02000). UI обновляет его каждый кадр из
+    // геймпада (SDL2), выбранная раскладка — в классе Gamepad.
+    void setJoystick(uint16_t bits) { joystick_ = bits; }
+    uint16_t joystick() const { return joystick_; }
+
     // --- Breakpoints / debugger support ---
     void toggleBreakpoint(uint16_t addr) {
         if (breakpoints_.count(addr)) breakpoints_.erase(addr); else breakpoints_.insert(addr);
@@ -205,6 +212,7 @@ private:
     bool     keyHeld_ = false;   // physical key down (0177716 bit 6, active-low)
     uint16_t keyIntVec_ = 060;
     uint8_t  speaker_   = 0;
+    uint16_t joystick_  = 0;     // 0177714: состояние джойстика (нажато = 1)
 
     // 1801VM1 programmable interval timer (0177706 limit / 0177710 counter /
     // 0177712 control). Decrements at f/128 (optionally /4, /16); sets the FL

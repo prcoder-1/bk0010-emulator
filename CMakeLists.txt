@@ -40,6 +40,7 @@ set(APP_SOURCES
     src/ui/HotChartWidget.cpp
     src/ui/AudioOut.cpp
     src/ui/BkKeymap.cpp
+    src/ui/Gamepad.cpp
     src/mcp/McpServer.cpp
 )
 
@@ -56,6 +57,8 @@ if(Qt6Multimedia_FOUND)
 else()
     message(STATUS "Qt6 Multimedia NOT found: sound disabled (install qt6-qtmultimedia-devel)")
 endif()
+# Геймпад (порт 0177714) читается напрямую через /dev/input/js0 на Linux — без
+# внешних зависимостей (см. src/ui/Gamepad.cpp).
 
 # ROM path passed to the app so it can find roms/ next to the source tree by default
 target_compile_definitions(bk0010-emulator PRIVATE
