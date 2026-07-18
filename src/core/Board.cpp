@@ -1,6 +1,9 @@
 #include "Board.h"
 #include <cstdio>
 #include <cstring>
+#include <cctype>
+#include <filesystem>
+#include <system_error>
 #include <vector>
 
 namespace bk {
@@ -419,9 +422,30 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
 // stored on the host as "<name>.bin". Open the bare name first, then fall back to
 // a ".bin"/".BIN" suffix so extracted game files load without renaming. (Whole-disk
 // images like ".bkd" are NOT tried — they are container images, not tape files.)
+static bool iequals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    return true;
+}
+
 static FILE* openTapeRead(const std::string& name) {
+    // Fast path: the name exactly as given, plus a common host ".bin"/".BIN" suffix.
     for (const char* ext : {"", ".bin", ".BIN"})
         if (FILE* f = std::fopen((name + ext).c_str(), "rb")) return f;
+    // BK хранит имена в верхнем регистре (КОИ-7), а извлечённые на хост файлы часто
+    // в другом регистре (игра просит "HARD.OVL", а на диске "Hard.ovl"). Linux
+    // регистрозависим — поэтому ищем в текущем каталоге совпадение имени без учёта
+    // регистра (для многосерийных загрузчиков с оверлеями .ovl и т.п.).
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(".", ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        const std::string fn = entry.path().filename().string();
+        if (iequals(fn, name) || iequals(fn, name + ".bin"))
+            if (FILE* f = std::fopen(entry.path().string().c_str(), "rb")) return f;
+    }
     return nullptr;
 }
 
