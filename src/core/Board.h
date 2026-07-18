@@ -205,7 +205,7 @@ private:
     uint16_t ioLastWrite_[64] = {0};
 
     // Internal register state
-    uint16_t scroll_    = 0330;
+    uint16_t scroll_    = 01330;  // младший байт — скролл; бит 9 — полный/малый экран
     uint16_t kbdStatus_ = 0;    // 0177660: bit7 = code ready, bit6 = IRQ mask (0=enabled)
     uint16_t kbdData_   = 0;    // 0177662: the single latched key code (7 bits)
     bool     keyIntPending_ = false;

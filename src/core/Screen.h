@@ -30,7 +30,7 @@ private:
     uint32_t tex_[TEX_W * TEX_H];
     bool colorMode_ = true;
     int palette_ = 0;
-    uint16_t scroll_ = 0330; // default: no vertical offset
+    uint16_t scroll_ = 01330; // младший байт — скролл; бит 9 (01000) — полный/малый экран
 };
 
 } // namespace bk

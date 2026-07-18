@@ -34,10 +34,20 @@ void Screen::render(const Memory& mem) {
     // Default 0330 -> offset 0. Vertical scroll shifts the visible window.
     int scrollOffset = ((int)(scroll_ & 0377) - 0330) & 0377;
 
+    // Бит 9 (01000) — режим экрана: установлен = полный экран (256 строк,
+    // 040000..077777); сброшен = «малый экран» (режим расширения памяти) — видны
+    // только 64 строки окна прокрутки (при штатной настройке это 070000..077777),
+    // остальные 3/4 экрана — чёрные, а 040000..067777 отданы под ОЗУ пользователя.
+    const int nlines = (scroll_ & 01000) ? TEX_H : 64;
+
     for (int y = 0; y < TEX_H; ++y) {
+        uint32_t* dst = tex_ + y * TEX_W;
+        if (y >= nlines) {                            // малый экран: низ — чёрный
+            for (int x = 0; x < TEX_W; ++x) *dst++ = black;
+            continue;
+        }
         int memLine = (y + scrollOffset) & 0377;      // 0..255
         const uint8_t* row = mem.videoRam() + memLine * 64; // 64 bytes/line
-        uint32_t* dst = tex_ + y * TEX_W;
 
         if (colorMode_) {
             // 256 pixels wide, 2 bits/pixel; double horizontally to fill 512.
