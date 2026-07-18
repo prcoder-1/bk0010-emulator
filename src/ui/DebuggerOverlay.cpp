@@ -521,7 +521,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     QFontMetrics hfm(helpFont);
     p.setPen(QColor(180, 200, 255));
     QString help = QString::fromUtf8(
-        "F12-выход  F7/F8-шаг  F9-тчк  Esc-продолж  ↑↓-курсор  G-переход  Enter-цель  X-ссылки  ←→-назад/вперёд  "
+        "F12-выход  F7/F8-шаг  F4-до курсора  F9-тчк  Esc-продолж  ↑↓-курсор  G-переход  Enter-цель  X-ссылки  ←→-назад/вперёд  "
         "N-имя ;-коммент  данные:B/W/S/P U-код  ЛКМ-по адресу-переход  ПКМ-тчк");
     p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
 }

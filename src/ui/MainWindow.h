@@ -58,6 +58,7 @@ private:
     void setSuspended(bool suspended);   // simple pause (Pause key), no debugger
     void stepInto();
     void stepOver();
+    void runToCursor();                  // F4: прогнать до инструкции под курсором
     // Interactive-disassembler annotations (symbols + comments).
     void nameCursorSymbol();             // N: name/rename the symbol at the cursor
     void commentCursor();                // ;: edit the comment at the cursor
