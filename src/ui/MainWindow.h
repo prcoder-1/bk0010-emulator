@@ -5,6 +5,7 @@
 #include <set>
 #include "Board.h"
 #include "BkKeymap.h"
+#include "Gamepad.h"
 
 class GlScreen;
 class DebuggerOverlay;
@@ -83,6 +84,7 @@ private:
     QLabel* status_ = nullptr;
     QString lastBin_;
     BkKeymap keymap_;
+    Gamepad gamepad_;           // джойстик на порту 0177714 через SDL2-геймпад
     // Host-side typing buffer: a keypress may translate to more than one BK code
     // (e.g. a РУС/ЛАТ switch + the character). Because the BK register holds only
     // one code at a time, we feed codes one per frame as the register frees up.
