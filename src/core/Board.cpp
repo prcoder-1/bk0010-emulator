@@ -177,7 +177,7 @@ void Board::reset() {
     scroll_ = 01330;   // 0330 + бит 9: полный экран (256 строк) по умолчанию
     kbdStatus_ = 0;    // bit 6 (0100) = interrupt MASK (0 => enabled), bit 7 = ready
     kbdData_ = 0;
-    keyIntPending_ = false;
+    keyIntPending_ = false; keyIntFresh_ = false;
     keyHeld_ = false;
     keyIntVec_ = 060;
     // Timer power-on state (matches bk/timer.c timer_init: stopped).
@@ -228,7 +228,7 @@ bool Board::loadState(const std::string& path) {
     std::fread(dev, sizeof(uint16_t), 7, f);
     std::fclose(f);
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
-    keyIntPending_ = false;
+    keyIntPending_ = false; keyIntFresh_ = false;
     timerLimit_ = dev[3]; timerCount_ = dev[4];
     timerCsr_ = static_cast<uint8_t>(dev[5]);
     speaker_ = static_cast<uint8_t>(dev[6]);
@@ -336,6 +336,7 @@ bool Board::pressKey(uint16_t bkCode) {
     // priority; the code is always latched so polling software can read it.
     keyIntVec_ = (bkCode & 0200) ? 0274 : Cpu::VEC_KEYBOARD;
     keyIntPending_ = true;
+    keyIntFresh_ = true;   // задержать IRQ на кадр — дать опрашивающей игре прочитать код
     return true;
 }
 
@@ -343,18 +344,28 @@ void Board::deliverFrameInterrupts() {
     if (cpu_.halted()) return;
     if (cpu_.psw & 0200) return; // interrupts masked
 
-    // A latched, not-yet-serviced key raises its interrupt first — but only while
-    // the keyboard interrupt is enabled. On BK-0010 status bit 6 (0100) is the
-    // interrupt MASK: software that polls the register (e.g. Digger) sets it to
-    // stop the monitor's ISR from stealing the code. When masked we leave the
-    // code latched (ready bit stays set) for polling and fall through to the
-    // frame IRQ. Matches the reference bk emulator (tty.c: raise when !TTY_IE).
+    // A latched, not-yet-serviced key raises its interrupt — but only while the
+    // keyboard interrupt is enabled. On BK-0010 status bit 6 (0100) is the interrupt
+    // MASK: software that polls the register with the IRQ masked (e.g. Digger sets
+    // bit 6) reads the code directly. But some games ENABLE the IRQ (bit 6 = 0) and
+    // still poll (e.g. SOKOBAN does `CLR 177664`... no, `CLR 177660`): they expect to
+    // read the code before the monitor's ISR consumes it. So we DELAY the IRQ by one
+    // frame (keyIntFresh_) — giving the polling loop a frame to read it — and cancel
+    // the pending IRQ if the code was read (ready bit cleared). ISR-driven programs
+    // just get the IRQ one frame later. This mirrors the reference bk, which schedules
+    // the keyboard IRQ as a deferred event rather than firing it instantly.
     if (keyIntPending_) {
-        keyIntPending_ = false;
-        if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
+        if (!(kbdStatus_ & 0200)) {              // код уже прочитан — прерывание не нужно
+            keyIntPending_ = false;
+        } else if (keyIntFresh_) {               // только что защёлкнут — дать кадр на опрос
+            keyIntFresh_ = false;
+        } else if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
+            keyIntPending_ = false;
             cpu_.interrupt(keyIntVec_);
             trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
             return;
+        } else {
+            keyIntPending_ = false;              // IRQ запрещён — снять ожидание
         }
     }
 

@@ -209,6 +209,7 @@ private:
     uint16_t kbdStatus_ = 0;    // 0177660: bit7 = code ready, bit6 = IRQ mask (0=enabled)
     uint16_t kbdData_   = 0;    // 0177662: the single latched key code (7 bits)
     bool     keyIntPending_ = false;
+    bool     keyIntFresh_ = false;   // код только что защёлкнут — задержать IRQ на кадр
     bool     keyHeld_ = false;   // physical key down (0177716 bit 6, active-low)
     uint16_t keyIntVec_ = 060;
     uint8_t  speaker_   = 0;
