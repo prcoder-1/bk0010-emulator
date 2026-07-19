@@ -582,7 +582,11 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
         if (ioLog_.size() > 2048) ioLog_.pop_front();
     }
     switch (addr) {
-    case REG_SCROLL:    scroll_ = value & 01777; return true;  // бит 9 (01000) = полный/малый экран
+    // Скролл: биты 0-7 = строка, бит 9 (01000) = полный/малый экран. Бит 8 (0400)
+    // аппаратно НЕ реализован — маскируем его (как bk/tty.c: & 01377). Иначе перенос
+    // из младшего байта при ADD/INC регистра (прокрутка) прополз бы в бит 9 и ложно
+    // включал бы малый экран (баг в RUNING.BIN при движении вниз по лабиринту).
+    case REG_SCROLL:    scroll_ = value & 01377; return true;
     case REG_TIMER_LIM: timerLimit_ = value; return true;
     case REG_TIMER_CNT: return true;                       // counter is read-only
     case REG_TIMER_CSR: timerSetMode(value & 0377); return true;
