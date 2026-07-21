@@ -251,18 +251,20 @@ int main() {
         CHECK(cnt <= 1000 - 20 && cnt >= 1000 - 30, "DIV4 slows timer ~4x (~25 counts)");
     }
 
-    // ---- Keyboard: single-code register with ready/drop semantics ----
+    // ---- Keyboard: single-code register, new press OVERWRITES an unread code ----
+    // (как на реальной БК и в референсном bk/tty.c — иначе игры, читающие код
+    // только по событию (LAND), получают предыдущую клавишу вместо новой)
     {
         Board b;
         b.reset();
         CHECK(!b.keyReady(), "keyboard: no key ready initially");
         CHECK(b.pressKey(0101), "keyboard: first key (A) latched");   // 'A'
         CHECK(b.keyReady(), "keyboard: ready flag set after keypress");
-        CHECK(!b.pressKey(0102), "keyboard: second key dropped while register busy");
-        CHECK((b.memory().readWord(0177662) & 0177) == 0101, "keyboard: register holds first code");
+        CHECK(b.pressKey(0102), "keyboard: second key overwrites unread code");
+        CHECK((b.memory().readWord(0177662) & 0177) == 0102, "keyboard: register holds newest code");
         CHECK(!b.keyReady(), "keyboard: ready flag cleared on read");
-        CHECK(b.pressKey(0102), "keyboard: next key latched after previous was read");
-        CHECK((b.memory().readWord(0177662) & 0177) == 0102, "keyboard: register holds second code");
+        CHECK(b.pressKey(0103), "keyboard: next key latched after previous was read");
+        CHECK((b.memory().readWord(0177662) & 0177) == 0103, "keyboard: register holds latest code");
         // Register 0177716 bit 6 (key-pressed, active-low) tracks the *physical*
         // key-held state, set/cleared independently of the code register — games
         // like Digger poll it and must keep seeing the key after the monitor ISR

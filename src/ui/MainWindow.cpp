@@ -162,9 +162,12 @@ void MainWindow::onTick() {
         // Опросить геймпад раз в кадр и обновить байт джойстика (порт 0177714) до
         // прогона кадра, чтобы игра увидела актуальное состояние в своём ISR.
         if (phase_ == 0) board_->setJoystick(gamepad_.poll());
-        // Feed one buffered key into the register once it is free (once per full
-        // frame), so the BK controller sees single codes like real hardware.
-        if (phase_ == 0 && !keyFeed_.empty() && !board_->keyReady()) {
+        // Подать один код из очереди раз в кадр (как нажатия с интервалом 20 мс).
+        // НЕ ждём освобождения регистра: реальный контроллер БК перезаписывает
+        // непрочитанный код новым нажатием — если придерживать код до чтения
+        // старого, игры, читающие код только по событию (LAND), получают
+        // предыдущую клавишу вместо новой.
+        if (phase_ == 0 && !keyFeed_.empty()) {
             board_->pressKey(keyFeed_.front());
             keyFeed_.pop_front();
         }

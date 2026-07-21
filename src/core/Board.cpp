@@ -326,9 +326,11 @@ void Board::runFrameSlice(int slice, int nslices) {
 // (vector 0100) every frame and the keyboard raises IRQ (vector 0060). Both are
 // blocked when the processor priority bit (PSW bit 7, 0200) is set.
 bool Board::pressKey(uint16_t bkCode) {
-    // Real BK-0010: the register holds one code. A new code is accepted only
-    // while the previous one has been read (ready flag clear); else it's lost.
-    if (kbdStatus_ & 0200) return false;
+    // Реальная БК-0010 (и референсный bk/tty.c): новое нажатие БЕЗУСЛОВНО
+    // перезаписывает регистр кода, даже если предыдущий код не был прочитан.
+    // Раньше мы отвергали новый код при непрочитанном старом — и игры, читающие
+    // код только по событию (LAND: ждёт нажатия по 0177716/0177660 и лишь потом
+    // читает код), получали ПРЕДЫДУЩУЮ клавишу (запаздывание на одно нажатие).
     kbdData_ = bkCode & 0177;                 // 7-bit code -> 0177662
     kbdStatus_ |= 0200;                       // set "code ready"
     // Latch the interrupt vector: function keys / АР2 (bit 0200 set) go through
