@@ -249,6 +249,7 @@ private:
     void checkWatch(uint16_t addr, bool write, bool isByte);
 
     void deliverFrameInterrupts(); // 50 Hz IRQ (vector 0100) + keyboard (0060)
+    bool deliverKeyboardInterrupt(); // pending key IRQ (vector 0060/0274), deferred one slice
     int  stepCore();               // one instruction + sound/trace bookkeeping
 
     // EMT 36 handler: reads the tape/disk parameter block (address in R1) and

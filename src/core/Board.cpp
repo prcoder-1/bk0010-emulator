@@ -304,6 +304,7 @@ void Board::runFrame() {
 void Board::runFrameSlice(int slice, int nslices) {
     if (nslices < 1) nslices = 1;
     if (slice <= 0) { deliverFrameInterrupts(); sliceIdle_ = false; sliceFrameTicks_ = 0; }
+    else deliverKeyboardInterrupt();   // deliver a key deferred at slice 0 (~1/4-frame latency)
     if (!sliceIdle_) {
         // Run up to this slice's *cumulative* tick boundary, so per-slice overshoot
         // is compensated in the next slice and the frame totals exactly ticksPerFrame
@@ -340,34 +341,38 @@ bool Board::pressKey(uint16_t bkCode) {
     return true;
 }
 
+// Deliver the pending keyboard interrupt, if due. Returns true if it fired.
+//
+// On BK-0010 status bit 6 (0100) is the interrupt MASK: software that polls the
+// register with the IRQ masked (e.g. Digger sets bit 6) reads the code directly.
+// But some games ENABLE the IRQ (bit 6 = 0) AND still poll (e.g. SOKOBAN does
+// `CLR 177660`): they expect to read the code before the monitor's ISR consumes it.
+// So a freshly latched code is deferred one step (keyIntFresh_) — giving a polling
+// loop time to read it — and cancelled if it was read (ready bit cleared). This is
+// checked every SLICE (not just the frame boundary), so the deferral is ~1/4 frame
+// (~5 ms): short enough not to lag ISR-driven games, and the ISR still runs within
+// the same frame so the next code can be fed on time. Mirrors the reference bk,
+// which schedules the keyboard IRQ as a short deferred event, not an instant one.
+bool Board::deliverKeyboardInterrupt() {
+    if (cpu_.halted() || (cpu_.psw & 0200)) return false; // masked by CPU priority
+    if (!keyIntPending_) return false;
+    if (!(kbdStatus_ & 0200)) { keyIntPending_ = false; return false; }  // read -> cancel
+    if (keyIntFresh_) { keyIntFresh_ = false; return false; }            // defer one slice
+    if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {        // IRQ enabled
+        keyIntPending_ = false;
+        cpu_.interrupt(keyIntVec_);
+        trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
+        return true;
+    }
+    keyIntPending_ = false;              // IRQ disabled -> drop the pending code
+    return false;
+}
+
 void Board::deliverFrameInterrupts() {
     if (cpu_.halted()) return;
     if (cpu_.psw & 0200) return; // interrupts masked
 
-    // A latched, not-yet-serviced key raises its interrupt — but only while the
-    // keyboard interrupt is enabled. On BK-0010 status bit 6 (0100) is the interrupt
-    // MASK: software that polls the register with the IRQ masked (e.g. Digger sets
-    // bit 6) reads the code directly. But some games ENABLE the IRQ (bit 6 = 0) and
-    // still poll (e.g. SOKOBAN does `CLR 177664`... no, `CLR 177660`): they expect to
-    // read the code before the monitor's ISR consumes it. So we DELAY the IRQ by one
-    // frame (keyIntFresh_) — giving the polling loop a frame to read it — and cancel
-    // the pending IRQ if the code was read (ready bit cleared). ISR-driven programs
-    // just get the IRQ one frame later. This mirrors the reference bk, which schedules
-    // the keyboard IRQ as a deferred event rather than firing it instantly.
-    if (keyIntPending_) {
-        if (!(kbdStatus_ & 0200)) {              // код уже прочитан — прерывание не нужно
-            keyIntPending_ = false;
-        } else if (keyIntFresh_) {               // только что защёлкнут — дать кадр на опрос
-            keyIntFresh_ = false;
-        } else if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
-            keyIntPending_ = false;
-            cpu_.interrupt(keyIntVec_);
-            trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
-            return;
-        } else {
-            keyIntPending_ = false;              // IRQ запрещён — снять ожидание
-        }
-    }
+    if (deliverKeyboardInterrupt()) return;   // a due key fires before the frame IRQ
 
     if (mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
         cpu_.interrupt(Cpu::VEC_IRQ2);         // 0100 (50 Hz)
