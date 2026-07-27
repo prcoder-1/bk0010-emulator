@@ -29,6 +29,9 @@ public:
 
     bool loadBinFromPath(const QString& path);
 
+    // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
+    void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
+
 protected:
     void keyPressEvent(QKeyEvent* e) override;
     void keyReleaseEvent(QKeyEvent* e) override;

@@ -108,6 +108,12 @@ Board::Board() {
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
         trace_.access(a, w, b);
         if (!watchpoints_.empty()) checkWatch(a, w, b);
+        // Арбитраж 037: обращения в ДОЗУ (A15=0, т.е. addr < 0100000 — оба банка
+        // ОЗУ) во время активной развёртки получают такты ожидания. ПЗУ/В-В (A15=1)
+        // 037 не арбитрирует. Фаза 037 берётся на начало инструкции — все обращения
+        // одной инструкции видят одну фазу (табличный тайминг ЦП не даёт точный
+        // внутриинструкционный график обращений; сама модель 037 потактовая).
+        if (arb037_ && a < 0100000) pendingWaitClkin_ += vp037_.stallForAccess();
     });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
@@ -118,8 +124,15 @@ int Board::stepCore() {
     uint16_t pcBefore = cpu_.pc();
     trace_.exec(pcBefore);
     watchArmed_ = false;
+    pendingWaitClkin_ = 0;
     int t = cpu_.step();
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
+    if (arb037_) {
+        // Свести накопленные ожидания ДОЗУ (CLKIN → такты ЦП, ÷2) в стоимость
+        // инструкции и продвинуть фазу 037 в лок-степе (1 такт ЦП = 2 такта CLKIN).
+        t += pendingWaitClkin_ / 2;
+        vp037_.tick(2 * t);
+    }
     totalTicks_ += static_cast<uint64_t>(t);
     sound_.feed(speaker_ & 1, t);
     if (trace_.enabled()) {
@@ -194,6 +207,9 @@ void Board::reset() {
     framesSinceReset_ = 0;
     std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));
     screen_.setScroll(scroll_);
+    vp037_.reset();
+    vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
+    pendingWaitClkin_ = 0;
     trace_.reset();
 }
 
@@ -239,6 +255,8 @@ bool Board::loadState(const std::string& path) {
     timerStart_ = totalTicks_;
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
+    vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
+    pendingWaitClkin_ = 0;
     return true;
 }
 
@@ -295,6 +313,7 @@ bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
 }
 
 void Board::runFrame() {
+    if (arb037_) vp037_.syncToFrameTop();   // выровнять фазу 037 к верху кадра (VSYNC)
     deliverFrameInterrupts();
     runTicks(ticksPerFrame());
     trace_.tick();
@@ -303,7 +322,10 @@ void Board::runFrame() {
 
 void Board::runFrameSlice(int slice, int nslices) {
     if (nslices < 1) nslices = 1;
-    if (slice <= 0) { deliverFrameInterrupts(); sliceIdle_ = false; sliceFrameTicks_ = 0; }
+    if (slice <= 0) {
+        if (arb037_) vp037_.syncToFrameTop();   // верх кадра (VSYNC) — ресинк фазы 037
+        deliverFrameInterrupts(); sliceIdle_ = false; sliceFrameTicks_ = 0;
+    }
     if (!sliceIdle_) {
         // Run up to this slice's *cumulative* tick boundary, so per-slice overshoot
         // is compensated in the next slice and the frame totals exactly ticksPerFrame
@@ -586,7 +608,7 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     // аппаратно НЕ реализован — маскируем его (как bk/tty.c: & 01377). Иначе перенос
     // из младшего байта при ADD/INC регистра (прокрутка) прополз бы в бит 9 и ложно
     // включал бы малый экран (баг в RUNING.BIN при движении вниз по лабиринту).
-    case REG_SCROLL:    scroll_ = value & 01377; return true;
+    case REG_SCROLL:    scroll_ = value & 01377; vp037_.setM256(scroll_ & 01000); return true;
     case REG_TIMER_LIM: timerLimit_ = value; return true;
     case REG_TIMER_CNT: return true;                       // counter is read-only
     case REG_TIMER_CSR: timerSetMode(value & 0377); return true;

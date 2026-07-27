@@ -36,6 +36,7 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 
 Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
+`--no-arb037` (disable КР1801ВП1-037 memory-arbitration wait-states, on by default),
 `--key <code>`, `--keyframe N`.
 Screenshots render from the CPU-side pixel buffer / `QWidget::grab`, so no GL
 context or display is needed.
