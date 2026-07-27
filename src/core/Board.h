@@ -7,6 +7,7 @@
 #include "Cpu.h"
 #include "Screen.h"
 #include "Speaker.h"
+#include "Vp037.h"
 #include "Trace.h"
 #include "Symbols.h"
 
@@ -39,6 +40,13 @@ public:
     // like runFrame(). Equivalent to runFrame() when run for all slices 0..nslices-1.
     void runFrameSlice(int slice, int nslices);
     int  ticksPerFrame() const { return cpuFreqHz_ / frameHz_; }
+
+    // Потактовая эмуляция арбитража КР1801ВП1-037: добавляет такты ожидания к
+    // обращениям в ДОЗУ во время активной развёртки (см. Vp037). По умолчанию ВКЛ;
+    // выключение возвращает прежнее поведение «идеальной» памяти.
+    void setArbitration(bool on) { arb037_ = on; }
+    bool arbitration() const { return arb037_; }
+    const Vp037& vp037() const { return vp037_; }
 
     // Run enough frames for the monitor ROM to initialise (vectors, stack,
     // display driver) if it hasn't yet. A game must not be started before this,
@@ -193,6 +201,10 @@ private:
     Memory mem_;
     Cpu    cpu_{mem_};
     Screen screen_;
+    Vp037  vp037_;                 // видеоконтроллер 037: арбитраж доступа к ДОЗУ
+
+    bool arb037_ = true;           // моделировать ожидания 037 (по умолчанию ВКЛ)
+    int  pendingWaitClkin_ = 0;    // накопленное ожидание ДОЗУ (CLKIN) за инструкцию
 
     int cpuFreqHz_ = 3000000;
     int frameHz_   = 50;

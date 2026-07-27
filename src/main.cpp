@@ -60,6 +60,10 @@ static int runKeyTest() {
     return 0;
 }
 
+// Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ во время
+// активной развёртки). По умолчанию ВКЛ; выключается ключом --no-arb037.
+static bool g_arb037 = true;
+
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
 static int runHeadless(const QString& romDir, const QString& bin,
@@ -76,6 +80,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
         if (fc.size() == 2) keys.push_back({fc[0].toInt(), fc[1].toInt(nullptr, 0)});
     }
     bk::Board board;
+    board.setArbitration(g_arb037);
     if (!board.loadRoms(romDir.toStdString())) {
         std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
         return 2;
@@ -322,6 +327,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--flamechart" && i + 1 < args.size()) { fcShot = args[++i]; headless = true; }
         else if (args[i] == "--hotchart" && i + 1 < args.size()) { hcShot = args[++i]; headless = true; }
         else if (args[i] == "--mono") color = false;
+        else if (args[i] == "--no-arb037") g_arb037 = false;
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
         else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
         else if (args[i] == "--type" && i + 1 < args.size()) { typeStr = args[++i]; headless = true; }
@@ -337,6 +343,7 @@ int main(int argc, char** argv) {
                            dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList);
 
     MainWindow w(romDir);
+    w.setArbitration(g_arb037);
     w.show();
     if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
 

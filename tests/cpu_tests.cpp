@@ -4,6 +4,7 @@
 #include "Memory.h"
 #include "Disasm.h"
 #include "Board.h"
+#include "Vp037.h"
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -274,6 +275,64 @@ int main() {
         CHECK(!(b.memory().readWord(0177716) & 0100), "keyboard: 0177716 still low after code read while held");
         b.setKeyHeld(false);
         CHECK(b.memory().readWord(0177716) & 0100, "keyboard: 0177716 bit high after release");
+    }
+
+    // ---- Vp037: геометрия развёртки (порт va_037.v) ----
+    {
+        // Свободный прогон от начала видимого поля. Считаем строки по перепадам
+        // HGATE (одна активная зона ~HGATE на строку) и такты с активной развёрткой.
+        auto measure = [](bool full) {
+            Vp037 v; v.setM256(full); v.syncToFrameTop();
+            int visLines = 0, blankLines = 0, activeClkin = 0;
+            bool prevH = v.hgate(), prevV = v.vgate();
+            // Прогоняем один полный кадр 037 = 320 строк × 384 CLKIN = 122880 тактов.
+            for (int i = 0; i < 320 * 384; ++i) {
+                if (v.inActiveDisplay()) ++activeClkin;
+                v.tick(1);
+                // Начало строки — по спаду HGATE (конец гашения предыдущей строки).
+                if (prevH && !v.hgate()) { if (!v.vgate()) ++visLines; else ++blankLines; }
+                prevH = v.hgate(); prevV = v.vgate();
+            }
+            return std::make_tuple(visLines, blankLines, activeClkin);
+        };
+        auto [visF, blkF, actF] = measure(true);
+        CHECK(visF == 256, "Vp037: 256 видимых строк в кадре (полный экран)");
+        CHECK(blkF == 64,  "Vp037: 64 строки кадрового гашения");
+        // Активная зона (полный экран): 256 строк × 256 CLKIN видимой части = 65536.
+        CHECK(actF == 256 * 256, "Vp037: активная развёртка = 256×256 CLKIN (полный)");
+
+        auto [visS, blkS, actS] = measure(false);
+        CHECK(visS == 256 && blkS == 64, "Vp037: та же геометрия строк в малом экране");
+        // Малый экран: видеовыборка только на первых 64 видимых строках.
+        CHECK(actS == 64 * 256, "Vp037: активная развёртка = 64×256 CLKIN (малый экран)");
+
+        // Ресинк на верх кадра даёт видимую часть, гашение — в конце (обрезается там).
+        Vp037 v; v.setM256(true); v.syncToFrameTop();
+        CHECK(v.inActiveDisplay(), "Vp037: верх кадра — активная развёртка");
+        v.tick(60000 * 2);   // столько CLKIN проходит эмулятор за кадр (60000 тактов)
+        CHECK(!v.inActiveDisplay(), "Vp037: на границе кадра эмулятора луч в гашении");
+    }
+
+    // ---- Board: арбитраж 037 замедляет исполнение в активной развёртке ----
+    {
+        // Тесный цикл в ОЗУ, активно бьющий в ДОЗУ (INC слова + переход обратно).
+        // За фиксированный бюджет тактов с арбитражем проходит МЕНЬШЕ инструкций —
+        // часть тактов уходит в ожидание доступа к ДОЗУ во время активной развёртки.
+        auto instrs = [](bool arb) {
+            Board b; b.setArbitration(arb); b.reset();
+            b.memory().pokeWord(01000, 0005237);   // INC @#004000  (чтение+запись ДОЗУ)
+            b.memory().pokeWord(01002, 0004000);
+            b.memory().pokeWord(01004, 0000775);   // BR 01000
+            b.cpu().reset(01000, 0340);            // PC=01000, прерывания замаскированы
+            long long before = (long long)b.totalTicks();
+            long long budget = 4LL * b.ticksPerFrame();
+            int n = 0;
+            while ((long long)b.totalTicks() - before < budget) { b.stepInstruction(); ++n; }
+            return n;
+        };
+        int on  = instrs(true);
+        int off = instrs(false);
+        CHECK(on < off, "Board: арбитраж 037 снижает число инструкций за интервал");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

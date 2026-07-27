@@ -75,6 +75,11 @@ cmake --build build -j
 ПЗУ (`monit10.rom`, `basic10.rom`) ищутся в каталоге `roms/` (задаётся при сборке,
 переопределяется `--roms <dir>` или переменной `BK_ROM_DIR`).
 
+Потактовая эмуляция арбитража видеоконтроллера **КР1801ВП1-037** (такты ожидания при
+доступе к ОЗУ во время активной развёртки) включена **по умолчанию**; ключ
+`--no-arb037` возвращает прежнюю «идеальную» память. Подробности — в
+`docs/BK0010-hardware.md`.
+
 ### Горячие клавиши
 
 | Клавиша | Действие                                   |
@@ -114,7 +119,8 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 ```
 
 Доступны: `--frames N`, `--shot`, `--dbgshot`, `--memvis`, `--hotpath`,
-`--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`, `--key <код>`, `--keyframe N`.
+`--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`, `--no-arb037`,
+`--key <код>`, `--keyframe N`.
 
 ## MCP-сервер (отладка через Claude)
 

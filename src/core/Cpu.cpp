@@ -658,8 +658,11 @@ void Cpu::buildTable() {
 // ---------------------------------------------------------------------------
 int Cpu::timingFor(uint16_t ir) const {
     // Timings measured on a real БК-0010.01 (Manwe's "clock cycles meter" + the XOP
-    // timing test suite), FAST (main) memory. Screen-RAM (0o40000..0o77777)
-    // wait-states are address-dependent and added on top in Cpu::step().
+    // timing test suite), FAST (main) memory — this is the no-extra-wait baseline.
+    // The КР1801ВП1-037 memory arbitration adds wait-states on top; those are NOT
+    // address-dependent (the 037 controls ALL dynamic RAM uniformly) but raster-
+    // dependent — asserted only while the beam is in active display. They are modelled
+    // outside the CPU, in Board via the Vp037 device (see src/core/Vp037.h).
     //
     // Two-operand: 12 + SRC[sm] + DST[dm], where DST depends on whether the source
     // is a register (sm==0) or memory (sm!=0) and on the op class (read/write/rmw).

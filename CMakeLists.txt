@@ -22,6 +22,7 @@ add_library(bkcore STATIC
     src/core/Disasm.cpp
     src/core/Screen.cpp
     src/core/Speaker.cpp
+    src/core/Vp037.cpp
     src/core/Board.cpp
 )
 target_include_directories(bkcore PUBLIC src/core)
