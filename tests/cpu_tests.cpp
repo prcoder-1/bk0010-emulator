@@ -259,11 +259,14 @@ int main() {
         CHECK(!b.keyReady(), "keyboard: no key ready initially");
         CHECK(b.pressKey(0101), "keyboard: first key (A) latched");   // 'A'
         CHECK(b.keyReady(), "keyboard: ready flag set after keypress");
-        CHECK(!b.pressKey(0102), "keyboard: second key dropped while register busy");
-        CHECK((b.memory().readWord(0177662) & 0177) == 0101, "keyboard: register holds first code");
+        // Реальная ВП1-014 (как bk/tty.c): новое нажатие ПЕРЕЗАПИСЫВАЕТ регистр,
+        // даже если старый код не прочитан. Игры (PITON) читают 0177662 по биту
+        // «клавиша нажата» и должны видеть код ПОСЛЕДНЕЙ клавиши, а не застрявший.
+        CHECK(b.pressKey(0102), "keyboard: second key overwrites unread code");
+        CHECK((b.memory().readWord(0177662) & 0177) == 0102, "keyboard: register holds LATEST code");
         CHECK(!b.keyReady(), "keyboard: ready flag cleared on read");
-        CHECK(b.pressKey(0102), "keyboard: next key latched after previous was read");
-        CHECK((b.memory().readWord(0177662) & 0177) == 0102, "keyboard: register holds second code");
+        CHECK(b.pressKey(0103), "keyboard: next key latched after previous was read");
+        CHECK((b.memory().readWord(0177662) & 0177) == 0103, "keyboard: register holds next code");
         // Register 0177716 bit 6 (key-pressed, active-low) tracks the *physical*
         // key-held state, set/cleared independently of the code register — games
         // like Digger poll it and must keep seeing the key after the monitor ISR
