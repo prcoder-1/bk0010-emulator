@@ -56,11 +56,12 @@ public:
     }
 
     // Present a raw BK key code to the keyboard controller, exactly like the
-    // real BK-0010: the code register (0177662) holds a SINGLE code. A new code
-    // is latched only while the "ready" flag (0177660 bit 7) is clear — i.e. the
-    // previous code has been read; otherwise the keypress is lost. The interrupt
-    // (vector 060, or 0274 for codes with bit 0200) fires only if enabled
-    // (0177660 bit 6). Returns true if the code was latched, false if dropped.
+    // real BK-0010 (ВП1-014, ср. bk/tty.c): the code register (0177662) holds a
+    // SINGLE code, and a new keypress ALWAYS overwrites it — read or not; the
+    // "ready" flag (0177660 bit 7) just marks "a code arrived since the last
+    // read" and is cleared by reading 0177662. The interrupt (vector 060, or
+    // 0274 for codes with bit 0200) fires only if enabled (0177660 bit 6).
+    // Always returns true (kept bool for call-site compatibility).
     bool pressKey(uint16_t bkCode);
 
     // True while an unread code sits in the register (ready flag set).

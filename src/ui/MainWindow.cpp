@@ -162,9 +162,11 @@ void MainWindow::onTick() {
         // Опросить геймпад раз в кадр и обновить байт джойстика (порт 0177714) до
         // прогона кадра, чтобы игра увидела актуальное состояние в своём ISR.
         if (phase_ == 0) board_->setJoystick(gamepad_.poll());
-        // Feed one buffered key into the register once it is free (once per full
-        // frame), so the BK controller sees single codes like real hardware.
-        if (phase_ == 0 && !keyFeed_.empty() && !board_->keyReady()) {
+        // Подать один код из очереди раз в кадр. НЕ ждём освобождения регистра:
+        // на реальной БК новое нажатие перезаписывает непрочитанный код (см.
+        // Board::pressKey) — иначе игра, читающая 0177662 только при физически
+        // нажатой клавише (PITON), получала бы застрявший код ПРЕДЫДУЩЕЙ клавиши.
+        if (phase_ == 0 && !keyFeed_.empty()) {
             board_->pressKey(keyFeed_.front());
             keyFeed_.pop_front();
         }
@@ -513,15 +515,30 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     }
 
     // --- SoftICE off: feed the BK-0010 keyboard ---
+    // Автоповтор Qt отбрасываем целиком: у реальной БК типematic-повтора нет
+    // (для повтора была клавиша ПОВТ). Иначе дубликаты удерживаемой клавиши
+    // встают в очередь ВПЕРЕДИ только что нажатой — и игра, читающая код по биту
+    // «клавиша нажата» (PITON), срабатывает по коду предыдущей клавиши.
+    if (e->isAutoRepeat()) { e->accept(); return; }
     std::vector<uint16_t> codes = keymap_.translate(e);
     if (!codes.empty()) {
-        for (uint16_t c : codes) {
-            // Drop pile-ups from auto-repeat (a duplicate of the last queued code)
-            // and cap the buffer, mirroring the fact that the real controller
-            // keeps only one pending code.
-            if (keyFeed_.size() >= 16) break;
-            if (!keyFeed_.empty() && keyFeed_.back() == c) continue;
-            keyFeed_.push_back(c);
+        // Одиночный код при пустой очереди защёлкиваем НЕМЕДЛЕННО — атомарно с
+        // битом «клавиша нажата» (setKeyHeld выше): эмуляция однопоточная, между
+        // ними не исполняется ни одной инструкции БК. Если отложить код до подачи
+        // из очереди в onTick, игра, читающая 0177662 по биту 0177716 (PITON),
+        // целый кадр видела бы «клавиша нажата» с кодом ПРЕДЫДУЩЕЙ клавиши.
+        // Многокодовые последовательности (РУС/ЛАТ + символ) и накопившийся хвост
+        // по-прежнему идут через очередь — по одному коду на кадр, чтобы монитор
+        // успевал прочитать каждый.
+        if (keyFeed_.empty() && codes.size() == 1) {
+            board_->pressKey(codes[0]);
+        } else {
+            for (uint16_t c : codes) {
+                // Cap the buffer, mirroring the fact that the real controller
+                // keeps only one pending code.
+                if (keyFeed_.size() >= 16) break;
+                keyFeed_.push_back(c);
+            }
         }
         e->accept();
         return;

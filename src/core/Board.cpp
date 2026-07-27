@@ -347,9 +347,12 @@ void Board::runFrameSlice(int slice, int nslices) {
 // (vector 0100) every frame and the keyboard raises IRQ (vector 0060). Both are
 // blocked when the processor priority bit (PSW bit 7, 0200) is set.
 bool Board::pressKey(uint16_t bkCode) {
-    // Real BK-0010: the register holds one code. A new code is accepted only
-    // while the previous one has been read (ready flag clear); else it's lost.
-    if (kbdStatus_ & 0200) return false;
+    // Real BK-0010 (контроллер ВП1-014, как в референсном bk/tty.c tty_keyevent):
+    // новое нажатие ВСЕГДА перезаписывает регистр кода, даже если предыдущий код
+    // не был прочитан — флаг готовности лишь отмечает «код поступал с последнего
+    // чтения». Отбрасывание нового кода при занятом регистре — неверно: игры вроде
+    // PITON читают 0177662 только пока клавиша физически нажата (бит 6 0177716),
+    // не сбрасывая флаг за каждое нажатие, и получали бы код ПРЕДЫДУЩЕЙ клавиши.
     kbdData_ = bkCode & 0177;                 // 7-bit code -> 0177662
     kbdStatus_ |= 0200;                       // set "code ready"
     // Latch the interrupt vector: function keys / АР2 (bit 0200 set) go through
