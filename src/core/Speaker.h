@@ -19,8 +19,14 @@ public:
     void feed(int bit, int ticks);
 
     // Drain up to `maxSamples` into out; returns the number produced.
-    // Missing samples (underrun) are filled with the last level by the caller.
+    // Plain FIFO drain — missing samples (underrun) are filled with the last
+    // level by the caller, and latency management (prime/trim) also lives there.
     size_t read(int16_t* out, size_t maxSamples);
+
+    // Cap backlog: drop the oldest samples so at most `maxSamples` remain. A
+    // safety valve against runaway latency (producer far ahead of the sink);
+    // with rate-matched production it should almost never fire.
+    void trimTo(size_t maxSamples);
 
     size_t available();
     void clear();
