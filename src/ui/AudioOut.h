@@ -31,5 +31,9 @@ private:
     QAudioSink* sink_ = nullptr;
     int16_t last_ = 0;
     int channels_ = 1;   // output channels; the mono signal is fanned out to all
+    int sampleRate_ = 44100;
+    int primeSamples_ = 0;   // cushion (in samples) to build before serving audio
+    int maxSamples_ = 0;     // hard backlog cap (runaway-latency valve)
+    bool primed_ = false;    // false until the cushion is first filled (or after a dry-out)
 };
 #endif // HAVE_QT_MULTIMEDIA

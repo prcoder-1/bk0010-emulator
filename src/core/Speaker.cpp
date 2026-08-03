@@ -32,21 +32,17 @@ void Speaker::feed(int bit, int ticks) {
 
 size_t Speaker::read(int16_t* out, size_t maxSamples) {
     std::lock_guard<std::mutex> lk(mtx_);
-    // Latency guard: the QAudioSink's own buffer absorbs the 20 ms production bursts,
-    // so this FIFO only hands samples across and normally stays near-empty. Only if
-    // the producer runs well ahead (timer jitter / catch-up) does the backlog build;
-    // past ~3 frames, drop a small slice of the *oldest* samples per read to pull
-    // latency back gradually — inaudible for the 1-bit beeper, and far better than a
-    // one-shot skip or an ever-growing delay. The higher threshold keeps it from
-    // firing on ordinary jitter (which would add a raspy edge).
-    const size_t reservoir = static_cast<size_t>(sampleRate_) / 50; // ~1 frame (20 ms)
-    if (buf_.size() > 3 * reservoir) {
-        size_t drop = ((buf_.size() - reservoir) >> 6) + 1;
-        for (size_t i = 0; i < drop; ++i) buf_.pop_front();
-    }
+    // Plain FIFO drain. The consumer (AudioOut) primes a latency cushion before
+    // it starts serving and caps runaway backlog via trimTo(), so no dropping is
+    // done here — dropping mid-stream would gap the 1-bit beeper and crackle.
     size_t n = std::min(maxSamples, buf_.size());
     for (size_t i = 0; i < n; ++i) { out[i] = buf_.front(); buf_.pop_front(); }  // O(1) per sample
     return n;
+}
+
+void Speaker::trimTo(size_t maxSamples) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    while (buf_.size() > maxSamples) buf_.pop_front();
 }
 
 size_t Speaker::available() {
