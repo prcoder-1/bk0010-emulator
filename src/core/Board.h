@@ -3,6 +3,7 @@
 #include <set>
 #include <map>
 #include <deque>
+#include <vector>
 #include "Memory.h"
 #include "Cpu.h"
 #include "Screen.h"
@@ -147,10 +148,28 @@ public:
 
     // I/O-register write log (0177600..0177776), captured only while enabled — for
     // debugging how a game programs the keyboard / timer / sound / port.
-    struct IoWrite { uint16_t addr, value; uint64_t tick; };
-    void setIoLog(bool on) { ioLogOn_ = on; }
+    // `pc` — адрес инструкции, выполнившей обращение (см. curInstrPc_); logReads
+    // включает запись ЧТЕНИЙ (опрос джойстика/клавиатуры — это чтения, без них их
+    // не видно). Монитор непрерывно опрашивает 0177660/0177662, поэтому чтения
+    // имеет смысл включать вместе с addrFilter (0 = без фильтра).
+    struct IoAccess { uint16_t addr, value, pc; uint64_t tick; bool isRead; };
+    void setIoLog(bool on, bool logReads = false, size_t cap = 2048, uint16_t addrFilter = 0) {
+        ioLogOn_ = on; ioLogReads_ = logReads;
+        ioLogCap_ = cap ? cap : 1; ioLogFilter_ = addrFilter;
+    }
     void clearIoLog() { ioLog_.clear(); }
-    const std::deque<IoWrite>& ioLog() const { return ioLog_; }
+    const std::deque<IoAccess>& ioLog() const { return ioLog_; }
+    bool     ioLogReads()  const { return ioLogReads_; }
+    uint16_t ioLogFilter() const { return ioLogFilter_; }
+
+    // Лог фронтов пьезодинамика (бит 6 регистра 0177716) с тактами: позволяет
+    // разложить звук игры на тоны (частота = 1/период меандра) точно, а не гадать
+    // по нулевым пересечениям PCM.
+    struct SpkEdge { uint64_t tick; uint8_t level; };
+    void setSpeakerLog(bool on, size_t cap = 65536) { spkLogOn_ = on; spkLogCap_ = cap ? cap : 1; }
+    bool speakerLogOn() const { return spkLogOn_; }
+    void clearSpeakerLog() { spkLog_.clear(); }
+    const std::deque<SpkEdge>& speakerLog() const { return spkLog_; }
 
     // Execute exactly one instruction (for the debugger). Returns ticks.
     int  stepInstruction();
@@ -190,9 +209,13 @@ public:
     // an I/O-page address). Reads may differ from this on real hardware.
     uint16_t peekRegWritten(uint16_t addr) const;
 
-    // Save/restore full emulator state (RAM, CPU, device registers).
+    // Save/restore full emulator state (RAM, CPU, device registers, ввод).
     bool saveState(const std::string& path);
     bool loadState(const std::string& path);
+    // То же самое в память — для быстрых чекпоинтов без файлов (MCP-слоты,
+    // побитовый перебор джойстика с откатом).
+    void saveStateMem(std::vector<uint8_t>& out) const;
+    bool loadStateMem(const std::vector<uint8_t>& in);
 
     // IoBus
     bool ioRead(uint16_t addr, uint16_t& value) override;
@@ -244,8 +267,18 @@ private:
 
     std::deque<EmtOp> emtLog_;   // recent EMT 36 file operations (capped ring)
 
-    std::deque<IoWrite> ioLog_;  // recent I/O-register writes (capped ring)
-    bool ioLogOn_ = false;
+    std::deque<IoAccess> ioLog_; // recent I/O-register accesses (capped ring)
+    bool ioLogOn_ = false, ioLogReads_ = false;
+    size_t   ioLogCap_ = 2048;
+    uint16_t ioLogFilter_ = 0;   // 0 = все адреса страницы В-В
+    uint16_t curInstrPc_ = 0;    // PC исполняемой сейчас инструкции (для лога В-В)
+
+    std::deque<SpkEdge> spkLog_; // фронты динамика (capped ring)
+    bool   spkLogOn_ = false;
+    size_t spkLogCap_ = 65536;
+
+    // Разбор чтения регистра без побочки логирования (ioRead — обёртка над ним).
+    bool ioReadRaw(uint16_t addr, uint16_t& value);
 
     std::set<uint16_t> breakpoints_;
     std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
