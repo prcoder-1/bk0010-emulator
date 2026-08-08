@@ -21,6 +21,7 @@ add_library(bkcore STATIC
     src/core/Cpu.cpp
     src/core/Disasm.cpp
     src/core/Screen.cpp
+    src/core/ScreenOcr.cpp
     src/core/Speaker.cpp
     src/core/Vp037.cpp
     src/core/Board.cpp
@@ -70,4 +71,8 @@ target_compile_definitions(bk0010-emulator PRIVATE
 enable_testing()
 add_executable(cpu_tests tests/cpu_tests.cpp)
 target_link_libraries(cpu_tests PRIVATE bkcore)
+# Тестам OCR нужен знакогенератор из ПЗУ монитора (тест пропускается, если ПЗУ нет).
+target_compile_definitions(cpu_tests PRIVATE
+    BK_DEFAULT_ROM_DIR="${CMAKE_CURRENT_SOURCE_DIR}/roms"
+)
 add_test(NAME cpu_tests COMMAND cpu_tests)

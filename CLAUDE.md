@@ -54,13 +54,14 @@ Two layers, deliberately decoupled:
   (single-threaded — emulation runs in the GUI thread; one frame = ~60000 ticks is
   fast enough), and hosts `GlScreen` + the debugger widgets.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
-  as ~41 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
+  as ~42 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
   run/step/step-over/step-out, regs/mem, break (optionally conditional) / watch
   (data watchpoints), backtrace, xrefs, search/diff memory, type, callers/callees,
   frames, coverage, profile (speedscope folded stacks), vram (ASCII-art screen),
   io-state / io-log, emt-log (EMT 36 file I/O), hotspots, screenshot (inline PNG) /
   audio, state save/load, plus the game-debugging set: `bk_joystick` / `bk_joy_probe`
-  (parallel port 0177714), timed input on `bk_key` / `bk_run` (`input` timeline).
+  (parallel port 0177714), timed input on `bk_key` / `bk_run` (`input` timeline),
+  `bk_ocr` (read screen text via the character cells).
   Owns its own `Board`, reuses only the `Board`/`Cpu`/`Memory`/`Screen`/`Trace`
   public API + `bk::disasm` + the shared input tables. Entered at the very top of
   `main()` before any GUI setup; runs under an offscreen `QGuiApplication` so
@@ -92,6 +93,15 @@ Key cross-cutting facts to know before editing the CPU or screen:
 - **Screen mapping** (`Screen::render`) ports `scr.c`: video RAM is 0040000, 256
   lines × 64 bytes. Color mode = 2 bits/pixel (256 wide, doubled to 512); mono = 1
   bit/pixel (512 wide), LSB first. Palette 0 = {black, blue, green, red}.
+- **Screen text / OCR** (`src/core/ScreenOcr.{h,cpp}`): the monitor ROM character
+  generator is a flat table of 10-byte glyphs (one byte per scanline, LSB = leftmost
+  pixel) at **0112036** = the glyph for code 020, covering codes 020..0177 then
+  0240..0377 with **no slots for 0200..0237**. Text cells are 8x10 in the 64-column
+  mode and 16x10 in the 32-column ("wide" = colour) mode, where the ROM doubles every
+  glyph bit into a bit pair. Screen codes are 8-bit, *not* the KOI-7 the keyboard
+  sends: Cyrillic is 0300..0337 (lower) / 0340..0377 (upper) in the `kKoi7H1Utf8`
+  order. Latin `A B C E H K M O P T X` and Cyrillic `А В С Е Н К М О Р Т Х` have
+  bit-identical glyphs — `ocrScreen` resolves the script per line by majority.
 - **Pixel format** is `0xAARRGGBB` uint32; uploaded to GL as `GL_BGRA` and wrapped as
   `QImage::Format_ARGB32` — keep these in sync if you touch either.
 - **GL context**: `main.cpp` sets `Qt::AA_UseDesktopOpenGL` before `QApplication`.

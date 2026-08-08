@@ -2,6 +2,7 @@
 #include "Disasm.h"
 #include "Screen.h"
 #include "BkKeys.h"
+#include "ScreenOcr.h"
 #include <QJsonDocument>
 #include <QFile>
 #include <QTextStream>
@@ -342,6 +343,30 @@ QJsonArray McpServer::toolDefs() const {
                 {"w", P("integer", "index mode: width in BK pixels (default 64)")},
                 {"h", P("integer", "index mode: height in lines (default 32)")},
                 {"mono", P("boolean", "Interpret as 512x256 mono (default false=colour)")}})));
+    t.append(tool("bk_ocr", "READ THE TEXT off the BK screen. Splits the screen into character "
+                  "cells and matches each against the monitor ROM character generator, so menus, "
+                  "prompts and score lines come back as real UTF-8 text (Cyrillic included) "
+                  "instead of ASCII art. Handles both BK text modes — narrow (64 chars/line, 8x10 "
+                  "cell) and wide (32 chars/line, 16x10 cell, where each glyph bit is doubled; "
+                  "this is also the colour mode) — and auto-detects the mode and the vertical "
+                  "offset of the text grid. A game with its OWN font: point font_addr at its glyph "
+                  "table. Unusual cell widths: set cell_w / glyph_w / cell_h.",
+        schema({{"mode", P("string", "auto (default) | narrow (64 cols) | wide (32 cols)")},
+                {"frames", P("integer", "Run this many 50 Hz frames before reading (default 0)")},
+                {"x", P("integer", "Left edge of the character grid in screen pixels (default 0)")},
+                {"y", P("integer", "Top edge in scanlines; omit to auto-detect (monitor text starts "
+                                   "at 16, below the 16-line service row)")},
+                {"cols", P("integer", "Grid width in cells (default: as many as fit)")},
+                {"rows", P("integer", "Grid height in cells (default: as many as fit)")},
+                {"cell_w", P("integer", "Horizontal cell pitch in pixels (default 8 narrow / 16 wide)")},
+                {"cell_h", P("integer", "Cell height in scanlines (default 10)")},
+                {"glyph_w", P("integer", "How many glyph bits to compare (default 8)")},
+                {"tolerance", P("integer", "Max mismatching pixels per cell (default 6; 0 = exact)")},
+                {"inverse", P("boolean", "Also recognise inverted cells, e.g. the cursor (default true)")},
+                {"font_addr", P("string", "Custom glyph table address (default 0112036 = monitor ROM)")},
+                {"font_base", P("string", "Code of the first glyph in a custom table (default 020)")},
+                {"font_count", P("integer", "Glyph count in a custom table")},
+                {"codes", P("boolean", "Also dump the octal screen code of every cell")}})));
     t.append(tool("bk_emt_log", "List intercepted EMT 36 tape/disk file operations (which files the "
                   "game loaded/saved, load address, length, and result). Useful for multi-part loaders.",
         schema({{"count", P("integer", "How many recent ops to show (default 40)")}})));
@@ -1406,6 +1431,80 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         QString head = QString("Screen %1x%2, non-black %3 px").arg(W).arg(H).arg(nonblack);
         if (maxx >= 0) head += QString(", bbox (%1,%2)-(%3,%4)").arg(minx).arg(miny).arg(maxx).arg(maxy);
         return textContent(head + ":\n" + grid);
+    }
+
+    if (name == "bk_ocr") {
+        // Распознать текст по знакоместам: сравнить каждое знакоместо с глифами
+        // знакогенератора (по умолчанию — таблица ПЗУ монитора по адресу 0112036).
+        if (args.value("frames").toInt(0) > 0) runFrames(args.value("frames").toInt(0));
+
+        std::vector<uint8_t> bits;
+        bk::screenBitmap(board_.memory(), board_.peekReg(0177664), bits);
+
+        bk::OcrOptions o;
+        QString err;
+        const QString mode = args.value("mode").toString("auto").toLower();
+        bool fixedMode = false;
+        if (mode == "narrow" || mode == "64") { o.wide = false; fixedMode = true; }
+        else if (mode == "wide" || mode == "32") { o.wide = true; fixedMode = true; }
+        else if (mode != "auto" && !mode.isEmpty()) return fail("mode: auto|narrow|wide");
+        if (!fixedMode) {
+            // Подсказка от самой машины: ячейка 0162 (DSIMB) — ширина знакоместа в
+            // байтах, 1 = 64 символа, 2 = 32. Задаёт стартовый режим, но перебор
+            // всё равно проверит оба — игры драйвером монитора не пользуются.
+            const uint16_t dsimb = board_.memory().peekWord(0162);
+            o.wide = (dsimb == 2);
+        }
+        const bool fixedY0 = args.contains("y");
+        o.x0 = args.value("x").toInt(0);
+        o.y0 = args.value("y").toInt(0);
+        o.cols = args.value("cols").toInt(0);
+        o.rows = args.value("rows").toInt(0);
+        o.cellW = args.value("cell_w").toInt(0);
+        o.glyphW = std::clamp(args.value("glyph_w").toInt(8), 1, 8);
+        o.fontHeight = std::clamp(args.value("cell_h").toInt(bk::BK_FONT_HEIGHT), 1, 16);
+        o.tolerance = std::clamp(args.value("tolerance").toInt(6), 0, 80);
+        o.allowInverse = args.value("inverse").toBool(true);
+        if (args.contains("font_addr")) {
+            if (!resolveAddr(args, "font_addr", o.fontAddr, err)) return fail(err);
+            o.bkLayout = false;            // своя таблица — без «дыры» 0200..0237
+            long fb = 020;
+            if (args.contains("font_base")) parseNumber(args.value("font_base"), fb);
+            o.fontBase = (uint16_t)(fb & 0377);
+            o.fontCount = args.value("font_count").toInt(0);
+        }
+
+        const bk::OcrResult r = ocrAuto(board_.memory(), bits, o, fixedMode, fixedY0);
+        if (r.rows <= 0 || r.cols <= 0) return fail("пустая сетка знакомест — проверьте x/y/cols/rows");
+
+        QString out = QString("Текст с экрана: режим %1 (%2 симв./строку, знакоместо %3x%4), "
+                              "сетка %5x%6 от точки (%7,%8).\n"
+                              "Знакомест непустых %9, распознано %10, не опознано %11%12.\n")
+            .arg(r.opt.wide ? "широкий" : "узкий")
+            .arg(512 / (r.opt.cellW > 0 ? r.opt.cellW : (r.opt.wide ? 16 : 8)))
+            .arg(r.opt.cellW > 0 ? r.opt.cellW : (r.opt.wide ? 16 : 8)).arg(r.opt.fontHeight)
+            .arg(r.cols).arg(r.rows).arg(r.opt.x0).arg(r.opt.y0)
+            .arg(r.nonBlank).arg(r.recognised).arg(r.unknown)
+            .arg(r.inverted ? QString(" (инверсных %1)").arg(r.inverted) : QString());
+        if (r.nonBlank && r.recognised == 0)
+            out += "Ни одно знакоместо не совпало со знакогенератором — вероятно, игра рисует\n"
+                   "своим шрифтом: укажите font_addr (и font_base/font_count) либо поднимите tolerance.\n";
+        out += "----\n";
+        out += QString::fromUtf8(r.text().c_str());
+        out += "----";
+
+        if (args.value("codes").toBool(false)) {
+            out += "\nВосьмеричные коды по знакоместам (?? — не опознано):\n";
+            for (int row = 0; row < r.rows; ++row) {
+                QString line = QString("%1:").arg(row, 2);
+                for (int col = 0; col < r.cols; ++col) {
+                    const bk::OcrCell& c = r.cells[(size_t)row * r.cols + col];
+                    line += c.ok ? QString(" %1").arg(oct6(c.code).right(3)) : QString(" ???");
+                }
+                out += line + "\n";
+            }
+        }
+        return textContent(out);
     }
 
     if (name == "bk_emt_log") {
