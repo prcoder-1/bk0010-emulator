@@ -5,9 +5,12 @@
 #include "Disasm.h"
 #include "Board.h"
 #include "Vp037.h"
+#include "Joystick.h"
+#include "BkKeys.h"
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <filesystem>
 
 using namespace bk;
@@ -336,6 +339,111 @@ int main() {
         int on  = instrs(true);
         int off = instrs(false);
         CHECK(on < off, "Board: арбитраж 037 снижает число инструкций за интервал");
+    }
+
+    // ---- Раскладки джойстика (общая таблица ядра, src/core/Joystick.h) ----
+    {
+        std::string err;
+        CHECK(joyMask(JoyStandard::Klad2, "right", &err) == 0001, "Клад-2: ВПРАВО = 001");
+        CHECK(joyMask(JoyStandard::Klad2, "left") == 0002, "Клад-2: ВЛЕВО = 002");
+        CHECK(joyMask(JoyStandard::SWCorp, "up") == 02000, "SWCorp: ВВЕРХ = 02000 (старший байт)");
+        CHECK(joyMask(JoyStandard::Standard, "up+fire1") == 0041, "Стандарт: ВВЕРХ+ОГОНЬ1 = 041");
+        CHECK(joyMask(JoyStandard::Standard, "вправо, огонь") == 0042, "русские имена и запятая");
+        CHECK(joyMask(JoyStandard::Standard, "ВПРАВО") == 0002, "имена нечувствительны к регистру");
+        CHECK(joyMask(JoyStandard::Klad2, "bit3") == 0010, "bitN — сырой бит вне раскладки");
+        CHECK(joyMask(JoyStandard::Standard, "") == 0 && joyMask(JoyStandard::Standard, "none") == 0,
+              "пусто/none -> 0");
+        err.clear();
+        CHECK(joyMask(JoyStandard::Standard, "up+нетакой", &err) == 0 && !err.empty(),
+              "неизвестная кнопка -> ошибка");
+
+        JoyStandard s = JoyStandard::Standard;
+        CHECK(joyParseStandard("klad2", s) && s == JoyStandard::Klad2, "разбор имени раскладки");
+        CHECK(joyParseStandard("Клад-2", s) && s == JoyStandard::Klad2, "русский алиас раскладки");
+        CHECK(!joyParseStandard("нетакой", s), "неизвестная раскладка отвергается");
+
+        CHECK(joyDecode(JoyStandard::Klad2, 0001) == "ВПРАВО", "расшифровка одного бита");
+        CHECK(joyDecode(JoyStandard::Standard, 0) == "нет", "расшифровка нуля");
+        CHECK(joyDecode(JoyStandard::Klad2, 0400).find("неизв") != std::string::npos,
+              "бит вне раскладки помечается как неизвестный");
+    }
+
+    // ---- Имена клавиш и кодирование текста в КОИ-7 (src/core/BkKeys.h) ----
+    {
+        CHECK(bkKeyByName("enter") == 012, "имя enter -> 012");
+        CHECK(bkKeyByName("ВВОД") == 012, "русское имя, верхний регистр");
+        CHECK(bkKeyByName("рус") == BK_CODE_RUS, "рус -> 016");
+        CHECK(bkKeyByName("right") == 031 && bkKeyByName("up") == 032, "стрелки");
+        CHECK(bkKeyByName("нетакой") == BK_KEY_NONE, "неизвестное имя");
+        CHECK(std::string(bkKeyName(012)) == "enter", "обратный поиск имени");
+
+        bool cyr = false;
+        auto v = bkEncodeText("A", cyr);
+        CHECK(v.size() == 1 && v[0] == 'A' && !cyr, "латиница из ЛАТ — без префикса");
+        v = bkEncodeText("б", cyr);
+        // КОИ-7 Н1 начинается с Ю(0140), А(0141), Б(0142) — см. kKoi7H1Utf8.
+        CHECK(v.size() == 2 && v[0] == BK_CODE_RUS && v[1] == 0142 && cyr,
+              "кириллица вставляет РУС и кодирует Б=0142");
+        v = bkEncodeText("A", cyr);
+        CHECK(v.size() == 2 && v[0] == BK_CODE_LAT && v[1] == 'A' && !cyr,
+              "возврат к латинице вставляет ЛАТ");
+        v = bkEncodeText("1\n", cyr);
+        CHECK(v.size() == 2 && v[0] == '1' && v[1] == 012, "цифра без префикса, \\n -> ВВОД");
+    }
+
+    // ---- Снимок состояния: джойстик и удержание клавиши ----
+    {
+        Board b; b.reset();
+        b.memory().pokeWord(01000, 0123456);
+        b.setJoystick(02000);
+        b.setKeyHeld(true);
+        std::vector<uint8_t> snap;
+        b.saveStateMem(snap);
+        b.setJoystick(0);
+        b.setKeyHeld(false);
+        b.memory().pokeWord(01000, 0);
+        CHECK(b.loadStateMem(snap), "снимок читается");
+        CHECK(b.joystick() == 02000, "джойстик восстановлен");
+        CHECK(b.keyHeld(), "удержание клавиши восстановлено");
+        CHECK(b.memory().peekWord(01000) == 0123456, "ОЗУ восстановлено");
+        CHECK(b.peekReg(0177714) == 02000, "0177714 отдаёт восстановленное значение");
+
+        // Снимок старого формата (без хвоста ext[2]) должен читаться как «ввод отпущен».
+        std::vector<uint8_t> old(snap.begin(), snap.end() - 4);
+        CHECK(b.loadStateMem(old), "снимок старого формата читается");
+        CHECK(b.joystick() == 0 && !b.keyHeld(), "старый формат -> ввод отпущен");
+        CHECK(!b.loadStateMem(std::vector<uint8_t>(8, 0)), "мусор отвергается");
+    }
+
+    // ---- Лог обращений к В-В: чтения, фильтр адреса, PC инструкции ----
+    {
+        Board b; b.reset();
+        b.setJoystick(0123);
+        b.setIoLog(true, true, 64, 0177714);
+        loadProg(b.memory(), 01000, {0013700, 0177714,    // MOV @#177714, R0
+                                     0013701, 0177660});  // MOV @#177660, R1 — отфильтруется
+        b.cpu().reset(01000, 0340);
+        b.stepInstruction();
+        b.stepInstruction();
+        const auto& log = b.ioLog();
+        CHECK(log.size() == 1, "фильтр адреса пропускает только 0177714");
+        if (log.size() == 1) {
+            CHECK(log[0].isRead, "обращение помечено как чтение");
+            CHECK(log[0].addr == 0177714 && log[0].value == 0123, "адрес и значение");
+            CHECK(log[0].pc == 01000, "PC = адрес инструкции, а не значение регистра PC");
+        }
+    }
+
+    // ---- Лог фронтов динамика ----
+    {
+        Board b; b.reset();
+        b.setSpeakerLog(true);
+        b.memory().writeWord(0177716, 0100);   // бит 6 -> 1
+        b.memory().writeWord(0177716, 0100);   // повтор — не фронт
+        b.memory().writeWord(0177716, 0);      // бит 6 -> 0
+        const auto& sl = b.speakerLog();
+        CHECK(sl.size() == 2, "пишутся только фронты");
+        if (sl.size() == 2) CHECK(sl[0].level == 1 && sl[1].level == 0, "уровни фронтов");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

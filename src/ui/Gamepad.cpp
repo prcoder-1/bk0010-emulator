@@ -63,20 +63,8 @@ uint16_t Gamepad::poll() {
     const bool U = axis_[1] < -DEAD || axis_[7] < -DEAD;
     const bool D = axis_[1] >  DEAD || axis_[7] >  DEAD;
 
-    // Раскладки: направления + «огонь» (f[0..3] — кнопки геймпада A/B/X/Y, f[4] —
-    // доп. кнопка/Start). См. Gamepad.h; «Стандарт» — распайка «Джойвокс»/эмулятор gid.
-    struct Layout { uint16_t up, down, left, right, f[5]; };
-    static const Layout LAYOUTS[4] = {
-        // Standard (Джойвокс / gid): ВВ=001 ВПР=002 ВН=004 ВЛ=010
-        { 0001, 0004, 0010, 0002, { 0040, 0200, 0100, 0400, 0020 } },
-        // Break House (BKBTL): кнопки 001-010; ВЛ=020 ВН=040 ВПР=0100 ВВ=0200
-        { 0200, 0040, 0020, 0100, { 0001, 0002, 0004, 0010, 0001 } },
-        // SWCorp (BKBTL): кнопки 001-010; ВПР=020 ВН=040 ВЛ=01000 ВВ=02000
-        { 02000, 0040, 01000, 0020, { 0001, 0002, 0004, 0010, 0001 } },
-        // Клад-2 (реверс игры): ВПР=001 ВЛ=002 ВВ=004 ВН=010; стрельба влево/вправо=020/040
-        { 0004, 0010, 0002, 0001, { 0020, 0040, 0020, 0040, 0020 } },
-    };
-    const Layout& lay = LAYOUTS[static_cast<int>(standard_)];
+    // Раскладки (направления + «огонь») — общая таблица ядра, см. src/core/Joystick.h.
+    const bk::JoyLayout& lay = bk::joyLayout(standard_);
 
     uint16_t v = 0;
     if (L) v |= lay.left;
@@ -86,12 +74,12 @@ uint16_t Gamepad::poll() {
     // Лицевые кнопки 0..3 -> огонь A/B/X/Y; порядок «сырых» кнопок зависит от пада,
     // но большинству игр нужен один «огонь» — любая лицевая его даёт. Плечевые 4/5 —
     // основной огонь, Select/Start 6/7 — доп. кнопка.
-    if (button_[0]) v |= lay.f[0];
-    if (button_[1]) v |= lay.f[1];
-    if (button_[2]) v |= lay.f[2];
-    if (button_[3]) v |= lay.f[3];
-    if (button_[4] || button_[5]) v |= lay.f[0];
-    if (button_[6] || button_[7]) v |= lay.f[4];
+    if (button_[0]) v |= lay.fire[0];
+    if (button_[1]) v |= lay.fire[1];
+    if (button_[2]) v |= lay.fire[2];
+    if (button_[3]) v |= lay.fire[3];
+    if (button_[4] || button_[5]) v |= lay.fire[0];
+    if (button_[6] || button_[7]) v |= lay.fire[4];
     return v;
 }
 

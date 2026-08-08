@@ -54,17 +54,26 @@ Two layers, deliberately decoupled:
   (single-threaded — emulation runs in the GUI thread; one frame = ~60000 ticks is
   fast enough), and hosts `GlScreen` + the debugger widgets.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
-  as ~40 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
+  as ~41 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
   run/step/step-over/step-out, regs/mem, break (optionally conditional) / watch
   (data watchpoints), backtrace, xrefs, search/diff memory, type, callers/callees,
   frames, coverage, profile (speedscope folded stacks), vram (ASCII-art screen),
   io-state / io-log, emt-log (EMT 36 file I/O), hotspots, screenshot (inline PNG) /
-  audio, state save/load.
+  audio, state save/load, plus the game-debugging set: `bk_joystick` / `bk_joy_probe`
+  (parallel port 0177714), timed input on `bk_key` / `bk_run` (`input` timeline).
   Owns its own `Board`, reuses only the `Board`/`Cpu`/`Memory`/`Screen`/`Trace`
-  public API + `bk::disasm`. Entered at the very top of `main()` before any GUI
-  setup; runs under an offscreen `QGuiApplication` so `bk_screenshot` can save PNGs.
-  Registered for Claude Code via `.mcp.json` (server name `bk0010`). Tool args accept
-  decimal / `0x` hex / leading-0 octal, and symbols loaded via `bk_symbols`.
+  public API + `bk::disasm` + the shared input tables. Entered at the very top of
+  `main()` before any GUI setup; runs under an offscreen `QGuiApplication` so
+  `bk_screenshot` can save PNGs. Registered for Claude Code via `.mcp.json` (server
+  name `bk0010`). Tool args accept decimal / `0x` hex / leading-0 octal, and symbols
+  loaded via `bk_symbols`. Recipes for driving a game: `docs/mcp-debugging.md`.
+
+- **Shared input tables** live in the core as header-only files so the GUI, the MCP
+  server and `cpu_tests` (which links only `bkcore`) all agree: `src/core/Joystick.h`
+  (the four joystick layouts + name↔bit helpers; `Gamepad::Standard` is just an alias
+  for `bk::JoyStandard`) and `src/core/BkKeys.h` (KOI-7 key names, KOI-7 H1 table,
+  UTF-8 text → key codes with automatic РУС/ЛАТ). `src/ui/BkKeymap.cpp` stays the
+  authority for *Qt key* → code; `BkKeys.h` is the authority for *name/text* → code.
 
 Key cross-cutting facts to know before editing the CPU or screen:
 

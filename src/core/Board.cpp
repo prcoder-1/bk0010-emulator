@@ -122,6 +122,10 @@ Board::Board() {
 // Execute one instruction with sound + trace bookkeeping. Returns ticks.
 int Board::stepCore() {
     uint16_t pcBefore = cpu_.pc();
+    // К моменту ioRead/ioWrite регистр PC уже уехал за слова операндов, поэтому
+    // лог обращений к В-В берёт адрес инструкции отсюда (тот же приём, что и
+    // watchPc_ для точек наблюдения).
+    curInstrPc_ = pcBefore;
     trace_.exec(pcBefore);
     watchArmed_ = false;
     pendingWaitClkin_ = 0;
@@ -203,6 +207,7 @@ void Board::reset() {
     frameTicks_.clear();
     emtLog_.clear();
     ioLog_.clear();
+    spkLog_.clear();
     speaker_ = 0;
     framesSinceReset_ = 0;
     std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));
@@ -218,36 +223,50 @@ namespace {
 constexpr char kMagic[8] = {'B','K','1','0','S','T','1','\0'};
 }
 
-bool Board::saveState(const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return false;
-    std::fwrite(kMagic, 1, 8, f);
-    // Mutable memory is RAM 0..0100000 (ROM above is constant).
-    std::fwrite(mem_.raw(), 1, ADDR_RAM_END, f);
-    std::fwrite(cpu_.r, sizeof(uint16_t), 8, f);
-    std::fwrite(&cpu_.psw, sizeof(uint16_t), 1, f);
-    uint16_t dev[7] = {scroll_, kbdStatus_, kbdData_, timerLimit_, timerCount_, timerCsr_, speaker_};
-    std::fwrite(dev, sizeof(uint16_t), 7, f);
-    std::fclose(f);
-    return true;
+// Раскладка снимка: магия(8) + ОЗУ(0100000) + R0-R7(8 слов) + PSW + dev[7] и —
+// с этой версии — хвост ext[2] = {joystick_, keyHeld_}. Магию не меняем: снимки
+// старого формата просто короче на хвост и читаются как «ввод отпущен».
+namespace {
+constexpr size_t kStateBase = 8 + ADDR_RAM_END + (8 + 1 + 7) * sizeof(uint16_t);
+constexpr size_t kStateFull = kStateBase + 2 * sizeof(uint16_t);
 }
 
-bool Board::loadState(const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return false;
-    char magic[8];
-    if (std::fread(magic, 1, 8, f) != 8 || std::memcmp(magic, kMagic, 8) != 0) { std::fclose(f); return false; }
-    if (std::fread(mem_.raw(), 1, ADDR_RAM_END, f) != ADDR_RAM_END) { std::fclose(f); return false; }
-    std::fread(cpu_.r, sizeof(uint16_t), 8, f);
-    std::fread(&cpu_.psw, sizeof(uint16_t), 1, f);
+void Board::saveStateMem(std::vector<uint8_t>& out) const {
+    out.clear();
+    out.reserve(kStateFull);
+    auto put = [&](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        out.insert(out.end(), b, b + n);
+    };
+    put(kMagic, 8);
+    // Mutable memory is RAM 0..0100000 (ROM above is constant).
+    put(mem_.raw(), ADDR_RAM_END);
+    put(cpu_.r, 8 * sizeof(uint16_t));
+    put(&cpu_.psw, sizeof(uint16_t));
+    const uint16_t dev[7] = {scroll_, kbdStatus_, kbdData_, timerLimit_, timerCount_, timerCsr_, speaker_};
+    put(dev, sizeof dev);
+    const uint16_t ext[2] = {joystick_, static_cast<uint16_t>(keyHeld_ ? 1 : 0)};
+    put(ext, sizeof ext);
+}
+
+bool Board::loadStateMem(const std::vector<uint8_t>& in) {
+    if (in.size() < kStateBase || std::memcmp(in.data(), kMagic, 8) != 0) return false;
+    size_t off = 8;
+    auto get = [&](void* p, size_t n) { std::memcpy(p, in.data() + off, n); off += n; };
+    get(mem_.raw(), ADDR_RAM_END);
+    get(cpu_.r, 8 * sizeof(uint16_t));
+    get(&cpu_.psw, sizeof(uint16_t));
     uint16_t dev[7] = {0};
-    std::fread(dev, sizeof(uint16_t), 7, f);
-    std::fclose(f);
+    get(dev, sizeof dev);
+    uint16_t ext[2] = {0, 0};
+    if (in.size() >= kStateFull) get(ext, sizeof ext);   // иначе — снимок старого формата
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
     keyIntPending_ = false;
     timerLimit_ = dev[3]; timerCount_ = dev[4];
     timerCsr_ = static_cast<uint8_t>(dev[5]);
     speaker_ = static_cast<uint8_t>(dev[6]);
+    joystick_ = ext[0];
+    keyHeld_  = ext[1] != 0;
     // Re-derive the timer phase so timerCheck() doesn't see a huge stale delta.
     timerPeriod_ = TIMER_BASE_PERIOD;
     if (timerCsr_ & TIM_DIV16) timerPeriod_ *= 16;
@@ -258,6 +277,27 @@ bool Board::loadState(const std::string& path) {
     vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
     pendingWaitClkin_ = 0;
     return true;
+}
+
+bool Board::saveState(const std::string& path) {
+    std::vector<uint8_t> buf;
+    saveStateMem(buf);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(buf.data(), 1, buf.size(), f) == buf.size();
+    std::fclose(f);
+    return ok;
+}
+
+bool Board::loadState(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    std::vector<uint8_t> buf;
+    uint8_t chunk[65536];
+    size_t got;
+    while ((got = std::fread(chunk, 1, sizeof chunk, f)) > 0) buf.insert(buf.end(), chunk, chunk + got);
+    std::fclose(f);
+    return loadStateMem(buf);
 }
 
 int Board::runTicks(int ticks) {
@@ -574,6 +614,16 @@ bool Board::handleEmt36() {
 
 // ---- I/O register dispatch --------------------------------------------------
 bool Board::ioRead(uint16_t addr, uint16_t& value) {
+    const bool handled = ioReadRaw(addr, value);
+    if (handled && ioLogOn_ && ioLogReads_ && addr >= ADDR_IO_PAGE &&
+        (!ioLogFilter_ || addr == ioLogFilter_)) {
+        ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, true});
+        while (ioLog_.size() > ioLogCap_) ioLog_.pop_front();
+    }
+    return handled;
+}
+
+bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
     switch (addr) {
     case REG_KBD_STATUS: value = kbdStatus_; return true;
     case REG_KBD_DATA:   value = kbdData_; kbdStatus_ &= ~0200; return true;
@@ -602,9 +652,9 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
 
 bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     if (addr >= ADDR_IO_PAGE) ioLastWrite_[(addr - ADDR_IO_PAGE) >> 1] = value; // for the debugger
-    if (ioLogOn_ && addr >= ADDR_IO_PAGE) {
-        ioLog_.push_back({addr, value, totalTicks_});
-        if (ioLog_.size() > 2048) ioLog_.pop_front();
+    if (ioLogOn_ && addr >= ADDR_IO_PAGE && (!ioLogFilter_ || addr == ioLogFilter_)) {
+        ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, false});
+        while (ioLog_.size() > ioLogCap_) ioLog_.pop_front();
     }
     switch (addr) {
     // Скролл: биты 0-7 = строка, бит 9 (01000) = полный/малый экран. Бит 8 (0400)
@@ -615,9 +665,15 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     case REG_TIMER_LIM: timerLimit_ = value; return true;
     case REG_TIMER_CNT: return true;                       // counter is read-only
     case REG_TIMER_CSR: timerSetMode(value & 0377); return true;
-    case REG_SYS:
+    case REG_SYS: {
+        const uint8_t was = speaker_;
         speaker_ = (value >> 6) & 3; // bits 6,7: tape/speaker output
+        if (spkLogOn_ && ((was ^ speaker_) & 1)) {   // фронт пьезодинамика
+            spkLog_.push_back({totalTicks_, static_cast<uint8_t>(speaker_ & 1)});
+            while (spkLog_.size() > spkLogCap_) spkLog_.pop_front();
+        }
         return true;
+    }
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
     default:
         if (addr >= ADDR_IO_PAGE) return true; // swallow writes to I/O page
