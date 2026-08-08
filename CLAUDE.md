@@ -84,6 +84,17 @@ Key cross-cutting facts to know before editing the CPU or screen:
   change flag logic, cross-check against `single.c`/`double.c`/`branch.c` there.
 - **Effective address** load/store (`Cpu::loadSrc/loadDst/storeDst2/...`) ports
   `ea.c`; `storeDst2` writes back to the cached `eaAddr_` for modify-in-place ops.
+- **T-bit trace trap** (`Cpu::step`): while PSW bit 4 (`020`) is set, EVERY instruction
+  traps through vector `014`; only the `RTT` instruction itself suppresses it (so `RTI`
+  restoring T=1 traps immediately, `RTT` lets exactly one instruction through). This is
+  not just a debugger feature — BK programs use it to run music *interleaved* with a
+  game one instruction at a time (`tetr-music.bin`). Dropping it makes such programs
+  silent AND run at full CPU speed.
+- **Timer power-on limit** is `0177777`, not the `011000` that `bk`/BKBTL use: the
+  register is undefined on real hardware, and all-ones makes the counter a plain 16-bit
+  down-counter that passes through the negative half — which is what the common
+  `TST @#177710 / BPL` wait idiom (and any program that never programs the limit)
+  needs. See `docs/BK0010-hardware.md`.
 - **Interrupt gating**: reset PSW is `0340` (priority 7, masked) so the monitor ROM
   can install its vectors before the 50 Hz IRQ fires — do not reset to 0, games will
   jump to an unset vector and HALT. `Board::deliverFrameInterrupts` also refuses to
