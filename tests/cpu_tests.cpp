@@ -7,6 +7,7 @@
 #include "Vp037.h"
 #include "Joystick.h"
 #include "BkKeys.h"
+#include "ScreenOcr.h"
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -444,6 +445,94 @@ int main() {
         const auto& sl = b.speakerLog();
         CHECK(sl.size() == 2, "пишутся только фронты");
         if (sl.size() == 2) CHECK(sl[0].level == 1 && sl[1].level == 0, "уровни фронтов");
+    }
+
+    // ---- Экранная кодировка БК -> UTF-8 ----
+    {
+        CHECK(bkScreenCodeToUtf8(0101) == "A", "0101 -> латинская A");
+        CHECK(bkScreenCodeToUtf8(0341) == "А", "0341 -> кириллическая А");
+        CHECK(bkScreenCodeToUtf8(0300) == "ю", "0300 -> строчная ю");
+        CHECK(bkScreenCodeToUtf8(0377) == "Ъ", "0377 -> Ъ");
+        CHECK(bkScreenCodeToUtf8(040) == " ", "040 -> пробел");
+        CHECK(bkScreenCodeToUtf8(0241) == "┴", "0241 -> псевдографика");
+        CHECK(bkScreenCodeToUtf8(0200) == "{0200}", "код без глифа -> восьмеричная запись");
+    }
+
+    // ---- OCR: текст, нарисованный знакогенератором ПЗУ, читается обратно ----
+    {
+        Board b;
+        if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            std::printf("SKIP: ПЗУ не найдено в %s — тесты OCR пропущены\n", BK_DEFAULT_ROM_DIR);
+        } else {
+            b.reset();
+            // Нарисовать строку экранных кодов знакогенератором ПЗУ прямо в ВОЗУ.
+            auto glyphAddr = [](uint16_t code) {
+                const int idx = (code <= 0177) ? code - 020 : code - 060;
+                return static_cast<uint16_t>(BK_FONT_ADDR + idx * BK_FONT_HEIGHT);
+            };
+            auto draw = [&](const std::vector<uint16_t>& codes, int col0, int row, bool wide) {
+                for (size_t i = 0; i < codes.size(); ++i) {
+                    const uint16_t ga = glyphAddr(codes[i]);
+                    for (int r = 0; r < BK_FONT_HEIGHT; ++r) {
+                        const uint8_t m = b.memory().peekByte(static_cast<uint16_t>(ga + r));
+                        const int y = row * BK_FONT_HEIGHT + r;
+                        if (!wide) {
+                            b.memory().pokeByte(static_cast<uint16_t>(0040000 + y * 64 + col0 + (int)i), m);
+                        } else {
+                            uint16_t w = 0;                    // удвоение битов, как в ПЗУ
+                            for (int k = 0; k < 8; ++k) if ((m >> k) & 1) w |= (uint16_t)(3u << (k * 2));
+                            const int byteX = (col0 + (int)i) * 2;
+                            b.memory().pokeByte(static_cast<uint16_t>(0040000 + y * 64 + byteX), (uint8_t)(w & 0xFF));
+                            b.memory().pokeByte(static_cast<uint16_t>(0040000 + y * 64 + byteX + 1), (uint8_t)(w >> 8));
+                        }
+                    }
+                }
+            };
+            // "БК-0010" заглавной кириллицей + латиница и цифры.
+            const std::vector<uint16_t> line = {0342, 0353, 055, 060, 060, 061, 060};  // БК-0010
+            const std::vector<uint16_t> lat  = {0110, 0105, 0114, 0114, 0117};          // HELLO
+
+            // --- узкий режим (64 символа в строке)
+            draw(line, 3, 4, false);
+            draw(lat, 3, 6, false);
+            std::vector<uint8_t> bits;
+            screenBitmap(b.memory(), b.peekReg(0177664), bits);
+            OcrResult r = ocrAuto(b.memory(), bits, OcrOptions{});
+            CHECK(!r.opt.wide, "OCR: авто-режим распознал узкий (64 симв.)");
+            CHECK(r.opt.y0 == 0, "OCR: авто-смещение по вертикали = 0");
+            CHECK(r.unknown == 0 && r.recognised == 12, "OCR узкий: все 12 знакомест распознаны");
+            CHECK(r.text().find("БК-0010") != std::string::npos, "OCR узкий: кириллица и цифры");
+            CHECK(r.text().find("HELLO") != std::string::npos, "OCR узкий: латиница");
+
+            // --- широкий режим (32 символа в строке, биты глифа удвоены)
+            b.memory().reset();
+            draw(line, 2, 3, true);
+            screenBitmap(b.memory(), b.peekReg(0177664), bits);
+            r = ocrAuto(b.memory(), bits, OcrOptions{});
+            CHECK(r.opt.wide, "OCR: авто-режим распознал широкий (32 симв.)");
+            CHECK(r.unknown == 0 && r.recognised == 7, "OCR широкий: все знакоместа распознаны");
+            CHECK(r.text().find("БК-0010") != std::string::npos, "OCR широкий: текст совпал");
+
+            // --- инверсия (курсор): знакоместо с инвертированным глифом
+            b.memory().reset();
+            draw({0101}, 0, 2, false);                      // латинская A
+            for (int y = 20; y < 30; ++y) {                 // инвертировать её знакоместо
+                const uint16_t a = static_cast<uint16_t>(0040000 + y * 64);
+                b.memory().pokeByte(a, static_cast<uint8_t>(~b.memory().peekByte(a)));
+            }
+            screenBitmap(b.memory(), b.peekReg(0177664), bits);
+            OcrOptions o; o.wide = false; o.y0 = 0;
+            r = ocrScreen(b.memory(), bits, o);
+            CHECK(r.cells[2 * r.cols].code == 0101 && r.cells[2 * r.cols].inverted,
+                  "OCR: инвертированное знакоместо распознано с пометкой");
+
+            // --- пустой экран: ни одного непустого знакоместа, текст пуст
+            b.memory().reset();
+            screenBitmap(b.memory(), b.peekReg(0177664), bits);
+            r = ocrScreen(b.memory(), bits, o);
+            CHECK(r.nonBlank == 0 && r.unknown == 0, "OCR: пустой экран — нечего распознавать");
+            CHECK(r.text().find_first_not_of('\n') == std::string::npos, "OCR: пустой экран -> пустой текст");
+        }
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
