@@ -9,6 +9,7 @@ void Vp037::reset() {
     lc_ = 0xFF;
     hgate_ = false;
     vgate_ = true;
+    frameClk_ = 0;
 }
 
 void Vp037::syncToFrameTop() {
@@ -20,11 +21,13 @@ void Vp037::syncToFrameTop() {
     lc_ = 0xFF;
     hgate_ = false;
     vgate_ = false;
+    frameClk_ = 0;
 }
 
 // Один такт CLKIN = один negedge-фронт в va_037.v. Все счётчики обновляются
 // одновременно из ТЕКУЩИХ (до-фронтовых) значений — как nonblocking-присваивания.
 void Vp037::tick(int clkin) {
+    if (clkin > 0) frameClk_ += static_cast<uint32_t>(clkin);
     for (int i = 0; i < clkin; ++i) {
         // Текущие значения (до фронта)
         const uint8_t va41 = va51_ & 017;         // VA[4:1]

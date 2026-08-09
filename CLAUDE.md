@@ -37,7 +37,9 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
 `--no-arb037` (disable КР1801ВП1-037 memory-arbitration wait-states, on by default),
-`--key <code>`, `--keyframe N`.
+`--scanline` (per-scanline rendering — each line drawn with the scroll register value
+that was live when the beam crossed it, driven off the `Vp037` raster; OFF by default,
+see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
 Screenshots render from the CPU-side pixel buffer / `QWidget::grab`, so no GL
 context or display is needed.
 This is the primary way to verify visual changes; the GUI itself needs `xvfb-run`.
