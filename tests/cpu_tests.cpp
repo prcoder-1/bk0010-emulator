@@ -8,6 +8,8 @@
 #include "Joystick.h"
 #include "BkKeys.h"
 #include "ScreenOcr.h"
+#include "Speaker.h"
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -653,6 +655,22 @@ int main() {
             if (b.memory().readWord(0177710) & 0100000) negative = true;
         }
         CHECK(negative, "счётчик непрограммированного таймера читается отрицательным");
+    }
+
+    // ---- Динамик: сигнал далеко за Найквистом не сворачивается в слышимую полосу ----
+    {
+        // Меандр с полупериодом 10 тактов = 150 кГц. RC-цепь пищалки (tau = 55.8 мкс,
+        // срез ~2.85 кГц) обязана погасить его примерно в 50 раз ДО выборки. Если
+        // фильтровать после децимации (как было), частота сворачивается в полосу и
+        // даёт слышимую грязь: тот же тест на прежней реализации давал пик 1178.
+        Speaker sp;                       // 44100 Гц, ЦП 3 МГц
+        for (int i = 0; i < 60000; ++i) sp.feed((i & 1) ? 7 : 0, 10);
+        std::vector<int16_t> buf(sp.available());
+        const size_t n = sp.read(buf.data(), buf.size());
+        int peak = 0;
+        for (size_t i = n / 2; i < n; ++i) { const int a = std::abs((int)buf[i]); if (a > peak) peak = a; }
+        CHECK(n > 1000, "динамик выдал сэмплы");
+        CHECK(peak < 800, "150 кГц гасится RC-цепью до выборки, а не сворачивается в полосу");
     }
 
     // ---- Построчная отрисовка: у каждой строки свой скролл ----

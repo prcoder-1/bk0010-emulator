@@ -38,10 +38,10 @@ public:
 private:
     int sampleRate_, cpuFreq_;
     bool enabled_ = true;
-    double acc_ = 0.0;          // fractional CPU-ticks-per-sample accumulator
+    double acc_ = 0.0;          // накоплено от текущего выходного отсчёта (0..1)
     double filtered_ = 0.0;     // RC low-pass state (smooths square edges)
     double dc_ = 0.0;           // slow DC tracker for the high-pass (idle -> silence)
-    int level_ = 0;             // current speaker bit
+    int level_ = 0;             // текущий уровень динамика 0..7
     std::deque<int16_t> buf_;   // FIFO of generated samples (O(1) push/pop at both ends)
     std::mutex mtx_;
 };
