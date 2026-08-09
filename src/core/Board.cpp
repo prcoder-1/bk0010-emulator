@@ -32,6 +32,9 @@ enum : uint8_t {
     TIM_END        = 0200, // FL:  event flag (set on underflow)
 };
 static constexpr uint32_t TIMER_BASE_PERIOD = 128; // f/128
+// Задержка сброса флага готовности клавиатуры (бит 7 регистра 0177660) после чтения
+// кода из 0177662 — поведение ВП1-014 (GID: devemu/Board.cpp:1083).
+static constexpr uint64_t KBD_READY_CLEAR_TICKS = 900;
 
 // Lazily advance the counter based on how many CPU ticks have elapsed. Mirrors
 // bk/timer.c: the counter is only recomputed when a register is read.
@@ -101,8 +104,23 @@ void Board::timerSetMode(uint8_t mode) {
     timerCsr_ = mode;
 }
 
+// Команда RESET сбрасывает периферию (на PSW она НЕ влияет). Состав — как у GID
+// (devemu/Board.cpp:716-732): запрет прерываний от клавиатуры («проверено»),
+// обнуление выходного регистра порта и динамика, останов таймера. Входной регистр
+// порта (джойстик) не трогаем: это живые линии, а не защёлка.
+void Board::resetDevices() {
+    kbdStatus_ = 0100;          // бит 6 = маска прерываний: 1 — запрещены
+    keyIntPending_ = false;
+    kbdReadyClearAt_ = 0;
+    portOut_ = 0;
+    speaker_ = 0;
+    sysWriteFlag_ = false;
+    timerSetMode(0);            // остановить таймер
+}
+
 Board::Board() {
     mem_.setIoBus(this);
+    cpu_.setResetHook([this]() { resetDevices(); });
     // Feed the access heatmap (no-op unless the trace is enabled) and the
     // data watchpoints (no-op unless any are set).
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
@@ -138,7 +156,15 @@ int Board::stepCore() {
         vp037_.tick(2 * t);
     }
     totalTicks_ += static_cast<uint64_t>(t);
-    sound_.feed(speaker_ & 1, t);
+    sound_.feed(speaker_, t);
+    // Отложенный сброс флага готовности клавиатуры (см. ioRead REG_KBD_DATA).
+    if (kbdReadyClearAt_ && totalTicks_ >= kbdReadyClearAt_) {
+        kbdStatus_ &= ~0200;
+        kbdReadyClearAt_ = 0;
+    }
+    // Взведённые запросы разбираются после КАЖДОЙ команды, а не раз в кадр: иначе
+    // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
+    if (irqFramePending_ || keyIntPending_) tryDeliverInterrupts();
     if (trace_.enabled()) {
         uint16_t pcNow = cpu_.pc();
         int16_t delta = static_cast<int16_t>(pcNow - pcBefore);
@@ -195,6 +221,7 @@ void Board::reset() {
     kbdStatus_ = 0;    // bit 6 (0100) = interrupt MASK (0 => enabled), bit 7 = ready
     kbdData_ = 0;
     keyIntPending_ = false;
+    irqFramePending_ = false;
     keyHeld_ = false;
     keyIntVec_ = 060;
     // Timer power-on state: остановлен, счётчик и предел — «все единицы».
@@ -326,10 +353,11 @@ int Board::runTicks(int ticks) {
             break;
         }
         if (breakHit_) break;   // data watchpoint fired inside the instruction
-        if (cpu_.waiting()) { // idle: consume the rest of the frame quietly
-            cpu_.clearWait();
-            break;
-        }
+        // Простой по WAIT: остаток кадра пропускаем, но флаг ожидания НЕ снимаем —
+        // его снимает Cpu::interrupt(), и только там PC переставляется за команду
+        // WAIT. Если сбросить флаг здесь, пришедшее следующим кадром прерывание
+        // вернётся по RTI на тот же WAIT, и программа зависнет.
+        if (cpu_.waiting()) break;
     }
     screen_.setScroll(scroll_);
     return done;
@@ -410,6 +438,7 @@ bool Board::pressKey(uint16_t bkCode) {
     // не сбрасывая флаг за каждое нажатие, и получали бы код ПРЕДЫДУЩЕЙ клавиши.
     kbdData_ = bkCode & 0177;                 // 7-bit code -> 0177662
     kbdStatus_ |= 0200;                       // set "code ready"
+    kbdReadyClearAt_ = 0;                     // новый код отменяет отложенный сброс флага
     // Latch the interrupt vector: function keys / АР2 (bit 0200 set) go through
     // 0274, ordinary keys through 060. Whether the interrupt is actually delivered
     // is decided in deliverFrameInterrupts by the status bit-6 mask and the CPU
@@ -419,9 +448,19 @@ bool Board::pressKey(uint16_t bkCode) {
     return true;
 }
 
+// Кадровый запрос 50 Гц ЗАЩЁЛКИВАЕТСЯ, а не выдаётся мгновенно: если в этот момент
+// у процессора закрыта маска (программа в критической секции после MTPS #340),
+// прерывание должно дождаться её открытия, а не пропасть. Раньше оно терялось
+// целиком — отсюда рывки анимации и музыки. Реальный запрос разбирается в
+// tryDeliverInterrupts() после каждой команды, как это делает GID (devemu/CPU.cpp:413).
 void Board::deliverFrameInterrupts() {
+    irqFramePending_ = true;
+    tryDeliverInterrupts();
+}
+
+void Board::tryDeliverInterrupts() {
     if (cpu_.halted()) return;
-    if (cpu_.psw & 0200) return; // interrupts masked
+    if (cpu_.psw & 0200) return; // маска закрыта — запросы остаются взведёнными
 
     // A latched, not-yet-serviced key raises its interrupt first — but only while
     // the keyboard interrupt is enabled. On BK-0010 status bit 6 (0100) is the
@@ -438,7 +477,8 @@ void Board::deliverFrameInterrupts() {
         }
     }
 
-    if (mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
+    if (irqFramePending_ && mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
+        irqFramePending_ = false;
         cpu_.interrupt(Cpu::VEC_IRQ2);         // 0100 (50 Hz)
         trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
     }
@@ -641,7 +681,14 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
 bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
     switch (addr) {
     case REG_KBD_STATUS: value = kbdStatus_; return true;
-    case REG_KBD_DATA:   value = kbdData_; kbdStatus_ &= ~0200; return true;
+    case REG_KBD_DATA:
+        // Флаг готовности (бит 7 регистра 0177660) гаснет НЕ мгновенно, а примерно
+        // через 900 тактов ЦП после чтения кода — так ведёт себя ВП1-014
+        // (GID: devemu/Board.cpp:1081-1084, отсчёт :1855-1857). Программа, которая
+        // читает код и тут же перепроверяет готовность, на железе видит её ещё раз.
+        value = kbdData_;
+        if (!kbdReadyClearAt_) kbdReadyClearAt_ = totalTicks_ + KBD_READY_CLEAR_TICKS;
+        return true;
     case REG_SCROLL:     value = scroll_; return true;
     case REG_TIMER_LIM:  value = timerLimit_; return true;
     case REG_TIMER_CNT:  timerCheck(); value = timerCount_; return true;
@@ -655,6 +702,9 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
         // seeing the key even after the monitor's ISR has drained the code register.
         uint16_t v = 0100000 | 0200;
         if (!keyHeld_) v |= 0100; // no key held -> bit 6 high
+        // Бит 2 (004) — «была запись в системный регистр»: взводится любой записью,
+        // гасится чтением (внешняя схема ВР1, см. GID devemu/Board.cpp:1264-1268).
+        if (sysWriteFlag_) { v |= 004; sysWriteFlag_ = false; }
         value = v;
         return true;
     }
@@ -681,14 +731,26 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     case REG_TIMER_CNT: return true;                       // counter is read-only
     case REG_TIMER_CSR: timerSetMode(value & 0377); return true;
     case REG_SYS: {
+        sysWriteFlag_ = true;   // бит 2 на чтение: «была запись в системный регистр»
         const uint8_t was = speaker_;
-        speaker_ = (value >> 6) & 3; // bits 6,7: tape/speaker output
-        if (spkLogOn_ && ((was ^ speaker_) & 1)) {   // фронт пьезодинамика
-            spkLog_.push_back({totalTicks_, static_cast<uint8_t>(speaker_ & 1)});
+        // Динамик слышит сумму трёх бит (маска 0144): бит 6 — основной, биты 5 и 2
+        // подмешиваются в тот же аналоговый узел. Складываем их в уровень 0..7 так же,
+        // как GID (devemu/Speaker.cpp:132-139): бит 2 переносится в позицию 4, потом >>4.
+        uint16_t w = value & 0144;
+        if (w & 004) w |= 020;
+        speaker_ = static_cast<uint8_t>((w >> 4) & 7);
+        if (spkLogOn_ && was != speaker_) {          // смена уровня динамика
+            spkLog_.push_back({totalTicks_, speaker_});
             while (spkLog_.size() > spkLogCap_) spkLog_.pop_front();
         }
         return true;
     }
+    case REG_PORT:
+        // Параллельный порт — ДВА раздельных регистра: чтение отдаёт джойстик
+        // (входные линии), запись защёлкивается отдельно (принтер/ковокс).
+        // Раньше запись просто проглатывалась, и отладчику её видно не было.
+        portOut_ = value;
+        return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
     default:
         if (addr >= ADDR_IO_PAGE) return true; // swallow writes to I/O page
@@ -705,7 +767,8 @@ uint16_t Board::peekReg(uint16_t addr) const {
     case REG_TIMER_CNT:  return timerCount_;                     // as of the last read
     case REG_TIMER_CSR:  return static_cast<uint16_t>(0177400 | timerCsr_);
     case REG_PORT:       return joystick_;                       // джойстик на парал. порту
-    case REG_SYS:        return static_cast<uint16_t>(0100000 | 0200 | (keyHeld_ ? 0 : 0100)); // bit6=0 while a key is held
+    case REG_SYS:        return static_cast<uint16_t>(0100000 | 0200 | (keyHeld_ ? 0 : 0100)
+                                                      | (sysWriteFlag_ ? 004 : 0)); // без побочки: флаг не гасим
     case 0176560:        return 0;   // ИРПС (последовательный порт) — не эмулируется
     default:             return mem_.peekWord(addr);
     }

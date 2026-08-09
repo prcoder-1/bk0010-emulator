@@ -152,7 +152,13 @@ void Cpu::service(uint16_t vector) {
 }
 
 void Cpu::interrupt(uint16_t vector) {
-    waiting_ = false;
+    // Выход из WAIT по прерыванию: op_wait() откатывает PC на саму команду, чтобы
+    // она «исполнялась» повторно, пока ЦП простаивает. Но в стек обязан лечь адрес
+    // СЛЕДУЮЩЕЙ команды — иначе RTI вернёт нас на тот же WAIT и программа, которая
+    // синхронизируется с кадром штатной идиомой PDP-11, зависнет навсегда.
+    // Тот же приём в эталонном bk (in_wait_instr: main.c:546 -> service.c:162-165)
+    // и в GID BKemu (devemu/CPU.cpp:627-634).
+    if (waiting_) { waiting_ = false; r[7] += 2; }
     service(vector);
 }
 
@@ -564,7 +570,11 @@ int Cpu::op_rti()   { r[7] = pop(); psw = pop() & 0377; return OK; }
 int Cpu::op_rtt()   { r[7] = pop(); psw = pop() & 0377; return R_RTT; }
 int Cpu::op_bpt()   { return R_BPT; }
 int Cpu::op_iot()   { return R_IOT; }
-int Cpu::op_reset() { psw = 0200; return OK; }
+// RESET сбрасывает ПЕРИФЕРИЮ и не трогает PSW. Раньше здесь стояло `psw = 0200`
+// (порт из bk/weird.c, где сброса устройств тоже нет): это выставляло бит маски, и
+// кадровое прерывание не проходило до следующей записи PSW — «после RESET игра встала».
+// Сверено с GID: devemu/CPU.cpp:1111-1116 -> Board.cpp:716-732.
+int Cpu::op_reset() { if (resetHook_) resetHook_(); return OK; }
 int Cpu::op_emt()   { return R_EMT; }
 int Cpu::op_trap()  { return R_TRAP; }
 
@@ -764,7 +774,9 @@ int Cpu::step() {
     // обработчик 014 после каждой его команды подкручивает динамик по регистру
     // 0177716 и возвращается по RTT. Без T-бита обработчик не вызывается вовсе —
     // не будет ни звука, ни замедления, и игра летит на полной скорости ЦП.
-    if ((psw & CC_T) && res != R_RTT) service(VEC_TBIT);
+    // В режиме ожидания ловушка не срабатывает: WAIT «исполняется» повторно, и иначе
+    // обработчик 014 вызывался бы бесконечно, пока ЦП простаивает (GID: devemu/CPU.cpp:558).
+    if ((psw & CC_T) && res != R_RTT && res != R_WAIT) service(VEC_TBIT);
     return ticks;
 }
 

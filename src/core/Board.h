@@ -81,6 +81,9 @@ public:
     // геймпада (SDL2), выбранная раскладка — в классе Gamepad.
     void setJoystick(uint16_t bits) { joystick_ = bits; }
     uint16_t joystick() const { return joystick_; }
+    // Последнее значение, записанное программой в 0177714 (отдельный выходной
+    // регистр: принтер / ковокс). Чтение порта отдаёт джойстик, а не это.
+    uint16_t portOut() const { return portOut_; }
 
     // --- Breakpoints / debugger support ---
     void toggleBreakpoint(uint16_t addr) {
@@ -245,10 +248,15 @@ private:
     uint16_t kbdStatus_ = 0;    // 0177660: bit7 = code ready, bit6 = IRQ mask (0=enabled)
     uint16_t kbdData_   = 0;    // 0177662: the single latched key code (7 bits)
     bool     keyIntPending_ = false;
+    bool     irqFramePending_ = false;  // взведённый запрос кадрового прерывания 0100
     bool     keyHeld_ = false;   // physical key down (0177716 bit 6, active-low)
     uint16_t keyIntVec_ = 060;
-    uint8_t  speaker_   = 0;
-    uint16_t joystick_  = 0;     // 0177714: состояние джойстика (нажато = 1)
+    uint8_t  speaker_   = 0;     // уровень пьезодинамика 0..7 (биты 6,5,2 регистра 0177716)
+    uint16_t joystick_  = 0;     // 0177714 на ЧТЕНИЕ: состояние джойстика (нажато = 1)
+    uint16_t portOut_   = 0;     // 0177714 на ЗАПИСЬ: отдельная защёлка (принтер/ковокс)
+    bool     sysWriteFlag_ = false;   // бит 2 регистра 0177716: «была запись в системный регистр»
+    uint64_t kbdReadyClearAt_ = 0;    // такт отложенного сброса бита готовности (0 = не запланирован)
+    void resetDevices();              // сброс периферии по команде RESET
 
     // 1801VM1 programmable interval timer (0177706 limit / 0177710 counter /
     // 0177712 control). Decrements at f/128 (optionally /4, /16); sets the FL
@@ -293,7 +301,8 @@ private:
     uint16_t watchAddr_ = 0, watchPc_ = 0;
     void checkWatch(uint16_t addr, bool write, bool isByte);
 
-    void deliverFrameInterrupts(); // 50 Hz IRQ (vector 0100) + keyboard (0060)
+    void deliverFrameInterrupts(); // взвести кадровый запрос 50 Гц и попробовать выдать
+    void tryDeliverInterrupts();   // выдать взведённые запросы, если маска открыта
     int  stepCore();               // one instruction + sound/trace bookkeeping
 
     // EMT 36 handler: reads the tape/disk parameter block (address in R1) and

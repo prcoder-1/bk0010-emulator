@@ -57,6 +57,8 @@ public:
     // `EMT 036` instruction executes; if it returns true the call is considered
     // handled and the ROM handler (vector 030) is skipped. See Board::handleEmt36.
     void setEmt36Hook(std::function<bool()> h) { emt36Hook_ = std::move(h); }
+    // Команда RESET сбрасывает периферию — что именно, знает Board.
+    void setResetHook(std::function<void()> h) { resetHook_ = std::move(h); }
 
 private:
     Memory& mem_;
@@ -66,6 +68,7 @@ private:
     bool halted_ = false;
     bool waiting_ = false;
     std::function<bool()> emt36Hook_;  // EMT 36 intercept (true = handled, skip ROM)
+    std::function<void()> resetHook_;  // RESET: сброс периферии
 
     // Instruction-field accessors (bits of ir_).
     int srcMode() const { return (ir_ & 07000) >> 9; }
