@@ -16,6 +16,8 @@ class FlameWidget;
 class FlameChartWidget;
 class HotChartWidget;
 class AudioOut;
+#include <QElapsedTimer>
+
 class QTimer;
 class QLabel;
 
@@ -40,6 +42,7 @@ protected:
 
 private slots:
     void onTick();
+    void runOneSlice(int kSlices);   // один слайс кадра + раз в кадр — отрисовка
     void openBin();
     void resetMachine();
     void toggleColorMode();
@@ -98,5 +101,10 @@ private:
     bool colorMode_ = true;
     bool paused_ = false;       // Soft-ICE debugger overlay active
     bool suspended_ = false;    // emulation frozen via the Pause key
-    int  phase_ = 0;            // emulation sub-slice within the current 50 Hz frame
+    int  phase_ = 0;            // emulation sub-slice within the current frame
+    // Темп эмуляции привязан к РЕАЛЬНОМУ времени, а не к числу срабатываний таймера:
+    // кадр БК длится 61440 тактов = 20,48 мс, что целым числом миллисекунд в QTimer
+    // не выражается. Считаем, сколько слайсов должно было пройти к текущему моменту.
+    QElapsedTimer clock_;
+    qint64 slicesDone_ = 0;
 };

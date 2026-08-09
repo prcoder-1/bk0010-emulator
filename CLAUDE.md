@@ -50,11 +50,13 @@ Two layers, deliberately decoupled:
 
 - **`src/core/`** — pure C++, no Qt. `Board` owns everything and is the entry point:
   it wires `Cpu` + `Memory` + `Screen` + `Speaker` + `Trace`, implements the
-  memory-mapped I/O registers (`IoBus`), drives the 50 Hz frame loop, delivers
+  memory-mapped I/O registers (`IoBus`), drives the frame loop (48.83 Hz — see below), delivers
   interrupts, and does `.BIN` loading and save/restore of state.
 - **`src/ui/`** — Qt6. `MainWindow` owns a `Board`, drives it from a 50 Hz `QTimer`
-  (single-threaded — emulation runs in the GUI thread; one frame = ~60000 ticks is
-  fast enough), and hosts `GlScreen` + the debugger widgets.
+  (single-threaded — emulation runs in the GUI thread; one frame = 61440 ticks is
+  fast enough), and hosts `GlScreen` + the debugger widgets. The GUI paces itself by
+  REAL time (`QElapsedTimer`), not by timer ticks: a frame is 20.48 ms, which is not
+  an integral number of milliseconds.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
   as ~42 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
   run/step/step-over/step-out, regs/mem, break (optionally conditional) / watch
@@ -97,6 +99,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
   down-counter that passes through the negative half — which is what the common
   `TST @#177710 / BPL` wait idiom (and any program that never programs the limit)
   needs. See `docs/BK0010-hardware.md`.
+- **A frame is 61440 CPU ticks (48.83 Hz), not 60000/50 Hz.** `Board::ticksPerFrame()`
+  derives it from the raster geometry (`Vp037::CLKIN_PER_FRAME / 2`), so the emulator
+  frame and the 037 frame coincide exactly and `syncToFrameTop()` truncates nothing.
+  Documented in `~/БК0010/БК-docs/11-экран-и-клавиатура.md`.
 - **Interrupts are latched, not fire-and-forget**: `Board::deliverFrameInterrupts()` only
   raises `irqFramePending_`; `tryDeliverInterrupts()` runs after every instruction and
   delivers once the PSW mask opens. A request must never be dropped because the CPU
