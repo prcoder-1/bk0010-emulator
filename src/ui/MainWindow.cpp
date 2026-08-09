@@ -484,6 +484,9 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     }
 
     if (paused_) {
+        // Идёт правка значения на месте — все клавиши уходят в поле ввода,
+        // иначе цифры и Enter разошлись бы по командам отладчика.
+        if (overlay_->handleEditKey(e)) { e->accept(); return; }
         // --- Debugger controls (SoftICE overlay is visible) ---
         switch (e->key()) {
         case Qt::Key_F4:       runToCursor(); return;   // дойти до инструкции под курсором

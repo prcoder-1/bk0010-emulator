@@ -274,6 +274,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     // panel.
     int regW = 44 * cw + 14;
     QRect regRect(margin, margin, regW, lineH_ * 5);
+    regRect_ = regRect; cw_ = cw;   // для попадания мышью при правке
     p.fillRect(regRect, panelBg);
     p.setPen(border); p.drawRect(regRect);
     p.setPen(title); p.drawText(regRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— РЕГИСТРЫ —");
@@ -283,13 +284,18 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         // A register that changed since the last step is drawn in the "changed"
         // colour (classic Soft-ICE cue).
         p.setPen(havePrev_ && cpu.r[i] != prevR_[i] ? chg : fg);
-        QString s = QString("%1=%2").arg(nm[i]).arg(oct6(cpu.r[i]));
         int col = i % 4, row = i / 4;
-        p.drawText(rx + col * cw * 11, ry + row * lineH_, s);
+        const int x = rx + col * cw * 11, y = ry + row * lineH_;
+        p.drawText(x, y, QString("%1=").arg(nm[i]));
+        if (editTarget_ == EditTarget::Reg && editReg_ == i) drawEditField(p, x + cw * 3, y, fm);
+        else p.drawText(x + cw * 3, y, oct6(cpu.r[i]));
     }
+    regX_ = rx; regY_ = ry;
     p.setPen(havePrev_ && cpu.psw != prevPsw_ ? chg : fg);
-    p.drawText(rx, ry + 2 * lineH_, QString("PSW=%1  [%2]")
-        .arg(oct6(cpu.psw)).arg(flagsStr(cpu.psw)));
+    p.drawText(rx, ry + 2 * lineH_, QString("PSW="));
+    if (editTarget_ == EditTarget::Psw) drawEditField(p, rx + cw * 4, ry + 2 * lineH_, fm);
+    else p.drawText(rx + cw * 4, ry + 2 * lineH_, oct6(cpu.psw));
+    p.drawText(rx + cw * 12, ry + 2 * lineH_, QString("[%1]").arg(flagsStr(cpu.psw)));
     p.setPen(fg);
     p.drawText(rx + cw * 24, ry + 2 * lineH_,
         QString(cpu.halted() ? "СОСТ: ОСТАНОВ (HALT)" : "СОСТ: ПАУЗА"));
@@ -434,12 +440,18 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     // 7 monospace characters wide.
     int wpr = (memRect.width() - 20 - cw * 7) / (cw * 7);
     if (wpr < 1) wpr = 1; else if (wpr > 8) wpr = 8;
+    memWpr_ = wpr;
     uint16_t ma = memAddr_;
     int my = memRect.y() + lineH_ + lineH_;
     for (int r = 0; r < rows; ++r) {
         QString line = oct6(ma) + ":";
         for (int c = 0; c < wpr; ++c) line += " " + oct6(mem.peekWord(ma + c * 2));
         p.drawText(memRect.x() + 10, my, line);
+        if (editTarget_ == EditTarget::Mem && editAddr_ >= ma &&
+            editAddr_ < static_cast<uint16_t>(ma + wpr * 2) && !((editAddr_ - ma) & 1)) {
+            const int c = (editAddr_ - ma) / 2;
+            drawEditField(p, memRect.x() + 10 + cw * (7 + c * 7 + 1), my, fm);
+        }
         my += lineH_;
         ma += static_cast<uint16_t>(wpr * 2);
     }
@@ -522,12 +534,109 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     p.setPen(QColor(180, 200, 255));
     QString help = QString::fromUtf8(
         "F12-выход  F7/F8-шаг  F4-до курсора  F9-тчк  Esc-продолж  ↑↓-курсор  G-переход  Enter-цель  X-ссылки  ←→-назад/вперёд  "
-        "N-имя ;-коммент  данные:B/W/S/P U-код  ЛКМ-по адресу-переход  ПКМ-тчк");
+        "N-имя ;-коммент  данные:B/W/S/P U-код  ЛКМ-по адресу-переход  ПКМ-тчк  "
+        "ЛКМ по регистру/слову памяти-правка (0-7, Enter, Esc)");
     p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
+}
+
+// ---------------------------------------------------------------------------
+// Правка значения на месте
+// ---------------------------------------------------------------------------
+void DebuggerOverlay::beginEdit(EditTarget t, int reg, uint16_t addr) {
+    editTarget_ = t;
+    editReg_ = reg;
+    editAddr_ = addr;
+    editBuf_.clear();          // ввод начинается с пустого поля: набрал — применил
+    update();
+}
+
+void DebuggerOverlay::cancelEdit() {
+    editTarget_ = EditTarget::None;
+    editBuf_.clear();
+    update();
+}
+
+void DebuggerOverlay::commitEdit() {
+    if (editTarget_ == EditTarget::None) return;
+    if (!editBuf_.isEmpty()) {
+        bool ok = false;
+        const uint16_t v = static_cast<uint16_t>(editBuf_.toUInt(&ok, 8) & 0xFFFF);
+        if (ok) {
+            switch (editTarget_) {
+            case EditTarget::Reg: board_->cpu().r[editReg_ & 7] = v; break;
+            case EditTarget::Psw: board_->cpu().psw = v; break;
+            case EditTarget::Mem:
+                // Регистры В-В правим ЧЕРЕЗ ШИНУ, чтобы устройство увидело запись
+                // (иначе, скажем, правка 0177712 не перезапустила бы таймер).
+                // Обычную память — poke, минуя защиту ПЗУ: отладчику нужно уметь
+                // пропатчить и постоянную память.
+                if (editAddr_ >= bk::ADDR_IO_PAGE) board_->memory().writeWord(editAddr_, v);
+                else                               board_->memory().pokeWord(editAddr_, v);
+                break;
+            default: break;
+            }
+        }
+    }
+    editTarget_ = EditTarget::None;
+    editBuf_.clear();
+    // Снимок регистров НЕ обновляем: пусть исправленный регистр останется
+    // подсвеченным как изменившийся — это привычная подсказка в стиле Soft-ICE.
+    update();
+}
+
+bool DebuggerOverlay::handleEditKey(QKeyEvent* e) {
+    if (editTarget_ == EditTarget::None) return false;
+    switch (e->key()) {
+    case Qt::Key_Escape:    cancelEdit(); return true;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:     commitEdit(); return true;
+    case Qt::Key_Backspace: if (!editBuf_.isEmpty()) editBuf_.chop(1); update(); return true;
+    default: break;
+    }
+    const QString t = e->text();
+    if (t.size() == 1 && t[0] >= '0' && t[0] <= '7') {   // адреса и значения БК — восьмеричные
+        if (editBuf_.size() < 6) editBuf_ += t;
+        update();
+        return true;
+    }
+    return true;   // пока идёт правка, прочие клавиши в отладчик не пропускаем
+}
+
+void DebuggerOverlay::drawEditField(QPainter& p, int x, int baselineY, const QFontMetrics& fm) const {
+    const QRect r(x - 1, baselineY - fm.ascent(), cw_ * 7 + 2, fm.height());
+    p.fillRect(r, QColor(230, 200, 40));
+    const QPen prev = p.pen();
+    p.setPen(Qt::black);
+    p.drawText(x, baselineY, editBuf_ + "_");
+    p.setPen(prev);
 }
 
 void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
     const QPoint pos = e->pos();
+    // Идёт правка: клик в стороне — отмена (чтобы не залипало).
+    if (editing()) { cancelEdit(); return; }
+    // Панель регистров: клик по значению начинает его правку.
+    if (regRect_.contains(pos) && e->button() == Qt::LeftButton) {
+        const int row = (pos.y() - (regY_ - lineH_) + lineH_) / lineH_ - 1;
+        const int col = (pos.x() - regX_) / (cw_ * 11);
+        if (row == 2) { beginEdit(EditTarget::Psw, 0, 0); return; }   // строка PSW
+        if (row >= 0 && row <= 1 && col >= 0 && col <= 3) {
+            beginEdit(EditTarget::Reg, row * 4 + col, 0);
+            return;
+        }
+        return;
+    }
+    // Дамп памяти: клик по слову начинает его правку.
+    if (memRect_.contains(pos) && e->button() == Qt::LeftButton) {
+        const int r = (pos.y() - (memRect_.y() + 2 * lineH_) + lineH_) / lineH_;
+        const int chars = (pos.x() - (memRect_.x() + 10)) / cw_;
+        const int c = (chars - 7) / 7;
+        if (r >= 0 && chars >= 7 && c >= 0 && c < memWpr_) {
+            beginEdit(EditTarget::Mem, 0,
+                      static_cast<uint16_t>(memAddr_ + (r * memWpr_ + c) * 2));
+        }
+        return;
+    }
     // Breakpoints panel: left click jumps the disassembler to the breakpoint,
     // right click removes it.
     if (bpRect_.contains(pos)) {
