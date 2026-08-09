@@ -287,13 +287,13 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         int col = i % 4, row = i / 4;
         const int x = rx + col * cw * 11, y = ry + row * lineH_;
         p.drawText(x, y, QString("%1=").arg(nm[i]));
-        if (editTarget_ == EditTarget::Reg && editReg_ == i) drawEditField(p, x + cw * 3, y, fm);
+        if (editTarget_ == EditTarget::Reg && editReg_ == i) drawEditField(p, x + cw * 3, y, fm, oct6(cpu.r[i]));
         else p.drawText(x + cw * 3, y, oct6(cpu.r[i]));
     }
     regX_ = rx; regY_ = ry;
     p.setPen(havePrev_ && cpu.psw != prevPsw_ ? chg : fg);
     p.drawText(rx, ry + 2 * lineH_, QString("PSW="));
-    if (editTarget_ == EditTarget::Psw) drawEditField(p, rx + cw * 4, ry + 2 * lineH_, fm);
+    if (editTarget_ == EditTarget::Psw) drawEditField(p, rx + cw * 4, ry + 2 * lineH_, fm, oct6(cpu.psw));
     else p.drawText(rx + cw * 4, ry + 2 * lineH_, oct6(cpu.psw));
     p.drawText(rx + cw * 12, ry + 2 * lineH_, QString("[%1]").arg(flagsStr(cpu.psw)));
     p.setPen(fg);
@@ -450,7 +450,8 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         if (editTarget_ == EditTarget::Mem && editAddr_ >= ma &&
             editAddr_ < static_cast<uint16_t>(ma + wpr * 2) && !((editAddr_ - ma) & 1)) {
             const int c = (editAddr_ - ma) / 2;
-            drawEditField(p, memRect.x() + 10 + cw * (7 + c * 7 + 1), my, fm);
+            drawEditField(p, memRect.x() + 10 + cw * (7 + c * 7 + 1), my, fm,
+                          oct6(mem.peekWord(editAddr_)));
         }
         my += lineH_;
         ma += static_cast<uint16_t>(wpr * 2);
@@ -461,6 +462,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     int sregH = 10 * lineH_ + 8;
     QRect stkRect(mx, memRect.bottom() + margin, mw,
                   dTop + dH - sregH - 2 * margin - memRect.bottom());
+    stkRect_ = stkRect;   // для попадания мышью при правке
     p.fillRect(stkRect, panelBg);
     p.setPen(border); p.drawRect(stkRect);
     p.setPen(title); p.drawText(stkRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— СТЕК (SP) —");
@@ -475,6 +477,10 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         QString sym = symLabel(val);
         if (!sym.isEmpty()) { p.setPen(fg); }
         p.drawText(stkRect.x() + 10, sy, line);
+        // Значение в стеке правится так же, как слово в дампе: колонка значения
+        // начинается после "оооооо: " — восьми знакомест.
+        if (editTarget_ == EditTarget::Stack && editAddr_ == sa)
+            drawEditField(p, stkRect.x() + 10 + cw * 8, sy, fm, oct6(val));
         if (!sym.isEmpty()) {
             p.setPen(symCol);
             int ax = stkRect.x() + 10 + fm.horizontalAdvance(line + "  ");
@@ -535,7 +541,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     QString help = QString::fromUtf8(
         "F12-выход  F7/F8-шаг  F4-до курсора  F9-тчк  Esc-продолж  ↑↓-курсор  G-переход  Enter-цель  X-ссылки  ←→-назад/вперёд  "
         "N-имя ;-коммент  данные:B/W/S/P U-код  ЛКМ-по адресу-переход  ПКМ-тчк  "
-        "ЛКМ по регистру/слову памяти-правка (0-7, Enter, Esc)");
+        "ЛКМ по регистру/стеку/памяти-правка (0-7, Enter, Esc)");
     p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
 }
 
@@ -565,6 +571,7 @@ void DebuggerOverlay::commitEdit() {
             switch (editTarget_) {
             case EditTarget::Reg: board_->cpu().r[editReg_ & 7] = v; break;
             case EditTarget::Psw: board_->cpu().psw = v; break;
+            case EditTarget::Stack:
             case EditTarget::Mem:
                 // Регистры В-В правим ЧЕРЕЗ ШИНУ, чтобы устройство увидело запись
                 // (иначе, скажем, правка 0177712 не перезапустила бы таймер).
@@ -602,12 +609,26 @@ bool DebuggerOverlay::handleEditKey(QKeyEvent* e) {
     return true;   // пока идёт правка, прочие клавиши в отладчик не пропускаем
 }
 
-void DebuggerOverlay::drawEditField(QPainter& p, int x, int baselineY, const QFontMetrics& fm) const {
-    const QRect r(x - 1, baselineY - fm.ascent(), cw_ * 7 + 2, fm.height());
-    p.fillRect(r, QColor(230, 200, 40));
+void DebuggerOverlay::drawEditField(QPainter& p, int x, int baselineY, const QFontMetrics& fm,
+                                    const QString& current) const {
     const QPen prev = p.pen();
-    p.setPen(Qt::black);
-    p.drawText(x, baselineY, editBuf_ + "_");
+    const QRect r(x - 1, baselineY - fm.ascent(), cw_ * 7 + 2, fm.height());
+    // Заливка ПОЛУПРОЗРАЧНАЯ: сплошная съедала цифры, да и весь оверлей полупрозрачный
+    // по смыслу — сквозь него виден экран БК. Поле выделяем рамкой, а не заливкой.
+    p.fillRect(r, QColor(230, 200, 40, 60));
+    p.setPen(QColor(255, 220, 80));
+    p.drawRect(r);
+    if (editBuf_.isEmpty()) {
+        // Пока ничего не набрано, показываем прежнее значение приглушённым —
+        // иначе не видно, что именно правишь.
+        p.setPen(QColor(150, 150, 150));
+        p.drawText(x, baselineY, current);
+        p.setPen(QColor(255, 240, 120));
+        p.drawText(x + cw_ * current.size(), baselineY, "_");
+    } else {
+        p.setPen(QColor(255, 240, 120));
+        p.drawText(x, baselineY, editBuf_ + "_");
+    }
     p.setPen(prev);
 }
 
@@ -624,6 +645,15 @@ void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
             beginEdit(EditTarget::Reg, row * 4 + col, 0);
             return;
         }
+        return;
+    }
+    // Стек: клик по колонке значения начинает правку слова по этому адресу.
+    // Строка имеет вид "оооооо: оооооо", значение начинается с 8-го знакоместа.
+    if (stkRect_.contains(pos) && e->button() == Qt::LeftButton) {
+        const int r = (pos.y() - (stkRect_.y() + 2 * lineH_) + lineH_) / lineH_;
+        const int chars = (pos.x() - (stkRect_.x() + 10)) / cw_;
+        if (r >= 0 && chars >= 8 && chars < 14)
+            beginEdit(EditTarget::Stack, 0, static_cast<uint16_t>(board_->cpu().sp() + r * 2));
         return;
     }
     // Дамп памяти: клик по слову начинает его правку.
