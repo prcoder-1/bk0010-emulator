@@ -516,6 +516,18 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     p.setPen(QColor(150, 180, 230));
     p.drawText(srx + 20 * cw, sregRect.y() + lineH_, "запись");
     p.drawText(srx + 27 * cw, sregRect.y() + lineH_, "чтение");
+    // Где сейчас луч: строка развёртки и фаза. Модель Vp037 это знает, а при
+    // отладке видеоэффектов и гонок с ВОЗУ без этого не обойтись.
+    {
+        const auto& tv = board_->vp037();
+        const QString phase = tv.vgate() ? QString::fromUtf8("кадр.гаш")
+                            : tv.hgate() ? QString::fromUtf8("строч.гаш")
+                                         : QString::fromUtf8("видимая");
+        p.setPen(tv.inActiveDisplay() ? chg : fg);
+        p.drawText(srx, sregRect.y() + lineH_,
+                   QString::fromUtf8("луч %1 %2").arg(tv.scanline(), 3).arg(phase));
+        p.setPen(fg);
+    }
     int gy = sregRect.y() + lineH_ + lineH_;
     for (const auto& sr : sregs) {
         if (gy > sregRect.bottom()) break;

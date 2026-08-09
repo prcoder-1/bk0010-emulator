@@ -215,9 +215,14 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_read_mem", "Read memory as octal words (or bytes).",
         schema({{"addr", addrArg}, {"len", P("integer", "Number of bytes (default 32)")},
                 {"format", P("string", "words|bytes (default words)")}}, {"addr"})));
-    t.append(tool("bk_write_mem", "Write words or bytes to memory.",
+    t.append(tool("bk_write_mem", "Write words or bytes to memory. Addresses in the I/O page "
+                  "(>= 0177600) go THROUGH THE BUS by default, so the device actually sees the "
+                  "write (e.g. poking 0177712 restarts the timer); ordinary memory is written "
+                  "directly, bypassing ROM protection so you can patch ROM. `bus` overrides.",
         schema({{"addr", addrArg}, {"words", P("array", "Array of 16-bit words")},
-                {"bytes", P("array", "Array of bytes")}}, {"addr"})));
+                {"bytes", P("array", "Array of bytes")},
+                {"bus", P("boolean", "Force writing through the bus (true) or straight into "
+                                     "memory (false); default: auto by address")}}, {"addr"})));
     t.append(tool("bk_disasm", "Disassemble instructions.",
         schema({{"addr", P("string", "Address/symbol, or 'pc' for the current PC (default pc)")},
                 {"count", P("integer", "Instruction count (default 16)")}})));
@@ -813,16 +818,35 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
     }
     if (name == "bk_write_mem") {
         uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+        // Страницу В-В пишем ЧЕРЕЗ ШИНУ, чтобы устройство увидело запись (иначе
+        // правка 0177712 не перезапустила бы таймер, а 0177664 — не сдвинула экран).
+        // Обычную память — poke, минуя защиту ПЗУ: отладчику нужно уметь пропатчить
+        // и постоянную память. Явный флаг bus перекрывает это правило.
+        const bool viaBus = args.contains("bus") ? args.value("bus").toBool()
+                                                 : (a >= bk::ADDR_IO_PAGE);
         int n = 0;
         if (args.contains("words")) {
             QJsonArray w = args.value("words").toArray();
-            for (const auto& v : w) { long x; parseNumber(v, x); board_.memory().pokeWord((uint16_t)(a + n * 2), x & 0xFFFF); ++n; }
-            return textContent(QString("Wrote %1 words at %2.").arg(n).arg(oct6(a)));
+            for (const auto& v : w) {
+                long x; parseNumber(v, x);
+                const uint16_t ad = (uint16_t)(a + n * 2), val = (uint16_t)(x & 0xFFFF);
+                if (viaBus) board_.memory().writeWord(ad, val); else board_.memory().pokeWord(ad, val);
+                ++n;
+            }
+            return textContent(QString("Wrote %1 words at %2 (%3).").arg(n).arg(oct6(a))
+                                   .arg(viaBus ? "через шину" : "напрямую в память"));
         }
         if (args.contains("bytes")) {
             QJsonArray b = args.value("bytes").toArray();
-            for (const auto& v : b) { long x; parseNumber(v, x); board_.memory().pokeByte((uint16_t)(a + n), x & 0xFF); ++n; }
-            return textContent(QString("Wrote %1 bytes at %2.").arg(n).arg(oct6(a)));
+            for (const auto& v : b) {
+                long x; parseNumber(v, x);
+                const uint16_t ad = (uint16_t)(a + n);
+                if (viaBus) board_.memory().writeByte(ad, (uint8_t)(x & 0xFF));
+                else        board_.memory().pokeByte(ad, (uint8_t)(x & 0xFF));
+                ++n;
+            }
+            return textContent(QString("Wrote %1 bytes at %2 (%3).").arg(n).arg(oct6(a))
+                                   .arg(viaBus ? "через шину" : "напрямую в память"));
         }
         return fail("provide 'words' or 'bytes'");
     }
@@ -1583,14 +1607,20 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             "  Scroll    0177664=%5\n"
             "  Timer     limit 0177706=%6  count 0177710=%7  csr 0177712=%8 [%9]\n"
             "  Port      0177714=%10  [%11]  раскладка=%12\n"
-            "  System    0177716=%13  (key-held bit6=%14)")
+            "  System    0177716=%13  (key-held bit6=%14)\n"
+            "  Развёртка строка %15/320 %16%17")
             .arg(oct6(r(0177660))).arg(oct6(r(0177662))).arg(board_.keyReady() ? "code ready" : "empty")
             .arg(keyLabel(r(0177662)))
             .arg(oct6(r(0177664)))
             .arg(oct6(r(0177706))).arg(oct6(r(0177710))).arg(oct6(csr)).arg(timerBits.trimmed().isEmpty() ? "stopped" : timerBits.trimmed())
             .arg(oct6(port)).arg(QString::fromStdString(bk::joyDecode(joyStd_, port)))
             .arg(bk::joyStandardName(joyStd_))
-            .arg(oct6(sys)).arg((sys & 0100) ? "1(up) — отпущена" : "0(down) — УДЕРЖИВАЕТСЯ"));
+            .arg(oct6(sys)).arg((sys & 0100) ? "1(up) — отпущена" : "0(down) — УДЕРЖИВАЕТСЯ")
+            .arg(board_.vp037().scanline())
+            .arg(board_.vp037().vgate() ? "кадровое гашение"
+                 : board_.vp037().hgate() ? "строчное гашение" : "видимая часть")
+            .arg(board_.vp037().inActiveDisplay() ? " (037 занимает шину: такты ожидания ДОЗУ)"
+                                                  : ""));
     }
     if (name == "bk_io_log") {
         if (args.contains("enable")) {

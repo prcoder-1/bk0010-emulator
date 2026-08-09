@@ -44,7 +44,7 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     tr.setEnabled(true); // ensure data is being collected while the view is open
 
     const bool word16 = (bpp == 16);        // 16 bpp: one pixel per 16-bit word (RGB565)
-    int pxPerByte = (bpp == 1) ? 8 : (bpp == 4 ? 2 : 1);
+    int pxPerByte = (bpp == 1) ? 8 : (bpp == 2 ? 4 : (bpp == 4 ? 2 : 1));
     int imgW = word16 ? (bytesPerRow / 2) : (bytesPerRow * pxPerByte);
     if (imgW <= 0) return;
 
@@ -144,6 +144,16 @@ void MemCanvas::paintEvent(QPaintEvent*) {
                 QRgb base = color ? colorMap(v ? 15 : 0) : (v ? qRgb(220,220,220) : qRgb(0,0,0));
                 img.setPixel(px + b, row, tint(base, hr, hw, he, act));
             }
+        } else if (bpp == 2) {
+            // Как цветной экран БК: 2 бита на точку, младшие биты слева, палитра 0
+            // (чёрный / синий / зелёный / красный). В этом режиме сразу видно
+            // спрайты и экранные буферы в том виде, в каком их рисует машина.
+            static const QRgb kBkPal[4] = {qRgb(0,0,0), qRgb(0,0,255), qRgb(0,255,0), qRgb(255,0,0)};
+            for (int n = 0; n < 4; ++n) {
+                const int v = (byte >> (n * 2)) & 3;
+                const QRgb base = color ? kBkPal[v] : qRgb(v * 85, v * 85, v * 85);
+                img.setPixel(px + n, row, tint(base, hr, hw, he, act));
+            }
         } else if (bpp == 4) {
             for (int n = 0; n < 2; ++n) {
                 int v = (byte >> (n * 4)) & 15;
@@ -216,7 +226,7 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     setWindowTitle("Визуализация памяти БК-0010");
     canvas_ = new MemCanvas(board, this);
 
-    auto* bpp = new QComboBox; bpp->addItems({"1 бит", "4 бита", "8 бит", "16 бит"}); bpp->setCurrentIndex(1);
+    auto* bpp = new QComboBox; bpp->addItems({"1 бит", "2 бита (БК)", "4 бита", "8 бит", "16 бит"}); bpp->setCurrentIndex(2);
     auto* mode = new QComboBox; mode->addItems({"Ч/Б", "Цвет"}); mode->setCurrentIndex(1);
     auto* heat = new QCheckBox("Тепловая карта"); heat->setChecked(true);
     auto* showRom = new QCheckBox("Показать ПЗУ"); // ROM hidden by default
@@ -226,8 +236,8 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     auto* row = new QSpinBox; row->setRange(8, 512); row->setValue(64); row->setPrefix("шир ");
 
     auto apply = [=] {
-        static const int bppVals[4] = {1, 4, 8, 16};
-        canvas_->bpp = bppVals[std::clamp(bpp->currentIndex(), 0, 3)];
+        static const int bppVals[5] = {1, 2, 4, 8, 16};
+        canvas_->bpp = bppVals[std::clamp(bpp->currentIndex(), 0, 4)];
         canvas_->color = (mode->currentIndex() == 1);
         canvas_->heatmap = heat->isChecked();
         canvas_->hideRom = !showRom->isChecked();
