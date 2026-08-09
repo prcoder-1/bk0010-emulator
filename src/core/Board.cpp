@@ -79,6 +79,22 @@ void Board::timerCheck() {
     }
 }
 
+// Верх кадра: доотрисовать хвост предыдущего кадра и начать новый с нулевой строки,
+// затем выровнять фазу 037 к VSYNC.
+void Board::beginFrameRaster() {
+    if (scanlineRender_) { renderScanlinesUpTo(Screen::TEX_H); renderedLine_ = 0; }
+    if (arb037_ || scanlineRender_) vp037_.syncToFrameTop();
+}
+
+// Догнать построчную отрисовку до строки `line` (строки ДО неё луч уже прошёл).
+void Board::renderScanlinesUpTo(int line) {
+    if (line > Screen::TEX_H) line = Screen::TEX_H;
+    while (renderedLine_ < line) {
+        screen_.renderLine(mem_, renderedLine_, scroll_);
+        ++renderedLine_;
+    }
+}
+
 // Record a frame-synchronisation boundary at the current tick (deduped, capped).
 // The timer may cross zero several times between two register reads, but a game
 // paces one frame per crossing it observes, so one boundary per timerCheck edge
@@ -154,7 +170,11 @@ int Board::stepCore() {
         // инструкции и продвинуть фазу 037 в лок-степе (1 такт ЦП = 2 такта CLKIN).
         t += pendingWaitClkin_ / 2;
         vp037_.tick(2 * t);
+    } else if (scanlineRender_) {
+        vp037_.tick(2 * t);   // фаза нужна и без арбитража — по ней рисуются строки
     }
+    // Луч ушёл вперёд — дорисовать пройденные строки текущим значением скролла.
+    if (scanlineRender_) renderScanlinesUpTo(vp037_.scanline());
     totalTicks_ += static_cast<uint64_t>(t);
     sound_.feed(speaker_, t);
     // Отложенный сброс флага готовности клавиатуры (см. ioRead REG_KBD_DATA).
@@ -377,10 +397,7 @@ bool Board::runUntil(uint16_t addr, int maxTicks) {
         // Прогон отладчика обязан продолжать выдавать кадровые прерывания 50 Гц:
         // подпрограмма, которая ждёт кадра (или стоит на WAIT), иначе не дождётся
         // никогда, и «шаг с обходом»/«до адреса» просто упрётся в лимит тактов.
-        if (frameTicks == 0) {
-            if (arb037_) vp037_.syncToFrameTop();
-            deliverFrameInterrupts();
-        }
+        if (frameTicks == 0) { beginFrameRaster(); deliverFrameInterrupts(); }
         int t = stepCore();
         done += t; frameTicks += t;
         if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
@@ -398,10 +415,7 @@ bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
     int done = 0, frameTicks = 0;
     while (done < maxTicks) {
         if (cpu_.halted()) { screen_.setScroll(scroll_); return false; }
-        if (frameTicks == 0) {                           // keep the 50 Hz IRQ alive
-            if (arb037_) vp037_.syncToFrameTop();
-            deliverFrameInterrupts();
-        }
+        if (frameTicks == 0) { beginFrameRaster(); deliverFrameInterrupts(); }  // 50 Hz IRQ
         int t = stepCore();
         done += t; frameTicks += t;
         if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
@@ -414,7 +428,7 @@ bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
 }
 
 void Board::runFrame() {
-    if (arb037_) vp037_.syncToFrameTop();   // выровнять фазу 037 к верху кадра (VSYNC)
+    beginFrameRaster();                     // верх кадра: доотрисовать прошлый, ресинк 037
     deliverFrameInterrupts();
     runTicks(ticksPerFrame());
     trace_.tick();
@@ -424,7 +438,7 @@ void Board::runFrame() {
 void Board::runFrameSlice(int slice, int nslices) {
     if (nslices < 1) nslices = 1;
     if (slice <= 0) {
-        if (arb037_) vp037_.syncToFrameTop();   // верх кадра (VSYNC) — ресинк фазы 037
+        beginFrameRaster();                     // верх кадра (VSYNC)
         deliverFrameInterrupts(); sliceIdle_ = false; sliceFrameTicks_ = 0;
     }
     if (!sliceIdle_) {

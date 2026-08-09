@@ -193,7 +193,7 @@ void MainWindow::onTick() {
 
 void MainWindow::renderScreen() {
     board_->screen().setColorMode(colorMode_);
-    board_->screen().render(board_->memory());
+    if (!board_->scanlineRender()) board_->screen().render(board_->memory());
     screen_->setFrame(board_->screen().pixels());
 }
 

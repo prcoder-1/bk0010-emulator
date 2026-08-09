@@ -22,7 +22,11 @@ public:
     void setScroll(uint16_t reg) { scroll_ = reg; }
 
     // Rebuild the RGBA texture from the current screen RAM contents.
+    // Отрисовать весь кадр текущим значением скролла (покадровый режим).
     void render(const Memory& mem);
+    // Отрисовать одну строку заданным значением регистра 0177664 — построчный режим,
+    // которым Board рисует кадр по мере движения луча (см. Board::setScanlineRender).
+    void renderLine(const Memory& mem, int y, uint16_t scrollReg);
 
     const uint32_t* pixels() const { return tex_; }
 

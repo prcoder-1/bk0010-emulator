@@ -27,47 +27,53 @@ Screen::Screen() {
     for (auto& p : tex_) p = 0xFF000000;
 }
 
-void Screen::render(const Memory& mem) {
+// Отрисовать ОДНУ строку экрана значением регистра смещения, каким оно было, когда
+// луч эту строку проходил. Отсюда берутся построчные эффекты (параллакс, «разрезанный»
+// экран): при покадровой отрисовке весь кадр рисуется последним значением скролла,
+// и всё, что игра меняла в середине кадра, теряется.
+void Screen::renderLine(const Memory& mem, int y, uint16_t scrollReg) {
+    if (y < 0 || y >= TEX_H) return;
     const uint32_t* pal = kPalettes[palette_];
     const uint32_t white = 0xFFFFFFFF, black = 0xFF000000;
     // Scroll: register low byte gives the memory line shown at the top.
     // Default 0330 -> offset 0. Vertical scroll shifts the visible window.
-    int scrollOffset = ((int)(scroll_ & 0377) - 0330) & 0377;
-
+    const int scrollOffset = ((int)(scrollReg & 0377) - 0330) & 0377;
     // Бит 9 (01000) — режим экрана: установлен = полный экран (256 строк,
     // 040000..077777); сброшен = «малый экран» (режим расширения памяти) — видны
     // только 64 строки окна прокрутки (при штатной настройке это 070000..077777),
     // остальные 3/4 экрана — чёрные, а 040000..067777 отданы под ОЗУ пользователя.
-    const int nlines = (scroll_ & 01000) ? TEX_H : 64;
+    const int nlines = (scrollReg & 01000) ? TEX_H : 64;
 
-    for (int y = 0; y < TEX_H; ++y) {
-        uint32_t* dst = tex_ + y * TEX_W;
-        if (y >= nlines) {                            // малый экран: низ — чёрный
-            for (int x = 0; x < TEX_W; ++x) *dst++ = black;
-            continue;
+    uint32_t* dst = tex_ + y * TEX_W;
+    if (y >= nlines) {                            // малый экран: низ — чёрный
+        for (int x = 0; x < TEX_W; ++x) *dst++ = black;
+        return;
+    }
+    const int memLine = (y + scrollOffset) & 0377;      // 0..255
+    const uint8_t* row = mem.videoRam() + memLine * 64; // 64 bytes/line
+
+    if (colorMode_) {
+        // 256 pixels wide, 2 bits/pixel; double horizontally to fill 512.
+        for (int bx = 0; bx < 64; ++bx) {
+            uint8_t b = row[bx];
+            for (int p = 0; p < 4; ++p) {
+                uint32_t c = pal[(b >> (p * 2)) & 3];
+                *dst++ = c;
+                *dst++ = c; // horizontal doubling
+            }
         }
-        int memLine = (y + scrollOffset) & 0377;      // 0..255
-        const uint8_t* row = mem.videoRam() + memLine * 64; // 64 bytes/line
-
-        if (colorMode_) {
-            // 256 pixels wide, 2 bits/pixel; double horizontally to fill 512.
-            for (int bx = 0; bx < 64; ++bx) {
-                uint8_t b = row[bx];
-                for (int p = 0; p < 4; ++p) {
-                    uint32_t c = pal[(b >> (p * 2)) & 3];
-                    *dst++ = c;
-                    *dst++ = c; // horizontal doubling
-                }
-            }
-        } else {
-            // 512 pixels wide, 1 bit/pixel (mono).
-            for (int bx = 0; bx < 64; ++bx) {
-                uint8_t b = row[bx];
-                for (int p = 0; p < 8; ++p)
-                    *dst++ = (b >> p) & 1 ? white : black;
-            }
+    } else {
+        // 512 pixels wide, 1 bit/pixel (mono).
+        for (int bx = 0; bx < 64; ++bx) {
+            uint8_t b = row[bx];
+            for (int p = 0; p < 8; ++p)
+                *dst++ = (b >> p) & 1 ? white : black;
         }
     }
+}
+
+void Screen::render(const Memory& mem) {
+    for (int y = 0; y < TEX_H; ++y) renderLine(mem, y, scroll_);
 }
 
 } // namespace bk

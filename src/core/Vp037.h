@@ -69,6 +69,13 @@ public:
     bool vgate() const { return vgate_; }
     int  lc()    const { return lc_; }
 
+    // Номер строки развёртки от начала кадра (0..319; видимые — первые 256).
+    // Считается по тактам CLKIN, а не из LC: LC — убывающий счётчик с XOR-переключением
+    // старших бит, и восстанавливать из него «строку экрана» хрупко. Ресинк — в
+    // syncToFrameTop(), который эмулятор зовёт на каждом кадровом прерывании.
+    static constexpr int CLKIN_PER_LINE = 384;
+    int scanline() const { return static_cast<int>(frameClk_ / CLKIN_PER_LINE); }
+
     // Упаковка фазы развёртки для снимка состояния: где именно стоял луч, влияет на
     // такты ожидания ДОЗУ, а с построчной отрисовкой будет влиять и на картинку.
     uint32_t pack() const {
@@ -92,6 +99,7 @@ private:
     bool     hgate_ = false;  // HGATE    — горизонтальное гашение
     bool     vgate_ = true;   // VGATE    — кадровое гашение (1 = гашение)
     bool     m256_  = true;   // полный (true) / малый (false) экран
+    uint32_t frameClk_ = 0;   // тактов CLKIN от начала кадра (для scanline())
 };
 
 } // namespace bk
