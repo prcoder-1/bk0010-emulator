@@ -15,8 +15,12 @@ public:
 
     void setEnabled(bool e) { enabled_ = e; }
 
-    // Advance by `ticks` CPU ticks with the speaker driven to `bit` (0/1).
-    void feed(int bit, int ticks);
+    // Advance by `ticks` CPU ticks with the speaker driven to `level` (0..7).
+    // Пьезодинамик БК слышит сумму ТРЁХ бит регистра 0177716 (маска 0144): бит 6 —
+    // основной, биты 5 и 2 подмешиваются в тот же аналоговый узел через другие
+    // сопротивления. Отсюда 8 уровней, а не 2, — на них построен ШИМ-звук ряда игр.
+    // Относительные амплитуды взяты из GID BKemu (devemu/Speaker.cpp:116-126).
+    void feed(int level, int ticks);
 
     // Drain up to `maxSamples` into out; returns the number produced.
     // Plain FIFO drain — missing samples (underrun) are filled with the last

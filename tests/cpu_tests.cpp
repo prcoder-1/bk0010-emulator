@@ -268,7 +268,13 @@ int main() {
         // «клавиша нажата» и должны видеть код ПОСЛЕДНЕЙ клавиши, а не застрявший.
         CHECK(b.pressKey(0102), "keyboard: second key overwrites unread code");
         CHECK((b.memory().readWord(0177662) & 0177) == 0102, "keyboard: register holds LATEST code");
-        CHECK(!b.keyReady(), "keyboard: ready flag cleared on read");
+        // Флаг готовности гаснет НЕ мгновенно, а через ~900 тактов после чтения кода
+        // (ВП1-014). Сразу после чтения он ещё стоит.
+        CHECK(b.keyReady(), "keyboard: флаг готовности ещё стоит сразу после чтения");
+        b.memory().pokeWord(01000, 000777);   // BR . — крутимся на месте
+        b.cpu().reset(01000);
+        b.runTicks(1000);
+        CHECK(!b.keyReady(), "keyboard: флаг готовности гаснет через ~900 тактов");
         CHECK(b.pressKey(0103), "keyboard: next key latched after previous was read");
         CHECK((b.memory().readWord(0177662) & 0177) == 0103, "keyboard: register holds next code");
         // Register 0177716 bit 6 (key-pressed, active-low) tracks the *physical*
@@ -439,12 +445,68 @@ int main() {
     {
         Board b; b.reset();
         b.setSpeakerLog(true);
-        b.memory().writeWord(0177716, 0100);   // бит 6 -> 1
+        b.memory().writeWord(0177716, 0100);   // бит 6 -> уровень 4
         b.memory().writeWord(0177716, 0100);   // повтор — не фронт
-        b.memory().writeWord(0177716, 0);      // бит 6 -> 0
+        b.memory().writeWord(0177716, 0);      // -> уровень 0
         const auto& sl = b.speakerLog();
-        CHECK(sl.size() == 2, "пишутся только фронты");
-        if (sl.size() == 2) CHECK(sl[0].level == 1 && sl[1].level == 0, "уровни фронтов");
+        CHECK(sl.size() == 2, "пишутся только смены уровня");
+        if (sl.size() == 2) CHECK(sl[0].level == 4 && sl[1].level == 0, "уровни динамика");
+    }
+
+    // ---- Динамик: 8 уровней из битов 6, 5 и 2 регистра 0177716 ----
+    {
+        Board b; b.reset();
+        b.setSpeakerLog(true);
+        struct { uint16_t reg; uint8_t level; } cases[] = {
+            {0000, 0}, {0004, 1}, {0040, 2}, {0044, 3},
+            {0100, 4}, {0104, 5}, {0140, 6}, {0144, 7},
+        };
+        bool ok = true;
+        for (auto& c : cases) {
+            b.memory().writeWord(0177716, c.reg);
+            if (b.speakerLog().empty() || b.speakerLog().back().level != c.level) {
+                if (!(c.level == 0 && b.speakerLog().empty())) ok = false;
+            }
+        }
+        CHECK(ok, "динамик: все 8 комбинаций битов 6/5/2 дают уровни 0..7");
+        // Бит 7 (мотор ленты) на динамик не влияет.
+        b.memory().writeWord(0177716, 0144);
+        size_t n = b.speakerLog().size();
+        b.memory().writeWord(0177716, 0344);   // добавили бит 7
+        CHECK(b.speakerLog().size() == n, "бит 7 (мотор ленты) уровень динамика не меняет");
+    }
+
+    // ---- Параллельный порт: раздельные регистры ввода и вывода ----
+    {
+        Board b; b.reset();
+        b.setJoystick(0123);
+        b.memory().writeWord(0177714, 0252);
+        CHECK(b.memory().readWord(0177714) == 0123, "чтение 0177714 отдаёт джойстик, а не записанное");
+        CHECK(b.portOut() == 0252, "запись в 0177714 защёлкивается отдельно");
+    }
+
+    // ---- 0177716 бит 2: признак записи в системный регистр ----
+    {
+        Board b; b.reset();
+        CHECK(!(b.memory().readWord(0177716) & 004), "бит 2 сброшен, пока записи не было");
+        b.memory().writeWord(0177716, 0);
+        CHECK((b.memory().readWord(0177716) & 004), "после записи бит 2 взведён");
+        CHECK(!(b.memory().readWord(0177716) & 004), "чтение гасит бит 2");
+    }
+
+    // ---- RESET: PSW не трогает, периферию сбрасывает ----
+    {
+        Board b; b.reset();
+        b.memory().writeWord(0177712, 020 | 004);   // запустить таймер
+        b.memory().writeWord(0177716, 0144);        // динамик на максимум
+        b.memory().writeWord(0177714, 0252);        // что-то в порт
+        b.memory().pokeWord(01000, 000005);         // RESET
+        b.cpu().reset(01000, 0);                    // маска открыта
+        b.stepInstruction();
+        CHECK(b.cpu().psw == 0, "RESET не меняет PSW");
+        CHECK((b.peekReg(0177660) & 0100) != 0, "RESET запрещает прерывания от клавиатуры");
+        CHECK(b.portOut() == 0, "RESET обнуляет выходной регистр порта");
+        CHECK(!(b.peekReg(0177712) & 020), "RESET останавливает таймер");
     }
 
     // ---- Ловушка по T-биту (вектор 014) и разница RTI/RTT ----

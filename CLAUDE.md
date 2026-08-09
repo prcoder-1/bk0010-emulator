@@ -95,6 +95,17 @@ Key cross-cutting facts to know before editing the CPU or screen:
   down-counter that passes through the negative half — which is what the common
   `TST @#177710 / BPL` wait idiom (and any program that never programs the limit)
   needs. See `docs/BK0010-hardware.md`.
+- **Interrupts are latched, not fire-and-forget**: `Board::deliverFrameInterrupts()` only
+  raises `irqFramePending_`; `tryDeliverInterrupts()` runs after every instruction and
+  delivers once the PSW mask opens. A request must never be dropped because the CPU
+  happened to be at priority 7 at the frame boundary.
+- **`WAIT` + interrupt**: `op_wait()` rewinds PC so the instruction re-executes while
+  idle; only `Cpu::interrupt()` clears `waiting_`, and it advances PC past the WAIT so
+  the pushed return address is the *next* instruction. Do not clear the wait flag
+  anywhere else (`runTicks` just breaks out) — otherwise `RTI` lands back on the WAIT and
+  the program hangs. `RESET` must not touch PSW; it resets devices via `Cpu::setResetHook`.
+- **Speaker is 3-bit**: the piezo sums bits 6, 5 and 2 of `0177716` (mask `0144`) into 8
+  levels; `Speaker::feed()` takes a level 0..7, not a bit.
 - **Interrupt gating**: reset PSW is `0340` (priority 7, masked) so the monitor ROM
   can install its vectors before the 50 Hz IRQ fires — do not reset to 0, games will
   jump to an unset vector and HALT. `Board::deliverFrameInterrupts` also refuses to
