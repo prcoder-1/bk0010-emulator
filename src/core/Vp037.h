@@ -78,7 +78,11 @@ public:
     static constexpr int CLKIN_PER_LINE  = 384;
     static constexpr int LINES_PER_FRAME = 320;   // 256 видимых + 64 кадрового гашения
     static constexpr int CLKIN_PER_FRAME = CLKIN_PER_LINE * LINES_PER_FRAME;  // 122880
-    int scanline() const { return static_cast<int>(frameClk_ / CLKIN_PER_LINE); }
+    int scanline() const {
+        // По модулю кадра: на самой границе frameClk_ успевает дойти до 122880, и без
+        // приведения получалась бы несуществующая «строка 320».
+        return static_cast<int>(frameClk_ / CLKIN_PER_LINE) % LINES_PER_FRAME;
+    }
 
     // Упаковка фазы развёртки для снимка состояния: где именно стоял луч, влияет на
     // такты ожидания ДОЗУ, а с построчной отрисовкой будет влиять и на картинку.

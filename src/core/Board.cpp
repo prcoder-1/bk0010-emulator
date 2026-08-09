@@ -16,6 +16,9 @@ enum : uint16_t {
     REG_TIMER_LIM  = 0177706,
     REG_TIMER_CNT  = 0177710,
     REG_TIMER_CSR  = 0177712,
+    REG_CPU_MODE   = 0177700,   // CPU_MODE — управление режимом
+    REG_CPU_IVEC   = 0177702,   // CPU_IVEC — вектор прерывания рестарта
+    REG_CPU_ERROR  = 0177704,   // CPU_ERROR — флаги ошибок
     REG_PORT       = 0177714,
     REG_SYS        = 0177716,
     START_VECTOR   = 0100000,
@@ -131,6 +134,7 @@ void Board::resetDevices() {
     portOut_ = 0;
     speaker_ = 0;
     sysWriteFlag_ = false;
+    cpuMode_ = 0;
     timerSetMode(0);            // остановить таймер
 }
 
@@ -741,6 +745,11 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
     case REG_TIMER_LIM:  value = timerLimit_; return true;
     case REG_TIMER_CNT:  timerCheck(); value = timerCount_; return true;
     case REG_TIMER_CSR:  timerCheck(); value = 0177400 | timerCsr_; return true;
+    // Внутренние регистры периферийного блока самого ЦП (04-процессор, §4.3).
+    // В БК не используются, но физически существуют, и читать их программа может.
+    case REG_CPU_MODE:   value = 0177740 | (cpuMode_ & 7); return true;
+    case REG_CPU_IVEC:   value = 0177777; return true;     // только запись; читается как все единицы
+    case REG_CPU_ERROR:  value = 0177440; return true;     // флаги сбрасываются на выборке каждой команды
     case REG_PORT:       value = joystick_; return true;   // джойстик на парал. порту
     case REG_SYS: {
         // BK-0010: bit15 set, high byte 0200 (serial idle). Bit 6 (0100) is the
@@ -793,6 +802,11 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
         }
         return true;
     }
+    case REG_CPU_MODE:
+        cpuMode_ = value & 7;   // доступны по записи только разряды 0..2 (WT/ST)
+        return true;
+    case REG_CPU_IVEC:  return true;   // запись сохраняется в ЦП, программе не видна
+    case REG_CPU_ERROR: return true;   // писать бессмысленно: биты гаснут на выборке команды
     case REG_PORT:
         // Параллельный порт — ДВА раздельных регистра: чтение отдаёт джойстик
         // (входные линии), запись защёлкивается отдельно (принтер/ковокс).
@@ -814,6 +828,9 @@ uint16_t Board::peekReg(uint16_t addr) const {
     case REG_TIMER_LIM:  return timerLimit_;
     case REG_TIMER_CNT:  return timerCount_;                     // as of the last read
     case REG_TIMER_CSR:  return static_cast<uint16_t>(0177400 | timerCsr_);
+    case REG_CPU_MODE:   return static_cast<uint16_t>(0177740 | (cpuMode_ & 7));
+    case REG_CPU_IVEC:   return 0177777;
+    case REG_CPU_ERROR:  return 0177440;
     case REG_PORT:       return joystick_;                       // джойстик на парал. порту
     case REG_SYS:        return static_cast<uint16_t>(0100000 | 0200 | (keyHeld_ ? 0 : 0100)
                                                       | (sysWriteFlag_ ? 004 : 0)); // без побочки: флаг не гасим

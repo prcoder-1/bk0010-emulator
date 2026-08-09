@@ -7,7 +7,7 @@ class QComboBox;
 class QCheckBox;
 class QSpinBox;
 
-// Draws a region of BK memory as an image at 1/4/8 bits-per-pixel, in monochrome
+// Draws a region of BK memory as an image at 1/2/4/8/16 bits-per-pixel, in monochrome
 // or colour, with an optional access "heatmap" overlay (recently written bytes
 // glow red, recently read bytes glow green, fading over time).
 class MemCanvas : public QWidget {
