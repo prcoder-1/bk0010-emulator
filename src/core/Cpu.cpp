@@ -151,7 +151,7 @@ void Cpu::service(uint16_t vector) {
     psw = rword(vector + 2) & 0377;
 }
 
-void Cpu::interrupt(uint16_t vector) {
+int Cpu::interrupt(uint16_t vector) {
     // Выход из WAIT по прерыванию: op_wait() откатывает PC на саму команду, чтобы
     // она «исполнялась» повторно, пока ЦП простаивает. Но в стек обязан лечь адрес
     // СЛЕДУЮЩЕЙ команды — иначе RTI вернёт нас на тот же WAIT и программа, которая
@@ -160,6 +160,7 @@ void Cpu::interrupt(uint16_t vector) {
     // и в GID BKemu (devemu/CPU.cpp:627-634).
     if (waiting_) { waiting_ = false; r[7] += 2; }
     service(vector);
+    return INT_ENTRY_TICKS;
 }
 
 // ---------------------------------------------------------------------------
@@ -722,9 +723,17 @@ int Cpu::timingFor(uint16_t ir) const {
         return REGREG + OP_W[dm];                          // clrb..negb, ror..asl b, mfps
     }
     if (idx == 0) {                                         // 0000xx
+        // Редкие команды: у нас они стояли «на глаз» одним числом. Значения ниже —
+        // из таблицы GID timing_Misk_10 (devemu/CPU.cpp:36); RTI/RTT и BPT там же
+        // совпадают с нашими измеренными. Особенно грубо было у RESET: он держит
+        // сигнал INIT сотни тактов, а не 40.
         if (ir == 0002 || ir == 0006) return 40;           // RTI/RTT
-        if (ir == 0003 || ir == 0004) return 64;           // BPT/IOT
-        return 40;                                          // HALT/WAIT/RESET (approx)
+        if (ir == 0003) return 64;                          // BPT
+        if (ir == 0004) return 104;                         // IOT
+        if (ir == 0000) return 68;                          // HALT
+        if (ir == 0001) return 12;                          // WAIT
+        if (ir == 0005) return 1140;                        // RESET (длинный INIT)
+        return 40;                                          // прочие 0000xx
     }
     return 40;                                              // fallback
 }

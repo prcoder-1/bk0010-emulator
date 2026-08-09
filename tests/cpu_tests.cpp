@@ -415,8 +415,21 @@ int main() {
         CHECK(b.memory().peekWord(01000) == 0123456, "ОЗУ восстановлено");
         CHECK(b.peekReg(0177714) == 02000, "0177714 отдаёт восстановленное значение");
 
+        // Фаза развёртки 037 тоже входит в снимок: с построчной отрисовкой от неё
+        // будет зависеть картинка, а сейчас — такты ожидания ДОЗУ.
+        {
+            Board b2; b2.reset();
+            b2.runTicks(12345);                       // увести луч в произвольную фазу
+            std::vector<uint8_t> s2; b2.saveStateMem(s2);
+            const int lc = b2.vp037().lc();
+            const bool hg = b2.vp037().hgate();
+            b2.runTicks(7777);                        // сдвинуть фазу
+            CHECK(b2.loadStateMem(s2), "снимок с фазой развёртки читается");
+            CHECK(b2.vp037().lc() == lc && b2.vp037().hgate() == hg, "фаза развёртки восстановлена");
+        }
+
         // Снимок старого формата (без хвоста ext[2]) должен читаться как «ввод отпущен».
-        std::vector<uint8_t> old(snap.begin(), snap.end() - 4);
+        std::vector<uint8_t> old(snap.begin(), snap.end() - 8);
         CHECK(b.loadStateMem(old), "снимок старого формата читается");
         CHECK(b.joystick() == 0 && !b.keyHeld(), "старый формат -> ввод отпущен");
         CHECK(!b.loadStateMem(std::vector<uint8_t>(8, 0)), "мусор отвергается");
@@ -507,6 +520,70 @@ int main() {
         CHECK((b.peekReg(0177660) & 0100) != 0, "RESET запрещает прерывания от клавиатуры");
         CHECK(b.portOut() == 0, "RESET обнуляет выходной регистр порта");
         CHECK(!(b.peekReg(0177712) & 020), "RESET останавливает таймер");
+    }
+
+    // ---- WAIT: прерывание возвращает управление ЗА команду, а не на неё ----
+    {
+        Memory m; Cpu c(m);
+        m.pokeWord(0100, 03000);    // вектор кадрового прерывания
+        m.pokeWord(0102, 0);
+        m.pokeWord(01000, 000001);  // WAIT
+        m.pokeWord(01002, 005000);  // CLR R0 — сюда обязаны вернуться
+        c.reset(01000); c.r[6] = 02000;
+        c.step();
+        CHECK(c.waiting(), "WAIT переводит ЦП в ожидание");
+        CHECK(c.pc() == 01000, "пока ждём, PC стоит на самой команде WAIT");
+        c.interrupt(0100);
+        CHECK(!c.waiting(), "прерывание выводит из ожидания");
+        CHECK(c.pc() == 03000, "ушли в обработчик");
+        CHECK(m.peekWord(01774) == 01002, "в стеке адрес ЗА WAIT, а не сам WAIT");
+    }
+    {
+        // Сквозная проверка: WAIT в цикле не должен зависать между кадрами.
+        Board b; b.reset();
+        b.memory().pokeWord(0100, 03000);   // ISR
+        b.memory().pokeWord(0102, 0);
+        b.memory().pokeWord(03000, 0005201); // INC R1
+        b.memory().pokeWord(03002, 0000002); // RTI
+        b.memory().pokeWord(01000, 0000001); // WAIT
+        b.memory().pokeWord(01002, 0005200); // INC R0
+        b.memory().pokeWord(01004, 0000775); // BR 01000 (смещение -3 слова)
+        b.cpu().reset(01000, 0);             // маска открыта
+        b.cpu().r[6] = 02000;
+        for (int i = 0; i < 5; ++i) b.runFrame();
+        CHECK(b.cpu().r[1] >= 4, "ISR вызывается каждый кадр");
+        CHECK(b.cpu().r[0] >= 4, "код ПОСЛЕ WAIT выполняется (нет зацикливания)");
+    }
+
+    // ---- Кадровое прерывание защёлкивается, а не теряется при закрытой маске ----
+    {
+        Board b; b.reset();
+        b.memory().pokeWord(0100, 03000);
+        b.memory().pokeWord(0102, 0);
+        b.memory().pokeWord(03000, 0005201); // INC R1
+        b.memory().pokeWord(03002, 0000002); // RTI
+        b.memory().pokeWord(01000, 0000777); // BR . — критическая секция
+        b.cpu().reset(01000, 0340);          // приоритет 7 — прерывания закрыты
+        b.cpu().r[6] = 02000;
+        b.runFrame();
+        CHECK(b.cpu().r[1] == 0, "при закрытой маске прерывание не выдаётся");
+        b.cpu().psw = 0;                     // открыли маску
+        b.runTicks(200);
+        CHECK(b.cpu().r[1] == 1, "защёлкнутый запрос выдаётся сразу после открытия маски");
+    }
+
+    // ---- runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры ----
+    {
+        Board b; b.reset();
+        b.memory().pokeWord(0100, 03000);    // ISR
+        b.memory().pokeWord(0102, 0);
+        b.memory().pokeWord(03000, 0000002); // RTI
+        b.memory().pokeWord(01000, 0000001); // WAIT — без кадрового IRQ отсюда не выйти
+        b.memory().pokeWord(01002, 0000240); // NOP — цель прогона
+        b.cpu().reset(01000, 0);
+        b.cpu().r[6] = 02000;
+        CHECK(b.runUntil(01002, 5 * b.ticksPerFrame()),
+              "runUntil проходит WAIT: кадры выдаются и в прогоне отладчика");
     }
 
     // ---- Ловушка по T-биту (вектор 014) и разница RTI/RTT ----

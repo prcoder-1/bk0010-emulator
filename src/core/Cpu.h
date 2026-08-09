@@ -37,7 +37,11 @@ public:
     // Deliver a hardware interrupt via the given vector (used by devices).
     // Pushes PSW/PC and loads the new PC/PSW from the vector. No masking here —
     // the caller checks priority/mask bits before calling.
-    void interrupt(uint16_t vector);
+    // Возвращает стоимость входа в прерывание в тактах: два обращения в стек плюс
+    // выборка вектора — они не бесплатны (GID timing_Misk_10, devemu/CPU.cpp:36).
+    // Вызывающий обязан учесть их в бюджете тактов.
+    int interrupt(uint16_t vector);
+    enum : int { INT_ENTRY_TICKS = 40 };
 
     bool halted() const { return halted_; }
     bool waiting() const { return waiting_; }
