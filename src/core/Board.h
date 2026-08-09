@@ -73,6 +73,12 @@ public:
     // Always returns true (kept bool for call-site compatibility).
     bool pressKey(uint16_t bkCode);
 
+    // Клавиша «СТОП». Физически вынесена из матрицы (отдельная цепь STOP_IN/STOP_OUT),
+    // кода в 0177662 не даёт, а вызывает прерывание по вектору 4 — тому же, что HALT и
+    // зависание. Прерывание ВНЕПРИОРИТЕТНОЕ: запретить его установкой разрядов приоритета
+    // нельзя, «СТОП» прерывает программу всегда (см. docs/BK0010-hardware.md).
+    void pressStop() { stopPending_ = true; }
+
     // True while an unread code sits in the register (ready flag set).
     bool keyReady() const { return (kbdStatus_ & 0200) != 0; }
 
@@ -261,6 +267,7 @@ private:
     uint16_t kbdData_   = 0;    // 0177662: the single latched key code (7 bits)
     bool     keyIntPending_ = false;
     bool     irqFramePending_ = false;  // взведённый запрос кадрового прерывания 0100
+    bool     stopPending_ = false;      // нажата клавиша «СТОП» (вектор 4, вне приоритета)
     bool     keyHeld_ = false;   // physical key down (0177716 bit 6, active-low)
     uint16_t keyIntVec_ = 060;
     uint8_t  speaker_   = 0;     // уровень пьезодинамика 0..7 (биты 6,5,2 регистра 0177716)

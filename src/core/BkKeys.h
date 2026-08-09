@@ -48,7 +48,6 @@ inline constexpr BkKeyName kBkKeys[] = {
     { "indsu", 0202 },    { "инд су", 0202 },   { "f6", 0202 },
     { "rus", BK_CODE_RUS }, { "рус", BK_CODE_RUS },
     { "lat", BK_CODE_LAT }, { "лат", BK_CODE_LAT },
-    { "esc", 033 },       // АР2 на БК шлёт 033 — тот же код, что «вниз»
 };
 
 // Код по имени клавиши. BK_KEY_NONE, если имя неизвестно. Имя нечувствительно к
