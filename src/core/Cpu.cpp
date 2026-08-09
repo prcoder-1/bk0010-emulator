@@ -179,7 +179,7 @@ int Cpu::op_movb() {
     uint8_t data = srcMode() ? loadbSrc() : (r[srcReg()] & 0377);
     chgNb(data); chgZb(data); clrV();
     if (dstMode()) storebDst(data);
-    else r[dstReg()] = (data & 0200) ? (0177400 + data) : data; // sign-extend into reg
+    else { r[dstReg()] = (data & 0200) ? (0177400 + data) : data; cBugArmed_ = true; } // sign-extend into reg
     return OK;
 }
 int Cpu::op_cmp() {
@@ -385,7 +385,7 @@ int Cpu::op_mfps() {
     uint8_t data = psw & 0377;
     chgNb(data); chgZb(data); clrV();
     if (dstMode()) storebDst(data);
-    else r[dstReg()] = (data & 0200) ? (0177400 + data) : data;
+    else { r[dstReg()] = (data & 0200) ? (0177400 + data) : data; cBugArmed_ = true; }
     return OK;
 }
 
@@ -485,7 +485,8 @@ int Cpu::op_aslb() {
 // ---- branches ----
 int Cpu::brx(uint16_t clear, uint16_t set) {
     lastBranch_ = r[7];
-    if (((psw & set) == set) && ((psw & clear) == 0)) {
+    const uint16_t f = brFlags();
+    if (((f & set) == set) && ((f & clear) == 0)) {
         uint16_t off = ir_ & 0377;
         if (off & 0200) off |= 0177400;
         r[7] += off * 2;
@@ -504,7 +505,7 @@ int Cpu::op_bcc()  { return brx(CC_C, 0); }
 int Cpu::op_bcs()  { return brx(0, CC_C); }
 int Cpu::op_blos() {
     lastBranch_ = r[7];
-    if ((psw & CC_C) || (psw & CC_Z)) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
+    if ((brFlags() & CC_C) || (brFlags() & CC_Z)) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
     return OK;
 }
 int Cpu::op_bge() {
@@ -743,6 +744,13 @@ int Cpu::timingFor(uint16_t ir) const {
 // ---------------------------------------------------------------------------
 int Cpu::step() {
     if (halted_) return 4;
+    // Промежуточный регистр флагов перезагружается из PSW перед каждой командой —
+    // кроме случая, когда предыдущая команда была MOVB/MFPS с приёмником-регистром:
+    // тогда C в нём остаётся нулевым и это увидит условный переход. Флаг взводится
+    // заново самой командой-триггером, поэтому подряд идущие MOVB/MFPS продлевают
+    // эффект (см. второй пример в [ВМ1 §10]).
+    cBugActive_ = cBugArmed_ && emulateCBug_;
+    cBugArmed_ = false;
     ir_ = rword(r[7]);
     r[7] += 2;
     int ticks = timingFor(ir_);

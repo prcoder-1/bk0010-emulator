@@ -99,6 +99,11 @@ Key cross-cutting facts to know before editing the CPU or screen:
   down-counter that passes through the negative half — which is what the common
   `TST @#177710 / BPL` wait idiom (and any program that never programs the limit)
   needs. See `docs/BK0010-hardware.md`.
+- **The VM1 C-flag bug** is emulated: after `MOVB xx,Rd` / `MFPS Rd` (register
+  destination only) *conditional branches* read C as clear, while PSW keeps the correct
+  value. Model it as a separate read path (`Cpu::brFlags()`) — clearing C in PSW instead
+  is too broad and breaks games (tried, reverted). `MFPS Rd` is itself a trigger, so it
+  does not clear the effect; any other instruction does.
 - **A frame is 61440 CPU ticks (48.83 Hz), not 60000/50 Hz.** `Board::ticksPerFrame()`
   derives it from the raster geometry (`Vp037::CLKIN_PER_FRAME / 2`), so the emulator
   frame and the 037 frame coincide exactly and `syncToFrameTop()` truncates nothing.
