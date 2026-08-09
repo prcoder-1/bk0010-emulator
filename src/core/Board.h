@@ -40,7 +40,14 @@ public:
     // If the CPU goes idle (WAIT/HALT) it stays idle for the rest of the frame, just
     // like runFrame(). Equivalent to runFrame() when run for all slices 0..nslices-1.
     void runFrameSlice(int slice, int nslices);
-    int  ticksPerFrame() const { return cpuFreqHz_ / frameHz_; }
+    // Длительность кадра БК — НЕ 1/50 секунды: развёртка идёт на 48,83 Гц, что при
+    // 3 МГц даёт ровно 61440 тактов ЦП на кадр (docs/БК-docs 11-экран, «Кадровая
+    // частота»; подтверждается и конфигом bkemu-QT: -framerate 48.828). Берём величину
+    // прямо из геометрии 037 — 320 строк x 384 такта CLKIN, 1 такт ЦП = 2 CLKIN, —
+    // чтобы кадр эмулятора и кадр видеоконтроллера совпадали точно.
+    int  ticksPerFrame() const { return Vp037::CLKIN_PER_FRAME / 2; }
+    // Кадровая частота, Гц (нецелая: 3'000'000 / 61440 = 48,83).
+    double frameRateHz() const { return double(cpuFreqHz_) / ticksPerFrame(); }
 
     // Потактовая эмуляция арбитража КР1801ВП1-037: добавляет такты ожидания к
     // обращениям в ДОЗУ во время активной развёртки (см. Vp037). По умолчанию ВКЛ;
@@ -251,8 +258,7 @@ private:
     void beginFrameRaster();              // верх кадра: доотрисовать и сбросить счётчик
     int  pendingWaitClkin_ = 0;    // накопленное ожидание ДОЗУ (CLKIN) за инструкцию
 
-    int cpuFreqHz_ = 3000000;
-    int frameHz_   = 50;
+    int cpuFreqHz_ = 3000000;   // тактовая частота ЦП
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()
     bool sliceIdle_ = false;     // CPU went idle (WAIT/HALT) mid-frame — skip its remaining slices
     int  sliceFrameTicks_ = 0;   // ticks run so far this frame (across slices), for exact boundaries

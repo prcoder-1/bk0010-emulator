@@ -128,14 +128,17 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     status_ = new QLabel("Готов", this);
     statusBar()->addWidget(status_);
 
-    // --- Emulation timer at 4× the 50 Hz frame rate (200 Hz). Each tick runs a
-    // quarter-frame so audio is fed continuously instead of in one 20 ms burst
-    // (which caused an audible wobble); the screen + profiler refresh stays at
-    // 50 Hz (once every 4 ticks). ---
+    // --- Таймер эмуляции. Кадр разбит на 4 слайса, чтобы звук подавался непрерывно,
+    // а не одним всплеском на кадр (это давало слышимое «вобблирование»); экран и
+    // профилировщик обновляются раз в кадр. Сам темп задаётся НЕ частотой таймера:
+    // кадр БК = 61440 тактов = 20,48 мс, слайс = 5,12 мс, целым числом миллисекунд
+    // это не выражается. Поэтому таймер только «будит» нас почаще, а сколько слайсов
+    // исполнить — считается по реальному времени в onTick(). ---
     timer_ = new QTimer(this);
     timer_->setTimerType(Qt::PreciseTimer);
     connect(timer_, &QTimer::timeout, this, &MainWindow::onTick);
-    timer_->start(5); // 200 Hz
+    clock_.start();
+    timer_->start(4);
 
     // --- Audio (only if built with Qt6 Multimedia) ---
 #ifdef HAVE_QT_MULTIMEDIA
@@ -157,7 +160,22 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::onTick() {
-    static constexpr int kSlices = 4;   // sub-slices per 50 Hz frame (200 Hz timer)
+    static constexpr int kSlices = 4;   // слайсов на кадр
+    // Длительность слайса в наносекундах: кадр 61440 тактов при 3 МГц = 20,48 мс.
+    static constexpr qint64 kSliceNs = 61440LL * 1000000000LL / (3000000LL * kSlices);
+    // Сколько слайсов должно было пройти к этому моменту реального времени. Догоняем,
+    // но не больше kCatchUp за раз — иначе после паузы (или тормоза системы) эмулятор
+    // ушёл бы в долгую «отработку долга» и подвис бы интерфейс.
+    static constexpr qint64 kCatchUp = kSlices * 2;
+    qint64 due = clock_.nsecsElapsed() / kSliceNs;
+    if (due - slicesDone_ > kCatchUp) slicesDone_ = due - kCatchUp;  // долг списываем
+    int steps = static_cast<int>(due - slicesDone_);
+    if (steps <= 0) return;
+    slicesDone_ = due;
+    while (steps-- > 0) runOneSlice(kSlices);
+}
+
+void MainWindow::runOneSlice(int kSlices) {
     if (!paused_ && !suspended_) {
         // Опросить геймпад раз в кадр и обновить байт джойстика (порт 0177714) до
         // прогона кадра, чтобы игра увидела актуальное состояние в своём ISR.
