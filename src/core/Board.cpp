@@ -164,7 +164,10 @@ int Board::stepCore() {
     }
     // Взведённые запросы разбираются после КАЖДОЙ команды, а не раз в кадр: иначе
     // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
-    if (irqFramePending_ || keyIntPending_) tryDeliverInterrupts();
+    if (irqFramePending_ || keyIntPending_) {
+        const int it = tryDeliverInterrupts();
+        if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; }
+    }
     if (trace_.enabled()) {
         uint16_t pcNow = cpu_.pc();
         int16_t delta = static_cast<int16_t>(pcNow - pcBefore);
@@ -270,7 +273,8 @@ constexpr char kMagic[8] = {'B','K','1','0','S','T','1','\0'};
 // старого формата просто короче на хвост и читаются как «ввод отпущен».
 namespace {
 constexpr size_t kStateBase = 8 + ADDR_RAM_END + (8 + 1 + 7) * sizeof(uint16_t);
-constexpr size_t kStateFull = kStateBase + 2 * sizeof(uint16_t);
+constexpr size_t kStateFull = kStateBase + 2 * sizeof(uint16_t);          // + {joystick, keyHeld}
+constexpr size_t kStateV037 = kStateFull + sizeof(uint32_t);              // + фаза развёртки 037
 }
 
 void Board::saveStateMem(std::vector<uint8_t>& out) const {
@@ -289,6 +293,8 @@ void Board::saveStateMem(std::vector<uint8_t>& out) const {
     put(dev, sizeof dev);
     const uint16_t ext[2] = {joystick_, static_cast<uint16_t>(keyHeld_ ? 1 : 0)};
     put(ext, sizeof ext);
+    const uint32_t v037 = vp037_.pack();   // фаза развёртки: где стоял луч
+    put(&v037, sizeof v037);
 }
 
 bool Board::loadStateMem(const std::vector<uint8_t>& in) {
@@ -302,6 +308,7 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     get(dev, sizeof dev);
     uint16_t ext[2] = {0, 0};
     if (in.size() >= kStateFull) get(ext, sizeof ext);   // иначе — снимок старого формата
+    if (in.size() >= kStateV037) { uint32_t v = 0; get(&v, sizeof v); vp037_.unpack(v); }
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
     keyIntPending_ = false;
     timerLimit_ = dev[3]; timerCount_ = dev[4];
@@ -364,11 +371,19 @@ int Board::runTicks(int ticks) {
 }
 
 bool Board::runUntil(uint16_t addr, int maxTicks) {
-    int done = 0;
+    int done = 0, frameTicks = 0;
     while (done < maxTicks) {
         if (cpu_.halted()) return false;
+        // Прогон отладчика обязан продолжать выдавать кадровые прерывания 50 Гц:
+        // подпрограмма, которая ждёт кадра (или стоит на WAIT), иначе не дождётся
+        // никогда, и «шаг с обходом»/«до адреса» просто упрётся в лимит тактов.
+        if (frameTicks == 0) {
+            if (arb037_) vp037_.syncToFrameTop();
+            deliverFrameInterrupts();
+        }
         int t = stepCore();
-        done += t;
+        done += t; frameTicks += t;
+        if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
         if (cpu_.pc() == addr) { screen_.setScroll(scroll_); return true; }
         if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc()) && breakAllows(cpu_.pc())) {
             breakHit_ = true; screen_.setScroll(scroll_); return true;
@@ -383,7 +398,10 @@ bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
     int done = 0, frameTicks = 0;
     while (done < maxTicks) {
         if (cpu_.halted()) { screen_.setScroll(scroll_); return false; }
-        if (frameTicks == 0) deliverFrameInterrupts();   // keep the 50 Hz IRQ alive
+        if (frameTicks == 0) {                           // keep the 50 Hz IRQ alive
+            if (arb037_) vp037_.syncToFrameTop();
+            deliverFrameInterrupts();
+        }
         int t = stepCore();
         done += t; frameTicks += t;
         if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
@@ -455,12 +473,14 @@ bool Board::pressKey(uint16_t bkCode) {
 // tryDeliverInterrupts() после каждой команды, как это делает GID (devemu/CPU.cpp:413).
 void Board::deliverFrameInterrupts() {
     irqFramePending_ = true;
-    tryDeliverInterrupts();
+    const int t = tryDeliverInterrupts();
+    if (t) { totalTicks_ += static_cast<uint64_t>(t); sound_.feed(speaker_, t); }
 }
 
-void Board::tryDeliverInterrupts() {
-    if (cpu_.halted()) return;
-    if (cpu_.psw & 0200) return; // маска закрыта — запросы остаются взведёнными
+// Возвращает стоимость входа в прерывание в тактах (0, если ничего не выдано).
+int Board::tryDeliverInterrupts() {
+    if (cpu_.halted()) return 0;
+    if (cpu_.psw & 0200) return 0; // маска закрыта — запросы остаются взведёнными
 
     // A latched, not-yet-serviced key raises its interrupt first — but only while
     // the keyboard interrupt is enabled. On BK-0010 status bit 6 (0100) is the
@@ -471,17 +491,19 @@ void Board::tryDeliverInterrupts() {
     if (keyIntPending_) {
         keyIntPending_ = false;
         if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
-            cpu_.interrupt(keyIntVec_);
+            const int t = cpu_.interrupt(keyIntVec_);
             trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
-            return;
+            return t;
         }
     }
 
     if (irqFramePending_ && mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
         irqFramePending_ = false;
-        cpu_.interrupt(Cpu::VEC_IRQ2);         // 0100 (50 Hz)
+        const int t = cpu_.interrupt(Cpu::VEC_IRQ2);   // 0100 (50 Hz)
         trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
+        return t;
     }
+    return 0;
 }
 
 int Board::stepInstruction() {

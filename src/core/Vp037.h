@@ -69,6 +69,22 @@ public:
     bool vgate() const { return vgate_; }
     int  lc()    const { return lc_; }
 
+    // Упаковка фазы развёртки для снимка состояния: где именно стоял луч, влияет на
+    // такты ожидания ДОЗУ, а с построчной отрисовкой будет влиять и на картинку.
+    uint32_t pack() const {
+        return static_cast<uint32_t>(pc_) | (static_cast<uint32_t>(va51_) << 8)
+             | (static_cast<uint32_t>(lc_) << 16)
+             | (hgate_ ? 1u << 24 : 0) | (vgate_ ? 1u << 25 : 0) | (m256_ ? 1u << 26 : 0);
+    }
+    void unpack(uint32_t v) {
+        pc_    = static_cast<uint8_t>(v & 0xFF);
+        va51_  = static_cast<uint8_t>((v >> 8) & 0xFF);
+        lc_    = static_cast<uint8_t>((v >> 16) & 0xFF);
+        hgate_ = (v >> 24) & 1;
+        vgate_ = (v >> 25) & 1;
+        m256_  = (v >> 26) & 1;
+    }
+
 private:
     uint8_t  pc_    = 0;      // PC[2:0]  — счётчик пикселей в слове (mod-8)
     uint8_t  va51_  = 0;      // VA[5:1]  — счётчик слов в строке (VA5..VA1)

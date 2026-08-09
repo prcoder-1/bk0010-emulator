@@ -302,7 +302,7 @@ private:
     void checkWatch(uint16_t addr, bool write, bool isByte);
 
     void deliverFrameInterrupts(); // взвести кадровый запрос 50 Гц и попробовать выдать
-    void tryDeliverInterrupts();   // выдать взведённые запросы, если маска открыта
+    int  tryDeliverInterrupts();   // выдать взведённые запросы; возвращает такты входа
     int  stepCore();               // one instruction + sound/trace bookkeeping
 
     // EMT 36 handler: reads the tape/disk parameter block (address in R1) and
