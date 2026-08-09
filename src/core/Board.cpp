@@ -184,7 +184,7 @@ int Board::stepCore() {
     }
     // Взведённые запросы разбираются после КАЖДОЙ команды, а не раз в кадр: иначе
     // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
-    if (irqFramePending_ || keyIntPending_) {
+    if (irqFramePending_ || keyIntPending_ || stopPending_) {
         const int it = tryDeliverInterrupts();
         if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; }
     }
@@ -245,6 +245,7 @@ void Board::reset() {
     kbdData_ = 0;
     keyIntPending_ = false;
     irqFramePending_ = false;
+    stopPending_ = false;
     keyHeld_ = false;
     keyIntVec_ = 060;
     // Timer power-on state: остановлен, счётчик и предел — «все единицы».
@@ -494,6 +495,17 @@ void Board::deliverFrameInterrupts() {
 // Возвращает стоимость входа в прерывание в тактах (0, если ничего не выдано).
 int Board::tryDeliverInterrupts() {
     if (cpu_.halted()) return 0;
+    // «СТОП» разбирается ДО проверки маски: это внеприоритетное прерывание, разряды
+    // приоритета его не запрещают. Идёт по вектору 4 — тому же, что HALT и зависание.
+    if (stopPending_) {
+        stopPending_ = false;
+        if (mem_.peekWord(Cpu::VEC_BUS_ERROR) != 0) {
+            const int t = cpu_.interrupt(Cpu::VEC_BUS_ERROR);
+            trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
+            return t;
+        }
+        // Вектор не установлен — прерывать некуда, запрос просто гасим.
+    }
     if (cpu_.psw & 0200) return 0; // маска закрыта — запросы остаются взведёнными
 
     // A latched, not-yet-serviced key raises its interrupt first — but only while

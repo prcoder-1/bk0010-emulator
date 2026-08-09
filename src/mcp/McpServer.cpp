@@ -234,7 +234,9 @@ QJsonArray McpServer::toolDefs() const {
                   "Games that poll the physical key-held bit (0177716, e.g. Digger's movement) only "
                   "register input WHILE HELD: use frames=N (press, run N frames, release) to drive "
                   "them in one call, or hold=true plus a separate bk_run.",
-        schema({{"key", P("string", "Key name or a single character — the recommended form")},
+        schema({{"key", P("string", "Key name or a single character — the recommended form. "
+                                  "Special: \"стоп\"/\"stop\" is the BK STOP key — not a KOI-7 code but a "
+                                  "non-maskable interrupt through vector 4 (same as HALT/bus hang)")},
                 {"code", P("string", "Raw KOI-7 code. QUOTE octal values (\"012\"=Enter, \"040\"=Space, "
                                      "\"031\"=right, \"010\"=left, \"032\"=up, \"033\"=down); a bare "
                                      "JSON integer is DECIMAL (12 means 000014 = СБР, not Enter)")},
@@ -884,6 +886,18 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         // (0177716, бит 6, активный низкий). Игры, опрашивающие этот бит (Digger,
         // PITON), реагируют только пока клавиша удерживается — поэтому frames>0
         // (нажать / прогнать / отпустить) или hold=true + отдельный bk_run.
+        // «СТОП» — не код КОИ-7: клавиша вынесена из матрицы и вызывает
+        // внеприоритетное прерывание по вектору 4. Обрабатываем отдельно.
+        {
+            const std::string kn = bk::normName(args.value("key").toString().toStdString());
+            if (kn == "stop" || kn == "стоп") {
+                board_.pressStop();
+                const int fr = args.value("frames").toInt(0);
+                QString tail;
+                if (fr > 0) tail = "\n" + runText(runFrames(fr)) + "\n" + regsText();
+                return textContent("Клавиша СТОП: внеприоритетное прерывание по вектору 4." + tail);
+            }
+        }
         std::vector<uint16_t> codes;
         bool present = false;
         QString warn, err;
