@@ -14,7 +14,7 @@ class MemCanvas : public QWidget {
     Q_OBJECT
 public:
     explicit MemCanvas(bk::Board* board, QWidget* parent = nullptr);
-    int bpp = 4;
+    int bpp = 2;   // по умолчанию — палитра БК, 2 бита на точку
     bool color = true;
     bool heatmap = true;
     bool hideRom = true;    // hide the ROM region (0100000..0177777); RAM only by default
