@@ -226,7 +226,9 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     setWindowTitle("Визуализация памяти БК-0010");
     canvas_ = new MemCanvas(board, this);
 
-    auto* bpp = new QComboBox; bpp->addItems({"1 бит", "2 бита (БК)", "4 бита", "8 бит", "16 бит"}); bpp->setCurrentIndex(2);
+    auto* bpp = new QComboBox;
+    bpp->addItems({"1 бит", "2 бита (БК)", "4 бита", "8 бит", "16 бит"});
+    bpp->setCurrentIndex(1);   // по умолчанию — как цветной экран БК: 2 бита на точку
     auto* mode = new QComboBox; mode->addItems({"Ч/Б", "Цвет"}); mode->setCurrentIndex(1);
     auto* heat = new QCheckBox("Тепловая карта"); heat->setChecked(true);
     auto* showRom = new QCheckBox("Показать ПЗУ"); // ROM hidden by default

@@ -157,14 +157,14 @@ static int runHeadless(const QString& romDir, const QString& bin,
         QString noScreenPath = memvisShot; noScreenPath.replace(".png", "_noscreen.png");
         cs.grab().save(noScreenPath);
         std::printf("headless: wrote memvis (screen hidden, ROM shown) %s\n", qPrintable(noScreenPath));
-        // Проверка режима «2 бита/пиксель, палитра БК»: экранное ОЗУ в нём должно
-        // выглядеть как сама картинка на экране.
-        MemCanvas c2(&board);
-        c2.resize(560, 640);
-        c2.bpp = 2;
-        QString bk2Path = memvisShot; bk2Path.replace(".png", "_2bpp.png");
-        c2.grab().save(bk2Path);
-        std::printf("headless: wrote memvis (2 бита/пиксель, палитра БК) %s\n", qPrintable(bk2Path));
+        // Вид по умолчанию — 2 бита/пиксель в палитре БК (экранное ОЗУ выглядит как
+        // сама картинка), поэтому проверяем заодно и байтовый режим 4 бита/пиксель.
+        MemCanvas c4(&board);
+        c4.resize(560, 640);
+        c4.bpp = 4;
+        QString bk4Path = memvisShot; bk4Path.replace(".png", "_4bpp.png");
+        c4.grab().save(bk4Path);
+        std::printf("headless: wrote memvis (4 бита/пиксель) %s\n", qPrintable(bk4Path));
     }
     if (!hpShot.isEmpty()) {
         HotPathWidget w(&board);
