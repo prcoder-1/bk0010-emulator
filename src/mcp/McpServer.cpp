@@ -1,9 +1,12 @@
 #include "McpServer.h"
 #include "Disasm.h"
 #include "Screen.h"
+#include "BkKeys.h"
+#include "ScreenOcr.h"
 #include <QJsonDocument>
 #include <QFile>
 #include <QTextStream>
+#include <QStringList>
 #include <QRegularExpression>
 #include <QImage>
 #include <QBuffer>
@@ -12,6 +15,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 
 using bk::Board;
 
@@ -20,20 +24,40 @@ using bk::Board;
 // ---------------------------------------------------------------------------
 static QString oct6(uint16_t v) { return QString::asprintf("%06o", v); }
 
+// Читаемая подпись кода КОИ-7: " <enter>", " 'A'", " 'Ю'" — или пусто.
+static QString keyLabel(uint16_t code) {
+    if (const char* n = bk::bkKeyName(code)) return QString(" <%1>").arg(n);
+    if (code >= 0x20 && code < 0x7F) return QString(" '%1'").arg(QChar(code));
+    if (code >= 0140 && code <= 0177) {
+        const QString h1 = QString::fromUtf8(bk::kKoi7H1Utf8);
+        const int idx = code - 0140;
+        if (idx < h1.size()) return QString(" '%1'").arg(h1.at(idx));
+    }
+    return QString();
+}
+
+// Build a mono 16-bit PCM WAV image in memory.
+static void writeWavBytes(QByteArray& out, const std::vector<int16_t>& s, int rate) {
+    out.clear();
+    auto u32 = [&](uint32_t v) { char b[4] = {char(v), char(v >> 8), char(v >> 16), char(v >> 24)}; out.append(b, 4); };
+    auto u16 = [&](uint16_t v) { char b[2] = {char(v), char(v >> 8)}; out.append(b, 2); };
+    const uint32_t dataBytes = (uint32_t)s.size() * 2;
+    out.append("RIFF", 4); u32(36 + dataBytes); out.append("WAVE", 4);
+    out.append("fmt ", 4); u32(16); u16(1); u16(1);       // PCM, 1 channel
+    u32(rate); u32(rate * 2); u16(2); u16(16);            // byte rate, block align, bits
+    out.append("data", 4); u32(dataBytes);
+    if (dataBytes) out.append(reinterpret_cast<const char*>(s.data()), dataBytes);
+}
+
 // Write mono 16-bit PCM samples as a WAV file.
 static bool writeWav(const QString& path, const std::vector<int16_t>& s, int rate) {
+    QByteArray wav;
+    writeWavBytes(wav, s, rate);
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly)) return false;
-    auto u32 = [&](uint32_t v) { char b[4] = {char(v), char(v >> 8), char(v >> 16), char(v >> 24)}; f.write(b, 4); };
-    auto u16 = [&](uint16_t v) { char b[2] = {char(v), char(v >> 8)}; f.write(b, 2); };
-    const uint32_t dataBytes = (uint32_t)s.size() * 2;
-    f.write("RIFF", 4); u32(36 + dataBytes); f.write("WAVE", 4);
-    f.write("fmt ", 4); u32(16); u16(1); u16(1);          // PCM, 1 channel
-    u32(rate); u32(rate * 2); u16(2); u16(16);            // byte rate, block align, bits
-    f.write("data", 4); u32(dataBytes);
-    if (dataBytes) f.write(reinterpret_cast<const char*>(s.data()), dataBytes);
+    const bool ok = f.write(wav) == wav.size();
     f.close();
-    return true;
+    return ok;
 }
 
 static QJsonObject textContent(const QString& text, bool isError = false) {
@@ -58,11 +82,13 @@ static bool parseNumber(const QJsonValue& v, long& out) {
     return false;
 }
 
-McpServer::McpServer(std::string romDir) : romDir_(std::move(romDir)) {
+McpServer::McpServer(std::string romDir, bool smk512) : romDir_(std::move(romDir)) {
     romsOk_ = board_.loadRoms(romDir_);
+    board_.setSmk512(smk512);             // --smk: блок расширения памяти в разъёме МПИ
     board_.reset();
     board_.trace().setEnabled(true);      // collect hot-spot data from the start
     board_.trace().setFlameEnabled(true); // maintain the shadow call stack (bk_backtrace)
+    board_.setSpeakerLog(true);           // фронты динамика — для разбора звука в bk_audio
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +137,7 @@ void McpServer::handleMessage(const QJsonObject& req) {
         QJsonObject info; info["name"] = "bk0010-emulator"; info["version"] = "0.1";
         QString ver = req.value("params").toObject().value("protocolVersion").toString();
         if (ver.isEmpty()) ver = "2024-11-05";
+        protoVer_ = ver;   // блок content type:"audio" появился в 2025-03-26
         QJsonObject res;
         res["protocolVersion"] = ver;
         res["capabilities"] = caps;
@@ -161,12 +188,21 @@ QJsonArray McpServer::toolDefs() const {
     QJsonArray t;
     const QJsonObject addrArg = P("string", "Address (decimal, 0x hex, or leading-0 octal) OR a symbol name");
 
-    t.append(tool("bk_load", "Load a .BIN game/program (boots the monitor first) and start it.",
+    t.append(tool("bk_load", "Load a .BIN game/program (boots the monitor first) and start it. "
+                  "Use frames to run it right away, and reset=true when loading a second game "
+                  "so its trace/hotspot data is not mixed with the previous one.",
         schema({{"path", P("string", "Path to the .BIN file")},
-                {"run", P("boolean", "Set PC to the load address and start (default true)")}}, {"path"})));
+                {"run", P("boolean", "Set PC to the entry point and start (default true)")},
+                {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
+                {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
     t.append(tool("bk_reset", "Power-on reset the machine.", schema({})));
-    t.append(tool("bk_run", "Run frames (with 50 Hz interrupts) until a breakpoint, HALT, or the frame limit.",
-        schema({{"max_frames", P("integer", "Max 50 Hz frames to run (default 200 = ~4 s)")}})));
+    t.append(tool("bk_run", "Run frames (with 50 Hz interrupts) until a breakpoint, HALT, or the frame "
+                  "limit. `input` scripts keyboard/joystick over time, so a whole control sequence "
+                  "is reproducible in ONE call — e.g. "
+                  "[{\"frame\":0,\"joy\":\"right\"},{\"frame\":25,\"joy\":\"right+fire1\"},{\"frame\":40,\"release_joy\":true}].",
+        schema({{"max_frames", P("integer", "Max 50 Hz frames to run (default 200 = ~4 s)")},
+                {"input", P("array", "Input timeline: objects {frame, key|code, release_key, "
+                                     "joy|joy_bits, release_joy}; frame is 0-based from the start of this run")}})));
     t.append(tool("bk_run_until", "Run until PC reaches an address/symbol (or a breakpoint / tick limit).",
         schema({{"addr", addrArg}, {"max_ticks", P("integer", "CPU-tick limit (default 20000000)")}}, {"addr"})));
     t.append(tool("bk_step", "Execute N single instructions.",
@@ -180,9 +216,14 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_read_mem", "Read memory as octal words (or bytes).",
         schema({{"addr", addrArg}, {"len", P("integer", "Number of bytes (default 32)")},
                 {"format", P("string", "words|bytes (default words)")}}, {"addr"})));
-    t.append(tool("bk_write_mem", "Write words or bytes to memory.",
+    t.append(tool("bk_write_mem", "Write words or bytes to memory. Addresses in the I/O page "
+                  "(>= 0177600) go THROUGH THE BUS by default, so the device actually sees the "
+                  "write (e.g. poking 0177712 restarts the timer); ordinary memory is written "
+                  "directly, bypassing ROM protection so you can patch ROM. `bus` overrides.",
         schema({{"addr", addrArg}, {"words", P("array", "Array of 16-bit words")},
-                {"bytes", P("array", "Array of bytes")}}, {"addr"})));
+                {"bytes", P("array", "Array of bytes")},
+                {"bus", P("boolean", "Force writing through the bus (true) or straight into "
+                                     "memory (false); default: auto by address")}}, {"addr"})));
     t.append(tool("bk_disasm", "Disassemble instructions.",
         schema({{"addr", P("string", "Address/symbol, or 'pc' for the current PC (default pc)")},
                 {"count", P("integer", "Instruction count (default 16)")}})));
@@ -193,22 +234,65 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_unbreak", "Remove a breakpoint (or all).",
         schema({{"addr", addrArg}, {"all", P("boolean", "Remove all breakpoints")}})));
     t.append(tool("bk_breakpoints", "List active breakpoints.", schema({})));
-    t.append(tool("bk_key", "Press a BK-0010 key (KOI-7 code), optionally holding it down. "
-                  "Games that poll the physical key-held bit (0177716, e.g. Digger's movement) "
-                  "only register input while held: use hold=true then bk_run to drive them, and "
-                  "hold=false (code optional) to release.",
-        schema({{"code", P("integer", "BK key code, e.g. 012=Enter, 040=Space, 031=right, 010=left, 032=up, 033=down")},
-                {"hold", P("boolean", "Hold the key physically down across frames (default false = tap)")}}, {})));
+    t.append(tool("bk_key", "Press a BK-0010 key. Prefer `key` with a NAME (enter, space, left, right, "
+                  "up, down, backspace, delete, f1..f6, рус, лат) or a single character — including "
+                  "Cyrillic, for which the РУС/ЛАТ switch is inserted automatically. "
+                  "Games that poll the physical key-held bit (0177716, e.g. Digger's movement) only "
+                  "register input WHILE HELD: use frames=N (press, run N frames, release) to drive "
+                  "them in one call, or hold=true plus a separate bk_run.",
+        schema({{"key", P("string", "Key name or a single character — the recommended form. "
+                                  "Special: \"стоп\"/\"stop\" is the BK STOP key — not a KOI-7 code but a "
+                                  "non-maskable interrupt through vector 4 (same as HALT/bus hang)")},
+                {"code", P("string", "Raw KOI-7 code. QUOTE octal values (\"012\"=Enter, \"040\"=Space, "
+                                     "\"031\"=right, \"010\"=left, \"032\"=up, \"033\"=down); a bare "
+                                     "JSON integer is DECIMAL (12 means 000014 = СБР, not Enter)")},
+                {"hold", P("boolean", "Keep the key physically down afterwards (default false)")},
+                {"frames", P("integer", "Hold and run this many 50 Hz frames, then release (default 0 = do not run)")},
+                {"release_frames", P("integer", "Extra frames to run after releasing (default 0)")}}, {})));
+    t.append(tool("bk_joystick", "Drive the joystick on the parallel port 0177714 (active high). "
+                  "Buttons are named per the selected layout, which is STICKY (set it once). "
+                  "Layouts: standard (Джойвокс/gid, default) | breakhouse | swcorp | klad2. "
+                  "The value stays set until changed (like a physically held stick), because games "
+                  "sample the port once per THEIR frame, which is longer than a 50 Hz frame — use "
+                  "frames=N to hold it for N frames and auto-release, or release=true to clear it.",
+        schema({{"layout", P("string", "standard|breakhouse|swcorp|klad2 — sticky for later calls")},
+                {"buttons", P("string", "e.g. \"up+fire1\", \"вправо\", or bit0..bit15 for raw bits "
+                                        "(also accepts an array of names)")},
+                {"bits", P("string", "Raw port value, OR-ed with `buttons` (quote octal: \"02000\")")},
+                {"add", P("boolean", "OR into the current port value instead of replacing it")},
+                {"release", P("boolean", "Clear the port to 0")},
+                {"frames", P("integer", "Run this many frames with the value applied (default 0 = just set it)")},
+                {"hold", P("boolean", "Keep the value after `frames` (default false = auto-release)")}})));
+    t.append(tool("bk_joy_probe", "Find out which 0177714 bits a game reacts to (i.e. its joystick "
+                  "layout) empirically: for each bit — checkpoint, set the bit, run, diff RAM against "
+                  "a no-input reference run, roll back. A small ± delta is usually horizontal "
+                  "movement, a large one vertical (one screen line). The machine state is restored.",
+        schema({{"bits", P("integer", "How many low bits to probe (default 8, max 16)")},
+                {"frames", P("integer", "Frames to run per bit (default 10)")},
+                {"start", addrArg}, {"end", addrArg},
+                {"max", P("integer", "Max changed cells to list per bit (default 8)")}})));
     t.append(tool("bk_screenshot", "Render the BK screen and return it as an inline PNG image (so you "
-                  "can see it directly); optionally also write it to a file.",
-        schema({{"path", P("string", "Optional output PNG path")}, {"mono", P("boolean", "512x256 monochrome (default false=colour)")}})));
-    t.append(tool("bk_audio", "Run frames while capturing the speaker (piezo, 0177716 bit 6) "
-                  "to a mono 16-bit WAV file, and report peak level, active fraction and rough "
-                  "pitch. Lets you verify sound output (drive events with bk_key/bk_run first).",
-        schema({{"path", P("string", "Output WAV path")},
-                {"frames", P("integer", "50 Hz frames to run while capturing (default 100 = 2 s)")}}, {"path"})));
-    t.append(tool("bk_state_save", "Save full emulator state to a file.", schema({{"path", P("string", "Path")}}, {"path"})));
-    t.append(tool("bk_state_load", "Restore full emulator state from a file.", schema({{"path", P("string", "Path")}}, {"path"})));
+                  "can see it directly); optionally run frames first and/or write it to a file.",
+        schema({{"path", P("string", "Optional output PNG path")},
+                {"frames", P("integer", "Run this many 50 Hz frames before the shot (default 0)")},
+                {"mono", P("boolean", "512x256 monochrome (default false=colour)")}})));
+    t.append(tool("bk_audio", "Capture the speaker (piezo, 0177716 bit 6) as 44100 Hz mono PCM and "
+                  "report peak/RMS, an ASCII envelope and the TONE breakdown (frequency + duration "
+                  "per segment, derived from the speaker edges — exact, not guessed from the PCM). "
+                  "Returns the WAV inline as audio content when the client protocol supports it; "
+                  "`path` also writes it to disk, `raw_ms` dumps raw int16 samples.",
+        schema({{"path", P("string", "Optional output WAV path")},
+                {"frames", P("integer", "50 Hz frames to run while capturing (default 100 = 2 s)")},
+                {"run", P("boolean", "false = do not run, just drain what is already buffered (~250 ms)")},
+                {"input", P("array", "Input timeline while capturing, same format as bk_run")},
+                {"raw_start_ms", P("integer", "Start of the raw-sample dump window")},
+                {"raw_ms", P("integer", "Length of the raw-sample dump window in ms (max 200)")},
+                {"inline", P("boolean", "Force the inline audio block on/off (default: auto by protocol version)")}})));
+    t.append(tool("bk_state_save", "Save full emulator state (RAM, CPU, devices, input) to a file, or "
+                  "to a named in-memory slot for quick A/B checkpoints.",
+        schema({{"path", P("string", "Path")}, {"slot", P("string", "In-memory slot name (instead of path)")}})));
+    t.append(tool("bk_state_load", "Restore full emulator state from a file or an in-memory slot.",
+        schema({{"path", P("string", "Path")}, {"slot", P("string", "In-memory slot name (instead of path)")}})));
     t.append(tool("bk_symbols", "Load a symbol table from a linker .map file (enables symbol names in break/read/disasm).",
         schema({{"path", P("string", "Path to the .map file")}}, {"path"})));
     t.append(tool("bk_hotspots", "List the most-executed instructions (hot code) from the trace.",
@@ -237,9 +321,11 @@ QJsonArray McpServer::toolDefs() const {
         schema({{"action", P("string", "save|diff (default diff)")},
                 {"start", addrArg}, {"end", addrArg},
                 {"max", P("integer", "Max changed cells to list (default 64)")}})));
-    t.append(tool("bk_type", "Type an ASCII string through the keyboard (one char per few frames, "
-                  "like real typing). Newline = Enter. Use to drive menus / text entry.",
+    t.append(tool("bk_type", "Type a string through the keyboard (a few frames per character, like "
+                  "real typing), holding each key down so games that poll 0177716 see it. Cyrillic "
+                  "works — the РУС/ЛАТ switch codes are inserted automatically. Newline = Enter.",
         schema({{"text", P("string", "String to type")},
+                {"hold_frames", P("integer", "Frames each key stays held (default 2)")},
                 {"max_frames", P("integer", "Frame budget (default 600)")}}, {"text"})));
     t.append(tool("bk_callers", "List subroutines that call a function (from the recorded call edges), "
                   "with call counts.", schema({{"addr", addrArg}}, {"addr"})));
@@ -253,10 +339,42 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_profile", "Export the call profile as Brendan-Gregg folded stacks to a file "
                   "(open in speedscope / flamegraph.pl). Weight = self CPU ticks.",
         schema({{"path", P("string", "Output .folded path")}}, {"path"})));
-    t.append(tool("bk_vram", "Render the screen and return a downsampled ASCII-art view, so you can "
-                  "'see' the display without a PNG. Also reports non-black pixel count / bounding box.",
-        schema({{"width", P("integer", "Output width in characters (default 64)")},
+    t.append(tool("bk_vram", "Render the screen as ASCII art so you can 'see' it without a PNG. "
+                  "mode=ascii (default) downsamples the whole screen by luminance and reports the "
+                  "non-black pixel count / bounding box. mode=index prints the exact 2-bit palette "
+                  "index per BK pixel from video RAM for a x/y/w/h window — use it to read a sprite "
+                  "bitmap precisely (no scroll, no pixel doubling).",
+        schema({{"mode", P("string", "ascii|index (default ascii)")},
+                {"width", P("integer", "ascii mode: output width in characters (default 64)")},
+                {"x", P("integer", "index mode: left BK pixel column (default 0)")},
+                {"y", P("integer", "index mode: top line (default 0)")},
+                {"w", P("integer", "index mode: width in BK pixels (default 64)")},
+                {"h", P("integer", "index mode: height in lines (default 32)")},
                 {"mono", P("boolean", "Interpret as 512x256 mono (default false=colour)")}})));
+    t.append(tool("bk_ocr", "READ THE TEXT off the BK screen. Splits the screen into character "
+                  "cells and matches each against the monitor ROM character generator, so menus, "
+                  "prompts and score lines come back as real UTF-8 text (Cyrillic included) "
+                  "instead of ASCII art. Handles both BK text modes — narrow (64 chars/line, 8x10 "
+                  "cell) and wide (32 chars/line, 16x10 cell, where each glyph bit is doubled; "
+                  "this is also the colour mode) — and auto-detects the mode and the vertical "
+                  "offset of the text grid. A game with its OWN font: point font_addr at its glyph "
+                  "table. Unusual cell widths: set cell_w / glyph_w / cell_h.",
+        schema({{"mode", P("string", "auto (default) | narrow (64 cols) | wide (32 cols)")},
+                {"frames", P("integer", "Run this many 50 Hz frames before reading (default 0)")},
+                {"x", P("integer", "Left edge of the character grid in screen pixels (default 0)")},
+                {"y", P("integer", "Top edge in scanlines; omit to auto-detect (monitor text starts "
+                                   "at 16, below the 16-line service row)")},
+                {"cols", P("integer", "Grid width in cells (default: as many as fit)")},
+                {"rows", P("integer", "Grid height in cells (default: as many as fit)")},
+                {"cell_w", P("integer", "Horizontal cell pitch in pixels (default 8 narrow / 16 wide)")},
+                {"cell_h", P("integer", "Cell height in scanlines (default 10)")},
+                {"glyph_w", P("integer", "How many glyph bits to compare (default 8)")},
+                {"tolerance", P("integer", "Max mismatching pixels per cell (default 6; 0 = exact)")},
+                {"inverse", P("boolean", "Also recognise inverted cells, e.g. the cursor (default true)")},
+                {"font_addr", P("string", "Custom glyph table address (default 0112036 = monitor ROM)")},
+                {"font_base", P("string", "Code of the first glyph in a custom table (default 020)")},
+                {"font_count", P("integer", "Glyph count in a custom table")},
+                {"codes", P("boolean", "Also dump the octal screen code of every cell")}})));
     t.append(tool("bk_emt_log", "List intercepted EMT 36 tape/disk file operations (which files the "
                   "game loaded/saved, load address, length, and result). Useful for multi-part loaders.",
         schema({{"count", P("integer", "How many recent ops to show (default 40)")}})));
@@ -264,12 +382,19 @@ QJsonArray McpServer::toolDefs() const {
                   "branches TO an address, and where it goes FROM there, with counts.",
         schema({{"addr", addrArg}}, {"addr"})));
     t.append(tool("bk_io_state", "Decode the current I/O-register state (keyboard, scroll, timer, "
-                  "port, system/speaker) — a hardware snapshot.", schema({})));
-    t.append(tool("bk_io_log", "Log writes to the I/O registers (0177600..0177776). enable=true starts "
-                  "capture (clears first), enable=false stops; call with no args to dump the buffer. "
-                  "See how a game programs the keyboard / timer / sound / port.",
+                  "joystick port decoded under the active layout, system/speaker) — a hardware snapshot.",
+        schema({})));
+    t.append(tool("bk_io_log", "Log accesses to the I/O registers (0177600..0177776) with the PC of "
+                  "the accessing instruction. enable=true starts capture (clears first), enable=false "
+                  "stops; call with no args to dump. Polling the joystick or the keyboard is a READ, "
+                  "so set reads=true — and pair it with addr, because the monitor polls the keyboard "
+                  "continuously and would flood the buffer. "
+                  "E.g. {\"enable\":true,\"reads\":true,\"addr\":\"0177714\"} finds the code that reads the joystick.",
         schema({{"enable", P("boolean", "Start (true) / stop (false) capture")},
-                {"count", P("integer", "How many recent writes to dump (default 60)")}})));
+                {"reads", P("boolean", "Also log reads (default false = writes only)")},
+                {"addr", P("string", "Only log this register (recommended with reads=true)")},
+                {"cap", P("integer", "Ring-buffer size (default 2048)")},
+                {"count", P("integer", "How many recent entries to dump (default 60)")}})));
     return t;
 }
 
@@ -355,6 +480,233 @@ QString McpServer::disasmText(uint16_t addr, int count) {
 }
 
 // ---------------------------------------------------------------------------
+// ввод и прогон кадров (общая машинка для bk_run / bk_key / bk_joystick / …)
+// ---------------------------------------------------------------------------
+McpServer::RunOutcome McpServer::runFrames(int maxFrames, const std::vector<InputStep>& script,
+                                           const std::function<void()>& afterFrame) {
+    RunOutcome out;
+    if (maxFrames < 0) maxFrames = 0;
+    size_t si = 0;
+    while (out.frames < maxFrames) {
+        // Применить шаги сценария, назначенные на этот кадр (сценарий отсортирован).
+        while (si < script.size() && script[si].frame <= out.frames) {
+            const InputStep& s = script[si++];
+            if (s.hasJoy)     board_.setJoystick(s.joy);
+            if (s.hasKey)   { board_.pressKey(s.key); board_.setKeyHeld(true); }
+            if (s.releaseKey) board_.setKeyHeld(false);
+        }
+        board_.runFrame();
+        ++out.frames;
+        if (afterFrame) afterFrame();
+        if (board_.breakHit()) {
+            if (board_.watchHit()) {
+                out.reason = "watchpoint";
+                out.extra = QString("\nWatch %1 %2 by PC=%3  %4")
+                    .arg(oct6(board_.watchAddr())).arg(board_.watchWrite() ? "WRITE" : "READ")
+                    .arg(oct6(board_.watchPc()))
+                    .arg(QString::fromStdString(bk::disasm(board_.memory(), board_.watchPc()).text));
+            } else out.reason = "breakpoint";
+            board_.clearBreakHit();
+            break;
+        }
+        if (board_.cpu().halted()) { out.reason = "halted"; break; }
+    }
+    return out;
+}
+
+QString McpServer::runText(const RunOutcome& r) {
+    return QString("Stopped (%1) after %2 frames.%3").arg(r.reason).arg(r.frames).arg(r.extra);
+}
+
+// Разложить меандр динамика на сегменты постоянной высоты. Считаем период по
+// каждой ПАРЕ фронтов (t[i+2]-t[i]) — это устойчиво к неравной скважности; соседние
+// периоды в пределах ±12% сливаются в один тон. Пауза длиннее 30 мс — тишина.
+QString McpServer::toneReport(uint64_t tick0) const {
+    const auto& log = board_.speakerLog();
+    std::vector<uint64_t> t;
+    for (const auto& e : log)
+        if (e.tick >= tick0) t.push_back(e.tick);
+    if (t.size() < 3)
+        return QString("тоны: фронтов динамика %1 — звук не формировался%2")
+            .arg(t.size())
+            .arg(board_.speakerLogOn() ? QString() : QString(" (лог фронтов выключен)"));
+
+    const double tickHz = 3.0e6;                       // такт ЦП, Гц
+    const uint64_t silenceTicks = (uint64_t)(0.030 * tickHz);
+    struct Seg { uint64_t start, end; double freqSum; int n; bool silence; };
+    std::vector<Seg> segs;
+    auto push = [&](uint64_t a, uint64_t b, double f, bool sil) {
+        if (!segs.empty() && segs.back().silence == sil &&
+            (sil || std::abs(segs.back().freqSum / segs.back().n - f) <=
+                        0.12 * (segs.back().freqSum / segs.back().n))) {
+            segs.back().end = b;
+            segs.back().freqSum += f;
+            ++segs.back().n;
+            return;
+        }
+        segs.push_back({a, b, f, 1, sil});
+    };
+    for (size_t i = 0; i + 2 < t.size(); ++i) {
+        const uint64_t gap1 = t[i + 1] - t[i], gap2 = t[i + 2] - t[i + 1];
+        if (gap1 > silenceTicks) { push(t[i], t[i + 1], 0, true); continue; }
+        // Пауза во второй половине: период через неё считать нельзя — она станет
+        // сегментом тишины на следующей итерации.
+        if (gap2 > silenceTicks) continue;
+        const uint64_t period = gap1 + gap2;
+        if (!period) continue;
+        push(t[i], t[i + 2], tickHz / (double)period, false);
+    }
+
+    QString out = "тоны (по фронтам 0177716, бит 6):\n";
+    int shown = 0;
+    for (const Seg& s : segs) {
+        const double durMs = (s.end - s.start) * 1000.0 / tickHz;
+        if (durMs < 8.0) continue;                     // мелкие огрызки не показываем
+        if (++shown > 40) { out += "  … (список обрезан)\n"; break; }
+        const double at = (s.start - tick0) * 1000.0 / tickHz;
+        if (s.silence) out += QString("  %1 мс: тишина %2 мс\n").arg(at, 8, 'f', 1).arg(durMs, 0, 'f', 1);
+        else out += QString("  %1 мс: %2 Гц, %3 мс\n")
+                        .arg(at, 8, 'f', 1).arg(s.freqSum / s.n, 0, 'f', 0).arg(durMs, 0, 'f', 1);
+    }
+    if (!shown) out += "  (сегментов длиннее 8 мс нет — короткие щелчки/шум)\n";
+    return out;
+}
+
+// Разобрать key/code в последовательность кодов КОИ-7. Имя клавиши («enter»,
+// «вправо», «рус») ищется в таблице ядра; иначе строка кодируется как текст, и
+// тогда перед кириллицей/латиницей может появиться префикс РУС/ЛАТ (016/017).
+bool McpServer::resolveKey(const QJsonObject& args, std::vector<uint16_t>& codes,
+                           bool& present, QString& warn, QString& err) {
+    codes.clear();
+    present = false;
+    if (args.contains("key")) {
+        const QString ks = args.value("key").toString();
+        if (ks.isEmpty()) { err = "пустое имя клавиши"; return false; }
+        const uint16_t c = bk::bkKeyByName(ks.toStdString());
+        if (c != bk::BK_KEY_NONE) {
+            codes.push_back(c);
+        } else if (ks.size() == 1) {
+            // Одиночный символ: кодируем как текст (для кириллицы добавится РУС/ЛАТ).
+            codes = bk::bkEncodeText(ks.toStdString(), cyrState_);
+            if (codes.empty()) { err = "непредставимый символ: '" + ks + "'"; return false; }
+        } else {
+            err = "неизвестная клавиша '" + ks + "' (имя из списка: enter, space, left, right, "
+                  "up, down, backspace, delete, home, tab, f1..f6, повт, кт, рус, лат — "
+                  "либо ОДИН символ; для строки используйте bk_type)";
+            return false;
+        }
+        present = true;
+        return true;
+    }
+    if (args.contains("code")) {
+        long n;
+        if (!parseNumber(args.value("code"), n)) { err = "плохое значение code"; return false; }
+        // Голое JSON-число — ДЕСЯТИЧНОЕ. Коды БК принято писать восьмерично, так что
+        // {"code":12} даёт 000014 (СБР), а не 000012 (ВВОД) — предупреждаем.
+        if (args.value("code").isDouble() && n > 7) {
+            const QString dec = QString::number(n);
+            bool allOctDigits = true;
+            for (QChar ch : dec) if (ch < '0' || ch > '7') { allOctDigits = false; break; }
+            if (allOctDigits) {
+                bool ok = false;
+                const long asOct = dec.toLong(&ok, 8);
+                if (ok && asOct != n)
+                    warn = QString("\nвнимание: code=%1 разобран как ДЕСЯТИЧНОЕ (=%2). "
+                                   "Если нужен код КОИ-7 %3 — передайте строку \"0%3\".")
+                               .arg(dec).arg(oct6((uint16_t)n)).arg(dec);
+            }
+        }
+        codes.push_back((uint16_t)(n & 0xFFFF));
+        present = true;
+        return true;
+    }
+    return true;   // ни key, ни code — это не ошибка (отпускание клавиши)
+}
+
+// Разобрать buttons/bits/add/release в значение параллельного порта 0177714.
+bool McpServer::resolveJoy(const QJsonObject& args, uint16_t& value, bool& present, QString& err) {
+    present = false;
+    value = 0;
+    if (args.value("release").toBool(false)) { present = true; return true; }
+    QString spec;
+    const QJsonValue bv = args.value("buttons");
+    if (bv.isArray()) {
+        QStringList parts;
+        for (const auto& e : bv.toArray()) parts << e.toString();
+        spec = parts.join('+');
+    } else if (bv.isString()) {
+        spec = bv.toString();
+    }
+    if (!spec.trimmed().isEmpty()) {
+        std::string e2;
+        const uint16_t m = bk::joyMask(joyStd_, spec.toStdString(), &e2);
+        if (!e2.empty()) {
+            err = QString::fromStdString(e2) +
+                  " (допустимо: up/down/left/right, fire1..fire5, button5, bit0..bit15, "
+                  "и русские варианты: вверх/вниз/влево/вправо/огонь)";
+            return false;
+        }
+        value |= m;
+        present = true;
+    }
+    if (args.contains("bits")) {
+        long n;
+        if (!parseNumber(args.value("bits"), n)) { err = "плохое значение bits"; return false; }
+        value |= (uint16_t)(n & 0xFFFF);
+        present = true;
+    }
+    if (present && args.value("add").toBool(false)) value |= board_.joystick();
+    return true;
+}
+
+// Сценарий ввода для bk_run: массив {frame, key|code, release_key, joy|joy_bits, release_joy}.
+bool McpServer::parseInputScript(const QJsonArray& arr, std::vector<InputStep>& out, QString& err) {
+    out.clear();
+    for (const auto& e : arr) {
+        if (!e.isObject()) { err = "элемент input должен быть объектом"; return false; }
+        const QJsonObject o = e.toObject();
+        InputStep s;
+        s.frame = o.value("frame").toInt(0);
+        if (s.frame < 0) s.frame = 0;
+
+        std::vector<uint16_t> codes;
+        bool hasKey = false;
+        QString warn;
+        if (!resolveKey(o, codes, hasKey, warn, err)) return false;
+        if (hasKey && !codes.empty()) {
+            // Префиксы РУС/ЛАТ (если есть) подаются отдельными шагами: регистр кода
+            // хранит ровно один код, поэтому между ними нужен кадр.
+            for (size_t i = 0; i + 1 < codes.size(); ++i) {
+                InputStep p;
+                p.frame = s.frame + (int)i;
+                p.hasKey = true;
+                p.key = codes[i];
+                out.push_back(p);
+            }
+            s.frame += (int)codes.size() - 1;
+            s.hasKey = true;
+            s.key = codes.back();
+        }
+        if (o.value("release_key").toBool(false)) s.releaseKey = true;
+
+        if (o.value("release_joy").toBool(false)) { s.hasJoy = true; s.joy = 0; }
+        else if (o.contains("joy") || o.contains("joy_bits")) {
+            QJsonObject jo;
+            if (o.contains("joy")) jo["buttons"] = o.value("joy");
+            if (o.contains("joy_bits")) jo["bits"] = o.value("joy_bits");
+            uint16_t v = 0; bool have = false;
+            if (!resolveJoy(jo, v, have, err)) return false;
+            s.hasJoy = true;   // "none"/пусто -> 0 (отпустить)
+            s.joy = v;
+        }
+        out.push_back(s);
+    }
+    std::stable_sort(out.begin(), out.end(),
+                     [](const InputStep& a, const InputStep& b) { return a.frame < b.frame; });
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // tool dispatch
 // ---------------------------------------------------------------------------
 QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bool& isError) {
@@ -365,42 +717,46 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
 
     if (name == "bk_load") {
         if (!romsOk_) return fail("ROMs not loaded from " + QString::fromStdString(romDir_));
+        if (args.value("reset").toBool(false)) {
+            board_.reset();          // заодно сбрасывает трассу: данные двух игр не смешиваются
+            cyrState_ = false;
+        }
         board_.ensureMonitorBooted();
         uint16_t a = 0, l = 0;
         bool run = args.value("run").toBool(true);
         if (!board_.loadBin(args.value("path").toString().toStdString(), run, &a, &l))
             return fail("cannot load " + args.value("path").toString());
         lastBin_ = args.value("path").toString();
-        return textContent(QString("Loaded %1: addr=%2 len=%3 (octal).%4\n%5")
-            .arg(lastBin_).arg(oct6(a)).arg(oct6(l))
-            .arg(run ? QString(" PC set to %1.").arg(oct6(a)) : QString())
+        const uint16_t pc = board_.cpu().pc();
+        QString entry;
+        if (run) {
+            entry = QString(" Точка входа %1").arg(oct6(pc));
+            // Для образов ниже 01000 точка входа выбирается эвристикой автостарта
+            // (заполнение стека) и может не совпадать с адресом загрузки.
+            entry += (pc == a) ? QString(".") : QString(" (автостарт; адрес загрузки %1).").arg(oct6(a));
+        }
+        RunOutcome r;
+        const int frames = args.value("frames").toInt(0);
+        if (frames > 0) r = runFrames(frames);
+        return textContent(QString("Loaded %1: addr=%2 len=%3 (octal).%4%5\n%6")
+            .arg(lastBin_).arg(oct6(a)).arg(oct6(l)).arg(entry)
+            .arg(frames > 0 ? "\n" + runText(r) : QString())
             .arg(regsText()));
     }
     if (name == "bk_reset") {
         board_.reset();
+        cyrState_ = false;
         return textContent("Reset.\n" + regsText());
     }
     if (name == "bk_run") {
-        int maxFrames = args.value("max_frames").toInt(200);
-        QString reason = "frame-limit", extra; int ran = 0;
-        for (; ran < maxFrames; ++ran) {
-            board_.runFrame();
-            if (board_.breakHit()) {
-                ++ran;
-                if (board_.watchHit()) {
-                    reason = "watchpoint";
-                    extra = QString("\nWatch %1 %2 by PC=%3  %4")
-                        .arg(oct6(board_.watchAddr())).arg(board_.watchWrite() ? "WRITE" : "READ")
-                        .arg(oct6(board_.watchPc()))
-                        .arg(QString::fromStdString(bk::disasm(board_.memory(), board_.watchPc()).text));
-                } else reason = "breakpoint";
-                board_.clearBreakHit();
-                break;
-            }
-            if (board_.cpu().halted()) { reason = "halted"; ++ran; break; }
-        }
-        return textContent(QString("Stopped (%1) after %2 frames.%3\n%4\n%5")
-            .arg(reason).arg(ran).arg(extra).arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
+        const int maxFrames = args.value("max_frames").toInt(200);
+        std::vector<InputStep> script;
+        QString err;
+        if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
+            return fail(err);
+        const RunOutcome r = runFrames(maxFrames, script);
+        return textContent(QString("%1\n%2\n%3")
+            .arg(runText(r)).arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
     }
     if (name == "bk_run_until") {
         uint16_t target; QString err;
@@ -463,16 +819,35 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
     }
     if (name == "bk_write_mem") {
         uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+        // Страницу В-В пишем ЧЕРЕЗ ШИНУ, чтобы устройство увидело запись (иначе
+        // правка 0177712 не перезапустила бы таймер, а 0177664 — не сдвинула экран).
+        // Обычную память — poke, минуя защиту ПЗУ: отладчику нужно уметь пропатчить
+        // и постоянную память. Явный флаг bus перекрывает это правило.
+        const bool viaBus = args.contains("bus") ? args.value("bus").toBool()
+                                                 : (a >= bk::ADDR_IO_PAGE);
         int n = 0;
         if (args.contains("words")) {
             QJsonArray w = args.value("words").toArray();
-            for (const auto& v : w) { long x; parseNumber(v, x); board_.memory().pokeWord((uint16_t)(a + n * 2), x & 0xFFFF); ++n; }
-            return textContent(QString("Wrote %1 words at %2.").arg(n).arg(oct6(a)));
+            for (const auto& v : w) {
+                long x; parseNumber(v, x);
+                const uint16_t ad = (uint16_t)(a + n * 2), val = (uint16_t)(x & 0xFFFF);
+                if (viaBus) board_.memory().writeWord(ad, val); else board_.memory().pokeWord(ad, val);
+                ++n;
+            }
+            return textContent(QString("Wrote %1 words at %2 (%3).").arg(n).arg(oct6(a))
+                                   .arg(viaBus ? "через шину" : "напрямую в память"));
         }
         if (args.contains("bytes")) {
             QJsonArray b = args.value("bytes").toArray();
-            for (const auto& v : b) { long x; parseNumber(v, x); board_.memory().pokeByte((uint16_t)(a + n), x & 0xFF); ++n; }
-            return textContent(QString("Wrote %1 bytes at %2.").arg(n).arg(oct6(a)));
+            for (const auto& v : b) {
+                long x; parseNumber(v, x);
+                const uint16_t ad = (uint16_t)(a + n);
+                if (viaBus) board_.memory().writeByte(ad, (uint8_t)(x & 0xFF));
+                else        board_.memory().pokeByte(ad, (uint8_t)(x & 0xFF));
+                ++n;
+            }
+            return textContent(QString("Wrote %1 bytes at %2 (%3).").arg(n).arg(oct6(a))
+                                   .arg(viaBus ? "через шину" : "напрямую в память"));
         }
         return fail("provide 'words' or 'bytes'");
     }
@@ -532,23 +907,101 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         return textContent(out);
     }
     if (name == "bk_key") {
-        long code = -1;
-        if (args.contains("code") && !parseNumber(args.value("code"), code)) return fail("bad code");
+        // Защёлкнуть код в 0177662 и выставить «клавиша физически нажата»
+        // (0177716, бит 6, активный низкий). Игры, опрашивающие этот бит (Digger,
+        // PITON), реагируют только пока клавиша удерживается — поэтому frames>0
+        // (нажать / прогнать / отпустить) или hold=true + отдельный bk_run.
+        // «СТОП» — не код КОИ-7: клавиша вынесена из матрицы и вызывает
+        // внеприоритетное прерывание по вектору 4. Обрабатываем отдельно.
+        {
+            const std::string kn = bk::normName(args.value("key").toString().toStdString());
+            if (kn == "stop" || kn == "стоп") {
+                board_.pressStop();
+                const int fr = args.value("frames").toInt(0);
+                QString tail;
+                if (fr > 0) tail = "\n" + runText(runFrames(fr)) + "\n" + regsText();
+                return textContent("Клавиша СТОП: внеприоритетное прерывание по вектору 4." + tail);
+            }
+        }
+        std::vector<uint16_t> codes;
+        bool present = false;
+        QString warn, err;
+        if (!resolveKey(args, codes, present, warn, err)) return fail(err);
         const bool hold = args.value("hold").toBool(false);
-        // Latch the scan code (0177662) and drive the physical key-held state
-        // (0177716 MAG_KEY, active-low). Games that poll the held bit — e.g. Digger,
-        // which requires both the code AND a held key — only register input while
-        // held, so `hold: true` lets bk_run drive movement; call again with
-        // hold:false (or omit code) to release.
-        if (code >= 0) board_.pressKey((uint16_t)code);
-        board_.setKeyHeld(hold);
-        QString msg;
-        if (code >= 0) msg = QString("Key %1 %2.").arg(oct6((uint16_t)code))
-                                 .arg(hold ? "pressed and held" : "tapped");
-        else           msg = hold ? "Key held." : "Key released.";
-        return textContent(msg);
+        const int frames = args.value("frames").toInt(0);
+        const int relFrames = args.value("release_frames").toInt(0);
+
+        QString pre;
+        if (present && codes.size() > 1) {
+            // Префикс РУС/ЛАТ: регистр кода хранит один код, между ними нужен кадр.
+            for (size_t i = 0; i + 1 < codes.size(); ++i) {
+                board_.pressKey(codes[i]);
+                board_.setKeyHeld(true);
+                runFrames(1);
+                board_.setKeyHeld(false);
+            }
+            pre = QString(" (с префиксом %1)").arg(oct6(codes.front()));
+        }
+        const uint16_t code = present ? codes.back() : 0;
+        if (present) board_.pressKey(code);
+
+        QString msg, tail;
+        if (frames > 0) {
+            board_.setKeyHeld(true);
+            const RunOutcome r = runFrames(frames);
+            tail = "\n" + runText(r);
+            if (!hold) {
+                board_.setKeyHeld(false);
+                if (relFrames > 0) tail += "\n" + runText(runFrames(relFrames));
+            }
+            msg = present
+                ? QString("Клавиша %1%2%3 удержана %4 кадр(ов)%5.")
+                      .arg(oct6(code)).arg(keyLabel(code)).arg(pre).arg(frames)
+                      .arg(hold ? ", осталась нажатой" : " и отпущена")
+                : QString("Прогнано %1 кадр(ов) без нажатия.").arg(frames);
+            tail += "\n" + regsText();
+        } else {
+            board_.setKeyHeld(hold);
+            msg = present
+                ? QString("Клавиша %1%2%3 %4.").arg(oct6(code)).arg(keyLabel(code)).arg(pre)
+                      .arg(hold ? "нажата и удерживается" : "нажата (тап)")
+                : (hold ? QString("Клавиша удерживается.") : QString("Клавиша отпущена."));
+        }
+        return textContent(msg + warn + tail);
+    }
+    if (name == "bk_joystick") {
+        // Джойстик на параллельном порту 0177714 (нажато = 1). Раскладка липкая:
+        // задал один раз — действует на все последующие вызовы и на bk_io_state.
+        if (args.contains("layout")) {
+            bk::JoyStandard s;
+            if (!bk::joyParseStandard(args.value("layout").toString().toStdString(), s))
+                return fail("неизвестная раскладка '" + args.value("layout").toString() +
+                            "' (standard | breakhouse | swcorp | klad2)");
+            joyStd_ = s;
+        }
+        uint16_t v = 0;
+        bool present = false;
+        QString err;
+        if (!resolveJoy(args, v, present, err)) return fail(err);
+        if (present) board_.setJoystick(v);
+        else v = board_.joystick();
+
+        const int frames = args.value("frames").toInt(0);
+        const bool hold = args.value("hold").toBool(false);
+        QString tail;
+        if (frames > 0) {
+            const RunOutcome r = runFrames(frames);
+            tail = "\n" + runText(r);
+            if (!hold) { board_.setJoystick(0); tail += "\n0177714 сброшен в 000000."; }
+            tail += "\n" + regsText();
+        }
+        return textContent(QString("0177714 = %1 [%2]  раскладка=%3 (%4)%5")
+            .arg(oct6(v)).arg(QString::fromStdString(bk::joyDecode(joyStd_, v)))
+            .arg(bk::joyStandardName(joyStd_)).arg(QString::fromUtf8(bk::joyStandardTitle(joyStd_)))
+            .arg(tail));
     }
     if (name == "bk_screenshot") {
+        if (args.value("frames").toInt(0) > 0) runFrames(args.value("frames").toInt(0));
         board_.screen().setColorMode(!args.value("mono").toBool(false));
         board_.screen().render(board_.memory());
         QImage img = QImage(reinterpret_cast<const uchar*>(board_.screen().pixels()),
@@ -571,50 +1024,132 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             .arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
     }
     if (name == "bk_audio") {
-        // Run `frames` 50 Hz frames while capturing the speaker (0177716 bit 6)
-        // output as PCM, write a mono 16-bit WAV, and report basic analysis.
-        QString path = args.value("path").toString();
-        if (path.isEmpty()) return fail("path required");
+        // Прогнать кадры, захватывая выход пьезодинамика (0177716, бит 6) как PCM.
+        // Отдаём: разбор (пик/RMS/огибающая/тоны), опционально WAV-файл и — если
+        // клиент говорит на протоколе 2025-03-26 и новее — inline-блок type:"audio".
+        const QString path = args.value("path").toString();
+        const bool doRun = args.value("run").toBool(true);
         long frames = 100;
         if (args.contains("frames")) parseNumber(args.value("frames"), frames);
         if (frames < 1) frames = 1;
         const int rate = 44100;
+        uint64_t tick0 = board_.totalTicks();
+
         board_.sound().setEnabled(true);
-        board_.sound().clear();               // drop anything buffered before capture
         std::vector<int16_t> samples;
         int16_t tmp[8192];
-        for (long f = 0; f < frames; ++f) {
-            board_.runFrame();
-            size_t got;                        // drain each frame so nothing is lost
+        auto drain = [&]() {
+            size_t got;
             while ((got = board_.sound().read(tmp, 8192)) > 0)
                 samples.insert(samples.end(), tmp, tmp + got);
-            if (board_.breakHit()) { board_.clearBreakHit(); break; }
+        };
+        RunOutcome r;
+        if (doRun) {
+            board_.sound().clear();            // отбросить накопленное до захвата
+            board_.setSpeakerLog(true);
+            board_.clearSpeakerLog();
+            std::vector<InputStep> script;
+            QString err;
+            if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
+                return fail(err);
+            // FIFO динамика сливаем после каждого кадра: он ограничен четвертью
+            // секунды и иначе терял бы начало записи.
+            r = runFrames((int)frames, script, drain);
+        } else {
+            drain();                            // просто забрать то, что уже в FIFO
+            r.reason = "no-run";
+            // Буфер — это ПРОШЛОЕ: отматываем начало окна назад на его длительность,
+            // иначе разбор на тоны искал бы фронты в ещё не наступивших тактах.
+            const uint64_t span = (uint64_t)(samples.size() * 3.0e6 / rate);
+            tick0 = (tick0 > span) ? tick0 - span : 0;
         }
-        if (!writeWav(path, samples, rate)) return fail("cannot write " + path);
-        // Analysis: peak amplitude, fraction of non-silent samples, and a rough
-        // dominant pitch from the zero-crossing rate (good for single tones).
-        int peak = 0; long active = 0, crossings = 0; int prev = 0;
-        for (size_t i = 0; i < samples.size(); ++i) {
-            int v = samples[i];
-            if (v > peak) peak = v; else if (-v > peak) peak = -v;
-            if (v > 400 || v < -400) ++active;
-            int sign = (v > 200) ? 1 : (v < -200) ? -1 : prev;
-            if (sign && prev && sign != prev) ++crossings;
-            if (sign) prev = sign;
+
+        if (!path.isEmpty() && !writeWav(path, samples, rate))
+            return fail("cannot write " + path);
+
+        // --- анализ: пик, RMS, доля «не тишины», длительность
+        int peak = 0;
+        long active = 0;
+        double sumsq = 0;
+        for (int16_t v : samples) {
+            const int a = v < 0 ? -v : v;
+            if (a > peak) peak = a;
+            if (a > 400) ++active;
+            sumsq += double(v) * v;
         }
-        double ms = samples.size() * 1000.0 / rate;
-        double freq = (ms > 0) ? (crossings / 2.0) / (ms / 1000.0) : 0; // half-cycles/sec
-        return textContent(QString(
-            "Captured %1 samples (%2 ms) to %3\npeak=%4/32767  active=%5%%  ~pitch=%6 Hz")
-            .arg(samples.size()).arg(ms, 0, 'f', 0).arg(path)
-            .arg(peak).arg(samples.empty() ? 0 : active * 100 / (long)samples.size())
-            .arg(freq, 0, 'f', 0));
+        const double ms = samples.size() * 1000.0 / rate;
+        const int rms = samples.empty() ? 0 : (int)std::sqrt(sumsq / samples.size());
+
+        QString out = QString("Захвачено %1 сэмплов (%2 мс, 44100 Гц моно)%3\n"
+                              "пик=%4/32767  RMS=%5  не тишина=%6%7")
+            .arg(samples.size()).arg(ms, 0, 'f', 0)
+            .arg(path.isEmpty() ? QString() : QString(", записано в " + path))
+            .arg(peak).arg(rms)
+            .arg(QString::number(samples.empty() ? 0 : active * 100 / (long)samples.size()) + "%")
+            .arg(doRun ? "\n" + runText(r) : QString());
+
+        // --- огибающая: RMS по окнам, ASCII-«спарклайн»
+        if (!samples.empty()) {
+            const int cols = std::min<int>(72, std::max<int>(1, (int)samples.size() / 64));
+            const char* ramp = " .:-=+*#%@";
+            QString spark;
+            for (int c = 0; c < cols; ++c) {
+                const size_t a = samples.size() * c / cols, b = samples.size() * (c + 1) / cols;
+                double s = 0;
+                for (size_t i = a; i < b; ++i) s += double(samples[i]) * samples[i];
+                const int lv = (b > a) ? (int)std::sqrt(s / (b - a)) : 0;
+                spark += ramp[std::clamp(lv * 9 / 12000, 0, 9)];
+            }
+            out += QString("\nогибающая (RMS, 0..%1 мс):\n%2\n").arg(ms, 0, 'f', 0).arg(spark);
+        }
+
+        // --- тоны: по фронтам динамика (точнее, чем нулевые пересечения PCM)
+        out += "\n" + toneReport(tick0);
+
+        // --- сырые сэмплы окном (по запросу)
+        if (args.contains("raw_ms") || args.contains("raw_start_ms")) {
+            const int startMs = args.value("raw_start_ms").toInt(0);
+            const int lenMs = std::clamp(args.value("raw_ms").toInt(5), 1, 200);
+            const size_t a = std::min(samples.size(), (size_t)(startMs * rate / 1000));
+            const size_t b = std::min(samples.size(), a + (size_t)(lenMs * rate / 1000));
+            out += QString("\nсырые сэмплы int16 [%1..%2 мс], %3 шт:\n").arg(startMs).arg(startMs + lenMs).arg(b - a);
+            for (size_t i = a; i < b; ++i)
+                out += QString::number(samples[i]) + ((i + 1 - a) % 16 == 0 ? "\n" : " ");
+            out += "\n";
+        }
+
+        // --- inline-аудио (MCP AudioContent появился в протоколе 2025-03-26)
+        const bool wantInline = args.contains("inline") ? args.value("inline").toBool()
+                                                        : (protoVer_ >= QString("2025-03-26"));
+        if (wantInline && !samples.empty()) {
+            QByteArray wav;
+            writeWavBytes(wav, samples, rate);
+            QJsonObject txt{{"type", "text"}, {"text", out}};
+            QJsonObject au{{"type", "audio"},
+                           {"data", QString::fromLatin1(wav.toBase64())},
+                           {"mimeType", "audio/wav"}};
+            return QJsonObject{{"content", QJsonArray{txt, au}}, {"isError", false}};
+        }
+        return textContent(out);
     }
     if (name == "bk_state_save") {
+        const QString slot = args.value("slot").toString();
+        if (!slot.isEmpty()) {
+            board_.saveStateMem(stateSlots_[slot]);
+            return textContent(QString("Состояние сохранено в слот '%1' (%2 байт, в памяти).")
+                                   .arg(slot).arg(stateSlots_[slot].size()));
+        }
         if (!board_.saveState(args.value("path").toString().toStdString())) return fail("save failed");
         return textContent("State saved to " + args.value("path").toString());
     }
     if (name == "bk_state_load") {
+        const QString slot = args.value("slot").toString();
+        if (!slot.isEmpty()) {
+            auto it = stateSlots_.find(slot);
+            if (it == stateSlots_.end()) return fail("нет слота '" + slot + "'");
+            if (!board_.loadStateMem(it->second)) return fail("слот повреждён");
+            return textContent(QString("Состояние восстановлено из слота '%1'.\n%2").arg(slot).arg(regsText()));
+        }
         if (!board_.loadState(args.value("path").toString().toStdString())) return fail("load failed");
         return textContent("State restored.\n" + regsText());
     }
@@ -762,19 +1297,28 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         return textContent(out);
     }
     if (name == "bk_type") {
-        QByteArray b = args.value("text").toString().toLatin1();
-        int budget = args.value("max_frames").toInt(600);
-        int idx = 0, frames = 0;
-        while (idx < b.size() && frames < budget) {
+        // Текст в КОИ-7 (кириллица тоже — с автоматической вставкой РУС/ЛАТ).
+        // Клавиша на время символа считается физически нажатой: игры, опрашивающие
+        // бит 6 регистра 0177716 (Digger, PITON), иначе ввода не увидят.
+        const std::vector<uint16_t> codes =
+            bk::bkEncodeText(args.value("text").toString().toStdString(), cyrState_);
+        const int budget = args.value("max_frames").toInt(600);
+        const int holdFrames = std::max(1, args.value("hold_frames").toInt(2));
+        size_t idx = 0;
+        int frames = 0;
+        while (idx < codes.size() && frames < budget) {
             if (!board_.keyReady()) {
-                char c = b[idx++];
-                board_.pressKey(c == '\n' ? 012 : (uint16_t)((uint8_t)c & 0177));
+                board_.pressKey(codes[idx++]);
+                board_.setKeyHeld(true);
+                for (int k = 0; k < holdFrames && frames < budget; ++k) { board_.runFrame(); ++frames; }
+                board_.setKeyHeld(false);
             }
             board_.runFrame(); ++frames;
         }
         for (int k = 0; k < 12 && board_.keyReady() && frames < budget; ++k) { board_.runFrame(); ++frames; }
-        return textContent(QString("Typed %1/%2 chars in %3 frames.\n%4")
-            .arg(idx).arg(b.size()).arg(frames).arg(regsText()));
+        board_.setKeyHeld(false);
+        return textContent(QString("Набрано %1/%2 кодов за %3 кадров (регистр: %4).\n%5")
+            .arg(idx).arg(codes.size()).arg(frames).arg(cyrState_ ? "РУС" : "ЛАТ").arg(regsText()));
     }
 
     if (name == "bk_callers" || name == "bk_callees") {
@@ -871,8 +1415,36 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         return textContent(QString("Wrote %1 folded-stack lines to %2 (open in speedscope or flamegraph.pl).").arg(lines).arg(path));
     }
     if (name == "bk_vram") {
+        const bool mono = args.value("mono").toBool(false);
+        if (args.value("mode").toString() == "index") {
+            // Точная форма спрайта: читаем ВОЗУ напрямую (0040000, 64 байта на
+            // строку) и печатаем индекс палитры 0-3 на пиксель БК. Мимо Screen —
+            // значит без скролла и без удвоения пикселей до 512.
+            const int maxX = mono ? 512 : 256;
+            int x0 = std::clamp(args.value("x").toInt(0), 0, maxX - 1);
+            int y0 = std::clamp(args.value("y").toInt(0), 0, 255);
+            int w  = std::clamp(args.value("w").toInt(64), 1, maxX - x0);
+            int h  = std::clamp(args.value("h").toInt(32), 1, 256 - y0);
+            if (w * h > 8192) { h = std::max(1, 8192 / w); }   // не топить ответ
+            const uint8_t* vram = board_.memory().videoRam();
+            QString grid;
+            for (int y = y0; y < y0 + h; ++y) {
+                const uint8_t* line = vram + y * 64;
+                for (int x = x0; x < x0 + w; ++x) {
+                    if (mono) grid += ((line[x >> 3] >> (x & 7)) & 1) ? '1' : '.';
+                    else {
+                        const int v = (line[x >> 2] >> ((x & 3) * 2)) & 3;
+                        grid += v ? QChar('0' + v) : QChar('.');
+                    }
+                }
+                grid += "\n";
+            }
+            return textContent(QString("ВОЗУ %1, окно x=%2 y=%3 w=%4 h=%5 "
+                                       "(индексы палитры 0-3, '.'=0=фон):\n%6")
+                .arg(mono ? "моно 512x256" : "цвет 256x256 (на экране пиксели удвоены до 512)")
+                .arg(x0).arg(y0).arg(w).arg(h).arg(grid));
+        }
         int cols = std::clamp(args.value("width").toInt(64), 16, 160);
-        bool mono = args.value("mono").toBool(false);
         board_.screen().setColorMode(!mono);
         board_.screen().render(board_.memory());
         const uint32_t* px = board_.screen().pixels();
@@ -898,6 +1470,80 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         QString head = QString("Screen %1x%2, non-black %3 px").arg(W).arg(H).arg(nonblack);
         if (maxx >= 0) head += QString(", bbox (%1,%2)-(%3,%4)").arg(minx).arg(miny).arg(maxx).arg(maxy);
         return textContent(head + ":\n" + grid);
+    }
+
+    if (name == "bk_ocr") {
+        // Распознать текст по знакоместам: сравнить каждое знакоместо с глифами
+        // знакогенератора (по умолчанию — таблица ПЗУ монитора по адресу 0112036).
+        if (args.value("frames").toInt(0) > 0) runFrames(args.value("frames").toInt(0));
+
+        std::vector<uint8_t> bits;
+        bk::screenBitmap(board_.memory(), board_.peekReg(0177664), bits);
+
+        bk::OcrOptions o;
+        QString err;
+        const QString mode = args.value("mode").toString("auto").toLower();
+        bool fixedMode = false;
+        if (mode == "narrow" || mode == "64") { o.wide = false; fixedMode = true; }
+        else if (mode == "wide" || mode == "32") { o.wide = true; fixedMode = true; }
+        else if (mode != "auto" && !mode.isEmpty()) return fail("mode: auto|narrow|wide");
+        if (!fixedMode) {
+            // Подсказка от самой машины: ячейка 0162 (DSIMB) — ширина знакоместа в
+            // байтах, 1 = 64 символа, 2 = 32. Задаёт стартовый режим, но перебор
+            // всё равно проверит оба — игры драйвером монитора не пользуются.
+            const uint16_t dsimb = board_.memory().peekWord(0162);
+            o.wide = (dsimb == 2);
+        }
+        const bool fixedY0 = args.contains("y");
+        o.x0 = args.value("x").toInt(0);
+        o.y0 = args.value("y").toInt(0);
+        o.cols = args.value("cols").toInt(0);
+        o.rows = args.value("rows").toInt(0);
+        o.cellW = args.value("cell_w").toInt(0);
+        o.glyphW = std::clamp(args.value("glyph_w").toInt(8), 1, 8);
+        o.fontHeight = std::clamp(args.value("cell_h").toInt(bk::BK_FONT_HEIGHT), 1, 16);
+        o.tolerance = std::clamp(args.value("tolerance").toInt(6), 0, 80);
+        o.allowInverse = args.value("inverse").toBool(true);
+        if (args.contains("font_addr")) {
+            if (!resolveAddr(args, "font_addr", o.fontAddr, err)) return fail(err);
+            o.bkLayout = false;            // своя таблица — без «дыры» 0200..0237
+            long fb = 020;
+            if (args.contains("font_base")) parseNumber(args.value("font_base"), fb);
+            o.fontBase = (uint16_t)(fb & 0377);
+            o.fontCount = args.value("font_count").toInt(0);
+        }
+
+        const bk::OcrResult r = ocrAuto(board_.memory(), bits, o, fixedMode, fixedY0);
+        if (r.rows <= 0 || r.cols <= 0) return fail("пустая сетка знакомест — проверьте x/y/cols/rows");
+
+        QString out = QString("Текст с экрана: режим %1 (%2 симв./строку, знакоместо %3x%4), "
+                              "сетка %5x%6 от точки (%7,%8).\n"
+                              "Знакомест непустых %9, распознано %10, не опознано %11%12.\n")
+            .arg(r.opt.wide ? "широкий" : "узкий")
+            .arg(512 / (r.opt.cellW > 0 ? r.opt.cellW : (r.opt.wide ? 16 : 8)))
+            .arg(r.opt.cellW > 0 ? r.opt.cellW : (r.opt.wide ? 16 : 8)).arg(r.opt.fontHeight)
+            .arg(r.cols).arg(r.rows).arg(r.opt.x0).arg(r.opt.y0)
+            .arg(r.nonBlank).arg(r.recognised).arg(r.unknown)
+            .arg(r.inverted ? QString(" (инверсных %1)").arg(r.inverted) : QString());
+        if (r.nonBlank && r.recognised == 0)
+            out += "Ни одно знакоместо не совпало со знакогенератором — вероятно, игра рисует\n"
+                   "своим шрифтом: укажите font_addr (и font_base/font_count) либо поднимите tolerance.\n";
+        out += "----\n";
+        out += QString::fromUtf8(r.text().c_str());
+        out += "----";
+
+        if (args.value("codes").toBool(false)) {
+            out += "\nВосьмеричные коды по знакоместам (?? — не опознано):\n";
+            for (int row = 0; row < r.rows; ++row) {
+                QString line = QString("%1:").arg(row, 2);
+                for (int col = 0; col < r.cols; ++col) {
+                    const bk::OcrCell& c = r.cells[(size_t)row * r.cols + col];
+                    line += c.ok ? QString(" %1").arg(oct6(c.code).right(3)) : QString(" ???");
+                }
+                out += line + "\n";
+            }
+        }
+        return textContent(out);
     }
 
     if (name == "bk_emt_log") {
@@ -955,39 +1601,125 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         if (csr & 0004) timerBits += "MON ";
         if (csr & 0200) timerBits += "FL(underflow) ";
         uint16_t sys = r(0177716);
+        const uint16_t port = r(0177714);
         return textContent(QString(
             "I/O state:\n"
-            "  Keyboard  status 0177660=%1  data 0177662=%2  (%3)\n"
-            "  Scroll    0177664=%4\n"
-            "  Timer     limit 0177706=%5  count 0177710=%6  csr 0177712=%7 [%8]\n"
-            "  Port      0177714=%9\n"
-            "  System    0177716=%10  (key-held bit6=%11)")
+            "  Keyboard  status 0177660=%1  data 0177662=%2  (%3)%4\n"
+            "  Scroll    0177664=%5\n"
+            "  Timer     limit 0177706=%6  count 0177710=%7  csr 0177712=%8 [%9]\n"
+            "  Port      0177714=%10  [%11]  раскладка=%12\n"
+            "  System    0177716=%13  (key-held bit6=%14)\n"
+            "  Развёртка строка %15/320 %16%17%18")
             .arg(oct6(r(0177660))).arg(oct6(r(0177662))).arg(board_.keyReady() ? "code ready" : "empty")
+            .arg(keyLabel(r(0177662)))
             .arg(oct6(r(0177664)))
             .arg(oct6(r(0177706))).arg(oct6(r(0177710))).arg(oct6(csr)).arg(timerBits.trimmed().isEmpty() ? "stopped" : timerBits.trimmed())
-            .arg(oct6(r(0177714)))
-            .arg(oct6(sys)).arg((sys & 0100) ? "1(up)" : "0(down)"));
+            .arg(oct6(port)).arg(QString::fromStdString(bk::joyDecode(joyStd_, port)))
+            .arg(bk::joyStandardName(joyStd_))
+            .arg(oct6(sys)).arg((sys & 0100) ? "1(up) — отпущена" : "0(down) — УДЕРЖИВАЕТСЯ")
+            .arg(board_.vp037().scanline())
+            .arg(board_.vp037().vgate() ? "кадровое гашение"
+                 : board_.vp037().hgate() ? "строчное гашение" : "видимая часть")
+            .arg(board_.vp037().inActiveDisplay() ? " (037 занимает шину: такты ожидания ДОЗУ)"
+                                                  : "")
+            .arg(board_.smk512()
+                 ? QString("\n  СМК-512   режим %1 (код %2), страница %3 (код %4)%5")
+                       .arg(QString::fromUtf8(bk::Smk512::modeName(board_.smk().mode())))
+                       .arg(oct6(bk::Smk512::modeCode(board_.smk().mode())))
+                       .arg(board_.smk().page())
+                       .arg(oct6(bk::Smk512::pageCode(board_.smk().page())))
+                       .arg(board_.smk().armed() ? ", строб взведён" : "")
+                 : QString()));
     }
     if (name == "bk_io_log") {
         if (args.contains("enable")) {
-            bool on = args.value("enable").toBool();
+            const bool on = args.value("enable").toBool();
+            uint16_t filt = 0;
+            QString err;
+            if (args.contains("addr") && !resolveAddr(args, "addr", filt, err)) return fail(err);
+            const size_t cap = (size_t)std::max(16, args.value("cap").toInt(2048));
             if (on) board_.clearIoLog();
-            board_.setIoLog(on);
+            board_.setIoLog(on, args.value("reads").toBool(false), cap, filt);
         }
         static const std::map<uint16_t, const char*> nm = {
             {0177660, "kbd.status"}, {0177662, "kbd.data"}, {0177664, "scroll"},
             {0177706, "timer.limit"}, {0177710, "timer.count"}, {0177712, "timer.csr"},
-            {0177714, "port"}, {0177716, "system/speaker"}};
-        int count = args.value("count").toInt(60);
+            {0177714, "port(джойстик)"}, {0177716, "system/speaker"}};
+        const int count = args.value("count").toInt(60);
         const auto& log = board_.ioLog();
-        QString out = QString("I/O writes (%1 captured):\n").arg(log.size());
-        int startIdx = std::max(0, (int)log.size() - count);
+        QString out = QString("Обращения к В-В (%1 в буфере; чтения: %2%3):\n")
+            .arg(log.size()).arg(board_.ioLogReads() ? "да" : "нет")
+            .arg(board_.ioLogFilter() ? QString(", фильтр %1").arg(oct6(board_.ioLogFilter())) : QString());
+        const int startIdx = std::max(0, (int)log.size() - count);
         for (int i = startIdx; i < (int)log.size(); ++i) {
-            auto it = nm.find(log[i].addr);
-            out += QString("  %1 = %2   %3\n").arg(oct6(log[i].addr)).arg(oct6(log[i].value))
-                       .arg(it != nm.end() ? it->second : "");
+            const auto& e = log[i];
+            auto it = nm.find(e.addr);
+            out += QString("  %1 %2 = %3   %4  PC=%5  %6\n")
+                       .arg(e.isRead ? "R" : "W").arg(oct6(e.addr)).arg(oct6(e.value))
+                       .arg(it != nm.end() ? it->second : "", -16).arg(oct6(e.pc))
+                       .arg(QString::fromStdString(bk::disasm(board_.memory(), e.pc).text));
         }
-        if (log.empty()) out += "  (buffer empty — enable capture with {\"enable\":true}, run, then dump)\n";
+        if (log.empty())
+            out += "  (буфер пуст — включите захват: {\"enable\":true}, при нужде "
+                   "{\"reads\":true,\"addr\":\"0177714\"}, затем прогоните и снимите дамп)\n";
+        return textContent(out);
+    }
+
+    if (name == "bk_joy_probe") {
+        // Определить раскладку джойстика неизвестной игры эмпирически: для каждого
+        // бита порта — чекпоинт, выставить бит, прогнать, снять ОЗУ, откатиться.
+        // Меняющиеся ячейки и знак дельты выдают координату игрока (см. docs/joystick.md).
+        const int nbits = std::clamp(args.value("bits").toInt(8), 1, 16);
+        const int frames = std::clamp(args.value("frames").toInt(10), 1, 200);
+        const int maxCells = std::clamp(args.value("max").toInt(8), 1, 64);
+        uint16_t start = 0, end = 0037777;
+        QString err;
+        if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
+        if (args.contains("end") && !resolveAddr(args, "end", end, err)) return fail(err);
+        if (end <= start) return fail("end должен быть больше start");
+
+        std::vector<uint8_t> checkpoint;
+        board_.saveStateMem(checkpoint);
+        const uint16_t joySaved = board_.joystick();
+
+        // Опорный прогон без ввода — чтобы отсеять то, что меняется само по себе
+        // (таймеры, анимация, счётчики кадров).
+        auto snapshot = [&]() {
+            std::vector<uint16_t> s;
+            for (uint32_t a = start; a + 1 <= end; a += 2) s.push_back(board_.memory().peekWord((uint16_t)a));
+            return s;
+        };
+        board_.setJoystick(0);
+        runFrames(frames);
+        const std::vector<uint16_t> base = snapshot();
+        board_.loadStateMem(checkpoint);
+
+        QString out = QString("Проба джойстика: %1 бит(ов) x %2 кадров, диапазон %3..%4.\n"
+                              "Показаны слова, изменившиеся ИНАЧЕ, чем в прогоне без ввода.\n")
+            .arg(nbits).arg(frames).arg(oct6(start)).arg(oct6(end));
+        for (int b = 0; b < nbits; ++b) {
+            const uint16_t bit = (uint16_t)(1u << b);
+            board_.loadStateMem(checkpoint);
+            board_.setJoystick(bit);
+            runFrames(frames);
+            const std::vector<uint16_t> cur = snapshot();
+            QString line;
+            int shown = 0;
+            for (size_t i = 0; i < cur.size() && i < base.size(); ++i) {
+                if (cur[i] == base[i]) continue;
+                if (++shown > maxCells) { line += " …"; break; }
+                const uint16_t addr = (uint16_t)(start + i * 2);
+                line += QString(" %1:%2%3").arg(oct6(addr))
+                            .arg((int16_t)(cur[i] - base[i]) >= 0 ? "+" : "")
+                            .arg((int16_t)(cur[i] - base[i]));
+            }
+            out += QString("  бит%1 (%2):%3\n").arg(b, -2).arg(oct6(bit))
+                       .arg(line.isEmpty() ? QString(" — ничего") : line);
+        }
+        board_.loadStateMem(checkpoint);
+        board_.setJoystick(joySaved);
+        out += "Состояние машины восстановлено. Малая ±дельта обычно = горизонталь, "
+               "большая = вертикаль (шаг строки экрана).";
         return textContent(out);
     }
 

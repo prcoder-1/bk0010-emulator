@@ -7,8 +7,8 @@ namespace bk {
 namespace {
 
 const char* regName(int r) {
-    static const char* n[8] = {"R0", "R1", "R2", "R3", "R4", "SP", "PC"};
-    return (r < 7) ? n[r] : "PC";
+    static const char* n[8] = {"R0", "R1", "R2", "R3", "R4", "R5", "SP", "PC"};
+    return (r >= 0 && r < 8) ? n[r] : "PC";
 }
 
 std::string oct(uint16_t v) {

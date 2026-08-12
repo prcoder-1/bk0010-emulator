@@ -37,7 +37,11 @@ public:
     // Deliver a hardware interrupt via the given vector (used by devices).
     // Pushes PSW/PC and loads the new PC/PSW from the vector. No masking here —
     // the caller checks priority/mask bits before calling.
-    void interrupt(uint16_t vector);
+    // Возвращает стоимость входа в прерывание в тактах: два обращения в стек плюс
+    // выборка вектора — они не бесплатны (GID timing_Misk_10, devemu/CPU.cpp:36).
+    // Вызывающий обязан учесть их в бюджете тактов.
+    int interrupt(uint16_t vector);
+    enum : int { INT_ENTRY_TICKS = 40 };
 
     bool halted() const { return halted_; }
     bool waiting() const { return waiting_; }
@@ -58,6 +62,18 @@ public:
     // handled and the ROM handler (vector 030) is skipped. See Board::handleEmt36.
     void setEmt36Hook(std::function<bool()> h) { emt36Hook_ = std::move(h); }
 
+    // «Баг флага C» К1801ВМ1 [ВМ1 §10]. После `MOVB xx,Rd` и `MFPS Rd` (ТОЛЬКО с
+    // регистровым приёмником) команды условного перехода видят C сброшенным, хотя
+    // в самом PSW он корректен: на микроадресе 0x51 идёт знаковое расширение байта
+    // в регистр результата, и временное C в промежуточном регистре флагов обнуляется —
+    // а переход использует именно его. Любая другая команда перезаписывает этот
+    // регистр из PSW и снимает эффект. `SWAB Rd` использует тот же микроадрес, но
+    // сам сбрасывает C, поэтому там ошибка не наблюдаема — триггером не считаем.
+    void setEmulateCBug(bool on) { emulateCBug_ = on; }
+    bool emulateCBug() const { return emulateCBug_; }
+    // Команда RESET сбрасывает периферию — что именно, знает Board.
+    void setResetHook(std::function<void()> h) { resetHook_ = std::move(h); }
+
 private:
     Memory& mem_;
     uint16_t ir_ = 0;          // current instruction register
@@ -66,6 +82,14 @@ private:
     bool halted_ = false;
     bool waiting_ = false;
     std::function<bool()> emt36Hook_;  // EMT 36 intercept (true = handled, skip ROM)
+    std::function<void()> resetHook_;  // RESET: сброс периферии
+    bool emulateCBug_ = true;
+    bool cBugArmed_  = false;   // предыдущая команда — MOVB/MFPS с приёмником-регистром
+    bool cBugActive_ = false;   // текущая команда видит C сброшенным
+
+    // Флаги в том виде, в каком их читает команда условного перехода: это НЕ PSW,
+    // а промежуточный регистр флагов, который и портит баг ВМ1.
+    uint16_t brFlags() const { return cBugActive_ ? static_cast<uint16_t>(psw & ~CC_C) : psw; }
 
     // Instruction-field accessors (bits of ir_).
     int srcMode() const { return (ir_ & 07000) >> 9; }

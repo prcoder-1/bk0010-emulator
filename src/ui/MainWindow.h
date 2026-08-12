@@ -10,12 +10,16 @@
 class GlScreen;
 class DebuggerOverlay;
 class MemVisWidget;
+class SmkRamWidget;
 class HotPathWidget;
 class CallGraphWidget;
 class FlameWidget;
 class FlameChartWidget;
 class HotChartWidget;
 class AudioOut;
+#include <QElapsedTimer>
+class QAction;
+
 class QTimer;
 class QLabel;
 
@@ -24,10 +28,17 @@ class QLabel;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(const QString& romDir, QWidget* parent = nullptr);
+    // smkOverride: 1 — включить блок СМК-512, 0 — выключить, -1 — взять
+    // сохранённую настройку (ключ командной строки перекрывает её, но не
+    // перезаписывает: настройка меняется только переключателем в меню).
+    explicit MainWindow(const QString& romDir, int smkOverride = -1, QWidget* parent = nullptr);
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
+
+    // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
+    void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
+    void setSmk512(bool on);            // подключить/снять плату и перезапустить машину
 
 protected:
     void keyPressEvent(QKeyEvent* e) override;
@@ -37,10 +48,12 @@ protected:
 
 private slots:
     void onTick();
+    void runOneSlice(int kSlices);   // один слайс кадра + раз в кадр — отрисовка
     void openBin();
     void resetMachine();
     void toggleColorMode();
     void openMemVis();
+    void openSmkRam();
     void openHotPath();
     void openCallGraph();
     void openFlame();
@@ -74,6 +87,7 @@ private:
     GlScreen* screen_ = nullptr;
     DebuggerOverlay* overlay_ = nullptr;
     MemVisWidget* memvis_ = nullptr;
+    SmkRamWidget* smkram_ = nullptr;
     HotPathWidget* hotpath_ = nullptr;
     CallGraphWidget* callgraph_ = nullptr;
     FlameWidget* flame_ = nullptr;
@@ -82,6 +96,7 @@ private:
     AudioOut* audio_ = nullptr;
     QTimer* timer_ = nullptr;
     QLabel* status_ = nullptr;
+    QAction* smkAction_ = nullptr;   // галка «СМК-512» — синхронизируется при загрузке снимка
     QString lastBin_;
     BkKeymap keymap_;
     Gamepad gamepad_;           // джойстик на порту 0177714 через SDL2-геймпад
@@ -95,5 +110,10 @@ private:
     bool colorMode_ = true;
     bool paused_ = false;       // Soft-ICE debugger overlay active
     bool suspended_ = false;    // emulation frozen via the Pause key
-    int  phase_ = 0;            // emulation sub-slice within the current 50 Hz frame
+    int  phase_ = 0;            // emulation sub-slice within the current frame
+    // Темп эмуляции привязан к РЕАЛЬНОМУ времени, а не к числу срабатываний таймера:
+    // кадр БК длится 61440 тактов = 20,48 мс, что целым числом миллисекунд в QTimer
+    // не выражается. Считаем, сколько слайсов должно было пройти к текущему моменту.
+    QElapsedTimer clock_;
+    qint64 slicesDone_ = 0;
 };

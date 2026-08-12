@@ -274,6 +274,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     // panel.
     int regW = 44 * cw + 14;
     QRect regRect(margin, margin, regW, lineH_ * 5);
+    regRect_ = regRect; cw_ = cw;   // для попадания мышью при правке
     p.fillRect(regRect, panelBg);
     p.setPen(border); p.drawRect(regRect);
     p.setPen(title); p.drawText(regRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— РЕГИСТРЫ —");
@@ -283,13 +284,18 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         // A register that changed since the last step is drawn in the "changed"
         // colour (classic Soft-ICE cue).
         p.setPen(havePrev_ && cpu.r[i] != prevR_[i] ? chg : fg);
-        QString s = QString("%1=%2").arg(nm[i]).arg(oct6(cpu.r[i]));
         int col = i % 4, row = i / 4;
-        p.drawText(rx + col * cw * 11, ry + row * lineH_, s);
+        const int x = rx + col * cw * 11, y = ry + row * lineH_;
+        p.drawText(x, y, QString("%1=").arg(nm[i]));
+        if (editTarget_ == EditTarget::Reg && editReg_ == i) drawEditField(p, x + cw * 3, y, fm, oct6(cpu.r[i]));
+        else p.drawText(x + cw * 3, y, oct6(cpu.r[i]));
     }
+    regX_ = rx; regY_ = ry;
     p.setPen(havePrev_ && cpu.psw != prevPsw_ ? chg : fg);
-    p.drawText(rx, ry + 2 * lineH_, QString("PSW=%1  [%2]")
-        .arg(oct6(cpu.psw)).arg(flagsStr(cpu.psw)));
+    p.drawText(rx, ry + 2 * lineH_, QString("PSW="));
+    if (editTarget_ == EditTarget::Psw) drawEditField(p, rx + cw * 4, ry + 2 * lineH_, fm, oct6(cpu.psw));
+    else p.drawText(rx + cw * 4, ry + 2 * lineH_, oct6(cpu.psw));
+    p.drawText(rx + cw * 12, ry + 2 * lineH_, QString("[%1]").arg(flagsStr(cpu.psw)));
     p.setPen(fg);
     p.drawText(rx + cw * 24, ry + 2 * lineH_,
         QString(cpu.halted() ? "СОСТ: ОСТАНОВ (HALT)" : "СОСТ: ПАУЗА"));
@@ -434,21 +440,32 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     // 7 monospace characters wide.
     int wpr = (memRect.width() - 20 - cw * 7) / (cw * 7);
     if (wpr < 1) wpr = 1; else if (wpr > 8) wpr = 8;
+    memWpr_ = wpr;
     uint16_t ma = memAddr_;
     int my = memRect.y() + lineH_ + lineH_;
     for (int r = 0; r < rows; ++r) {
         QString line = oct6(ma) + ":";
         for (int c = 0; c < wpr; ++c) line += " " + oct6(mem.peekWord(ma + c * 2));
         p.drawText(memRect.x() + 10, my, line);
+        if (editTarget_ == EditTarget::Mem && editAddr_ >= ma &&
+            editAddr_ < static_cast<uint16_t>(ma + wpr * 2) && !((editAddr_ - ma) & 1)) {
+            const int c = (editAddr_ - ma) / 2;
+            drawEditField(p, memRect.x() + 10 + cw * (7 + c * 7 + 1), my, fm,
+                          oct6(mem.peekWord(editAddr_)));
+        }
         my += lineH_;
         ma += static_cast<uint16_t>(wpr * 2);
     }
 
-    // ---- Stack (middle) fills the space between memory and the bottom-anchored
-    // register box, which is sized to fit exactly its title row + 9 registers. ----
-    int sregH = 10 * lineH_ + 8;
+    // ---- Панель стека занимает всё между памятью и прибитой к низу панелью
+    // системных регистров. Та рассчитана ровно на своё содержимое: строка
+    // заголовка, строка «луч + шапка колонок» и 9 регистров. С установленным
+    // блоком СМК-512 там же появляется строка режима — панель растёт на строку,
+    // стек ровно на столько же сжимается. ----
+    int sregH = (board_->smk512() ? 12 : 11) * lineH_ + 8;
     QRect stkRect(mx, memRect.bottom() + margin, mw,
                   dTop + dH - sregH - 2 * margin - memRect.bottom());
+    stkRect_ = stkRect;   // для попадания мышью при правке
     p.fillRect(stkRect, panelBg);
     p.setPen(border); p.drawRect(stkRect);
     p.setPen(title); p.drawText(stkRect.adjusted(6, 4, 0, 0), Qt::AlignTop | Qt::AlignLeft, "— СТЕК (SP) —");
@@ -463,6 +480,10 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         QString sym = symLabel(val);
         if (!sym.isEmpty()) { p.setPen(fg); }
         p.drawText(stkRect.x() + 10, sy, line);
+        // Значение в стеке правится так же, как слово в дампе: колонка значения
+        // начинается после "оооооо: " — восьми знакомест.
+        if (editTarget_ == EditTarget::Stack && editAddr_ == sa)
+            drawEditField(p, stkRect.x() + 10 + cw * 8, sy, fm, oct6(val));
         if (!sym.isEmpty()) {
             p.setPen(symCol);
             int ax = stkRect.x() + 10 + fm.horizontalAdvance(line + "  ");
@@ -494,11 +515,44 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         {0177716, "внеш устр."},   // управление внешними устройствами (динамик/лента/клавиша)
     };
     const int srx = sregRect.x() + 10, srw = sregRect.width() - 16;
-    // Column headers over the two value columns (written / read), on the title row.
+    // Первая строка содержимого — вторая строка панели: на первой стоит заголовок,
+    // как во всех остальных панелях (регистры, память, стек).
+    int gy = sregRect.y() + 2 * lineH_;
+    // Заголовки над колонками значений (записано / прочитано).
     p.setPen(QColor(150, 180, 230));
-    p.drawText(srx + 20 * cw, sregRect.y() + lineH_, "запись");
-    p.drawText(srx + 27 * cw, sregRect.y() + lineH_, "чтение");
-    int gy = sregRect.y() + lineH_ + lineH_;
+    p.drawText(srx + 20 * cw, gy, "запись");
+    p.drawText(srx + 27 * cw, gy, "чтение");
+    // Где сейчас луч: строка развёртки и фаза. Модель Vp037 это знает, а при
+    // отладке видеоэффектов и гонок с ВОЗУ без этого не обойтись.
+    {
+        const auto& tv = board_->vp037();
+        const QString phase = tv.vgate() ? QString::fromUtf8("кадр.гаш")
+                            : tv.hgate() ? QString::fromUtf8("строч.гаш")
+                                         : QString::fromUtf8("видимая");
+        p.setPen(tv.inActiveDisplay() ? chg : fg);
+        p.drawText(srx, gy, QString::fromUtf8("луч %1 %2").arg(tv.scanline(), 3).arg(phase));
+        p.setPen(fg);
+    }
+    gy += lineH_;
+    // Блок расширения памяти СМК-512: без режима и номера страницы отладка идёт
+    // вслепую — одни и те же адреса выше 0100000 в разных режимах значат разное.
+    // Показываем только с установленной платой (см. расчёт sregH выше). Брать
+    // peekRegWritten(0177130) нельзя: СМК перехватывает запись в Memory раньше
+    // IoBus, и журнал записей регистра остаётся пустым — истина в самом Smk512.
+    if (board_->smk512()) {
+        const auto& smk = board_->smk();
+        QString s = QString::fromUtf8("СМК %1 (%2) стр %3")
+                        .arg(QString::fromUtf8(bk::Smk512::modeName(smk.mode())), -5)
+                        .arg(oct6(bk::Smk512::modeCode(smk.mode())))
+                        .arg(smk.page(), -2);
+        p.setPen(fg);
+        p.drawText(srx, gy, s);
+        if (smk.armed()) {   // взведён строб — машина в середине трёхтактного протокола
+            p.setPen(chg);
+            p.drawText(srx + cw * static_cast<int>(s.size()) + cw, gy, QString::fromUtf8("строб"));
+        }
+        gy += lineH_;
+    }
     for (const auto& sr : sregs) {
         if (gy > sregRect.bottom()) break;
         uint16_t rd = board_->peekReg(sr.addr);
@@ -522,12 +576,133 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     p.setPen(QColor(180, 200, 255));
     QString help = QString::fromUtf8(
         "F12-выход  F7/F8-шаг  F4-до курсора  F9-тчк  Esc-продолж  ↑↓-курсор  G-переход  Enter-цель  X-ссылки  ←→-назад/вперёд  "
-        "N-имя ;-коммент  данные:B/W/S/P U-код  ЛКМ-по адресу-переход  ПКМ-тчк");
+        "N-имя ;-коммент  данные:B/W/S/P U-код  ЛКМ-по адресу-переход  ПКМ-тчк  "
+        "ЛКМ по регистру/стеку/памяти-правка (0-7, Enter, Esc)");
     p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
+}
+
+// ---------------------------------------------------------------------------
+// Правка значения на месте
+// ---------------------------------------------------------------------------
+void DebuggerOverlay::beginEdit(EditTarget t, int reg, uint16_t addr) {
+    editTarget_ = t;
+    editReg_ = reg;
+    editAddr_ = addr;
+    editBuf_.clear();          // ввод начинается с пустого поля: набрал — применил
+    update();
+}
+
+void DebuggerOverlay::cancelEdit() {
+    editTarget_ = EditTarget::None;
+    editBuf_.clear();
+    update();
+}
+
+void DebuggerOverlay::commitEdit() {
+    if (editTarget_ == EditTarget::None) return;
+    if (!editBuf_.isEmpty()) {
+        bool ok = false;
+        const uint16_t v = static_cast<uint16_t>(editBuf_.toUInt(&ok, 8) & 0xFFFF);
+        if (ok) {
+            switch (editTarget_) {
+            case EditTarget::Reg: board_->cpu().r[editReg_ & 7] = v; break;
+            case EditTarget::Psw: board_->cpu().psw = v; break;
+            case EditTarget::Stack:
+            case EditTarget::Mem:
+                // Регистры В-В правим ЧЕРЕЗ ШИНУ, чтобы устройство увидело запись
+                // (иначе, скажем, правка 0177712 не перезапустила бы таймер).
+                // Обычную память — poke, минуя защиту ПЗУ: отладчику нужно уметь
+                // пропатчить и постоянную память.
+                if (editAddr_ >= bk::ADDR_IO_PAGE) board_->memory().writeWord(editAddr_, v);
+                else                               board_->memory().pokeWord(editAddr_, v);
+                break;
+            default: break;
+            }
+        }
+    }
+    editTarget_ = EditTarget::None;
+    editBuf_.clear();
+    // Снимок регистров НЕ обновляем: пусть исправленный регистр останется
+    // подсвеченным как изменившийся — это привычная подсказка в стиле Soft-ICE.
+    update();
+}
+
+bool DebuggerOverlay::handleEditKey(QKeyEvent* e) {
+    if (editTarget_ == EditTarget::None) return false;
+    switch (e->key()) {
+    case Qt::Key_Escape:    cancelEdit(); return true;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:     commitEdit(); return true;
+    case Qt::Key_Backspace: if (!editBuf_.isEmpty()) editBuf_.chop(1); update(); return true;
+    default: break;
+    }
+    const QString t = e->text();
+    if (t.size() == 1 && t[0] >= '0' && t[0] <= '7') {   // адреса и значения БК — восьмеричные
+        if (editBuf_.size() < 6) editBuf_ += t;
+        update();
+        return true;
+    }
+    return true;   // пока идёт правка, прочие клавиши в отладчик не пропускаем
+}
+
+void DebuggerOverlay::drawEditField(QPainter& p, int x, int baselineY, const QFontMetrics& fm,
+                                    const QString& current) const {
+    const QPen prev = p.pen();
+    const QRect r(x - 1, baselineY - fm.ascent(), cw_ * 7 + 2, fm.height());
+    // Заливка ПОЛУПРОЗРАЧНАЯ: сплошная съедала цифры, да и весь оверлей полупрозрачный
+    // по смыслу — сквозь него виден экран БК. Поле выделяем рамкой, а не заливкой.
+    p.fillRect(r, QColor(230, 200, 40, 60));
+    p.setPen(QColor(255, 220, 80));
+    p.drawRect(r);
+    if (editBuf_.isEmpty()) {
+        // Пока ничего не набрано, показываем прежнее значение приглушённым —
+        // иначе не видно, что именно правишь.
+        p.setPen(QColor(150, 150, 150));
+        p.drawText(x, baselineY, current);
+        p.setPen(QColor(255, 240, 120));
+        p.drawText(x + cw_ * current.size(), baselineY, "_");
+    } else {
+        p.setPen(QColor(255, 240, 120));
+        p.drawText(x, baselineY, editBuf_ + "_");
+    }
+    p.setPen(prev);
 }
 
 void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
     const QPoint pos = e->pos();
+    // Идёт правка: клик в стороне — отмена (чтобы не залипало).
+    if (editing()) { cancelEdit(); return; }
+    // Панель регистров: клик по значению начинает его правку.
+    if (regRect_.contains(pos) && e->button() == Qt::LeftButton) {
+        const int row = (pos.y() - (regY_ - lineH_) + lineH_) / lineH_ - 1;
+        const int col = (pos.x() - regX_) / (cw_ * 11);
+        if (row == 2) { beginEdit(EditTarget::Psw, 0, 0); return; }   // строка PSW
+        if (row >= 0 && row <= 1 && col >= 0 && col <= 3) {
+            beginEdit(EditTarget::Reg, row * 4 + col, 0);
+            return;
+        }
+        return;
+    }
+    // Стек: клик по колонке значения начинает правку слова по этому адресу.
+    // Строка имеет вид "оооооо: оооооо", значение начинается с 8-го знакоместа.
+    if (stkRect_.contains(pos) && e->button() == Qt::LeftButton) {
+        const int r = (pos.y() - (stkRect_.y() + 2 * lineH_) + lineH_) / lineH_;
+        const int chars = (pos.x() - (stkRect_.x() + 10)) / cw_;
+        if (r >= 0 && chars >= 8 && chars < 14)
+            beginEdit(EditTarget::Stack, 0, static_cast<uint16_t>(board_->cpu().sp() + r * 2));
+        return;
+    }
+    // Дамп памяти: клик по слову начинает его правку.
+    if (memRect_.contains(pos) && e->button() == Qt::LeftButton) {
+        const int r = (pos.y() - (memRect_.y() + 2 * lineH_) + lineH_) / lineH_;
+        const int chars = (pos.x() - (memRect_.x() + 10)) / cw_;
+        const int c = (chars - 7) / 7;
+        if (r >= 0 && chars >= 7 && c >= 0 && c < memWpr_) {
+            beginEdit(EditTarget::Mem, 0,
+                      static_cast<uint16_t>(memAddr_ + (r * memWpr_ + c) * 2));
+        }
+        return;
+    }
     // Breakpoints panel: left click jumps the disassembler to the breakpoint,
     // right click removes it.
     if (bpRect_.contains(pos)) {

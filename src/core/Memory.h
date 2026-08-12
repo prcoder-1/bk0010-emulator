@@ -30,6 +30,27 @@ public:
     virtual bool ioWrite(uint16_t addr, uint16_t value, bool isByte) = 0;
 };
 
+// Устройство в разъёме МПИ (контроллер СМК-512 — единственное, что мы эмулируем).
+// Дешифратор такой платы включается только при A15 = 1, то есть на адреса
+// 0..077777 контроллер не отзывается вовсе; поэтому Memory спрашивает его лишь
+// про верхнюю половину адресного пространства (см. docs/smk512.md).
+//
+// Контроллер имеет ПРИОРИТЕТ над ПЗУ и над внутренними регистрами БК: он
+// физически перебивает их на шине. Но перебивает не всегда — Табл. 1 знает
+// ячейки «только чтение» и «только запись», поэтому запись возвращает признак
+// «поглотил ли контроллер обращение»: для «теневых» ячеек запись видят ОБА, и
+// контроллер, и сама БК.
+class MpiDevice {
+public:
+    virtual ~MpiDevice() = default;
+    // addr выровнен по слову вызывающим. true — обращение обслужил контроллер.
+    virtual bool mpiRead(uint16_t addr, uint16_t& value) const = 0;
+    // addr НЕ выровнен при isByte. true — контроллер поглотил запись (БК её не видит).
+    virtual bool mpiWrite(uint16_t addr, uint16_t value, bool isByte) = 0;
+    // Отладочная запись: игнорирует ограничения «только чтение/только запись».
+    virtual bool mpiPoke(uint16_t addr, uint16_t value, bool isByte) = 0;
+};
+
 // Access-trace hook: called on every CPU-side read/write so the debugger can
 // build heatmaps. addr is the byte address; write==true for stores.
 using AccessHook = std::function<void(uint16_t addr, bool write, bool isByte)>;
@@ -40,6 +61,9 @@ public:
 
     void reset();                       // clear RAM (keeps ROM)
     void setIoBus(IoBus* bus) { io_ = bus; }
+    // Контроллер в разъёме МПИ; nullptr — разъём пуст (штатная БК).
+    void setMpi(MpiDevice* d) { mpi_ = d; }
+    MpiDevice* mpi() const { return mpi_; }
     void setAccessHook(AccessHook h) { hook_ = std::move(h); }
 
     // Load a ROM image into a byte-address range; region becomes read-only.
@@ -67,9 +91,17 @@ public:
     const uint8_t* videoRam() const { return mem_.data() + ADDR_VIDEO; }
 
 private:
+    // Запись в собственную память БК, минуя и контроллер МПИ, и защиту ПЗУ.
+    void rawWord(uint16_t addr, uint16_t value) {
+        mem_[addr] = static_cast<uint8_t>(value & 0xff);
+        mem_[addr + 1] = static_cast<uint8_t>(value >> 8);
+    }
+    void rawByte(uint16_t addr, uint8_t value) { mem_[addr] = value; }
+
     std::array<uint8_t, 0x10000> mem_{}; // full 64 KB address space (RAM + ROM)
     uint16_t romStart_ = ADDR_ROM_MON;   // first ROM byte address
     IoBus* io_ = nullptr;
+    MpiDevice* mpi_ = nullptr;           // контроллер в разъёме МПИ (СМК-512)
     AccessHook hook_;
 };
 

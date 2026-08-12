@@ -16,6 +16,9 @@ enum : uint16_t {
     REG_TIMER_LIM  = 0177706,
     REG_TIMER_CNT  = 0177710,
     REG_TIMER_CSR  = 0177712,
+    REG_CPU_MODE   = 0177700,   // CPU_MODE — управление режимом
+    REG_CPU_IVEC   = 0177702,   // CPU_IVEC — вектор прерывания рестарта
+    REG_CPU_ERROR  = 0177704,   // CPU_ERROR — флаги ошибок
     REG_PORT       = 0177714,
     REG_SYS        = 0177716,
     START_VECTOR   = 0100000,
@@ -32,6 +35,9 @@ enum : uint8_t {
     TIM_END        = 0200, // FL:  event flag (set on underflow)
 };
 static constexpr uint32_t TIMER_BASE_PERIOD = 128; // f/128
+// Задержка сброса флага готовности клавиатуры (бит 7 регистра 0177660) после чтения
+// кода из 0177662 — поведение ВП1-014 (GID: devemu/Board.cpp:1083).
+static constexpr uint64_t KBD_READY_CLEAR_TICKS = 900;
 
 // Lazily advance the counter based on how many CPU ticks have elapsed. Mirrors
 // bk/timer.c: the counter is only recomputed when a register is read.
@@ -76,6 +82,22 @@ void Board::timerCheck() {
     }
 }
 
+// Верх кадра: доотрисовать хвост предыдущего кадра и начать новый с нулевой строки,
+// затем выровнять фазу 037 к VSYNC.
+void Board::beginFrameRaster() {
+    if (scanlineRender_) { renderScanlinesUpTo(Screen::TEX_H); renderedLine_ = 0; }
+    if (arb037_ || scanlineRender_) vp037_.syncToFrameTop();
+}
+
+// Догнать построчную отрисовку до строки `line` (строки ДО неё луч уже прошёл).
+void Board::renderScanlinesUpTo(int line) {
+    if (line > Screen::TEX_H) line = Screen::TEX_H;
+    while (renderedLine_ < line) {
+        screen_.renderLine(mem_, renderedLine_, scroll_);
+        ++renderedLine_;
+    }
+}
+
 // Record a frame-synchronisation boundary at the current tick (deduped, capped).
 // The timer may cross zero several times between two register reads, but a game
 // paces one frame per crossing it observes, so one boundary per timerCheck edge
@@ -101,13 +123,41 @@ void Board::timerSetMode(uint8_t mode) {
     timerCsr_ = mode;
 }
 
+// Команда RESET сбрасывает периферию (на PSW она НЕ влияет). Состав — как у GID
+// (devemu/Board.cpp:716-732): запрет прерываний от клавиатуры («проверено»),
+// обнуление выходного регистра порта и динамика, останов таймера. Входной регистр
+// порта (джойстик) не трогаем: это живые линии, а не защёлка.
+void Board::resetDevices() {
+    kbdStatus_ = 0100;          // бит 6 = маска прерываний: 1 — запрещены
+    keyIntPending_ = false;
+    kbdReadyClearAt_ = 0;
+    portOut_ = 0;
+    speaker_ = 0;
+    sysWriteFlag_ = false;
+    cpuMode_ = 0;
+    timerSetMode(0);            // остановить таймер
+    // Регистра режима СМК команда RESET НЕ касается. Она дёргает шинный СБРОС
+    // (INIT, контакт Б19), а в прошивке ПЛИС реплики это отдельный сигнал
+    // (`reset <= not rst_n`); `extended_reg` обнуляется только по `btn_reset` с
+    // контакта А1 (ОСТ). Программа, выполнившая RESET в режиме ОЗУ10, карту
+    // памяти не теряет. Режим сбрасывают включение питания и «СТОП» — см.
+    // powerOn() и pressStop().
+}
+
 Board::Board() {
     mem_.setIoBus(this);
+    cpu_.setResetHook([this]() { resetDevices(); });
     // Feed the access heatmap (no-op unless the trace is enabled) and the
     // data watchpoints (no-op unless any are set).
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
         trace_.access(a, w, b);
         if (!watchpoints_.empty()) checkWatch(a, w, b);
+        // Арбитраж 037: обращения в ДОЗУ (A15=0, т.е. addr < 0100000 — оба банка
+        // ОЗУ) во время активной развёртки получают такты ожидания. ПЗУ/В-В (A15=1)
+        // 037 не арбитрирует. Фаза 037 берётся на начало инструкции — все обращения
+        // одной инструкции видят одну фазу (табличный тайминг ЦП не даёт точный
+        // внутриинструкционный график обращений; сама модель 037 потактовая).
+        if (arb037_ && a < 0100000) pendingWaitClkin_ += vp037_.stallForAccess();
     });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
@@ -116,12 +166,38 @@ Board::Board() {
 // Execute one instruction with sound + trace bookkeeping. Returns ticks.
 int Board::stepCore() {
     uint16_t pcBefore = cpu_.pc();
+    // К моменту ioRead/ioWrite регистр PC уже уехал за слова операндов, поэтому
+    // лог обращений к В-В берёт адрес инструкции отсюда (тот же приём, что и
+    // watchPc_ для точек наблюдения).
+    curInstrPc_ = pcBefore;
     trace_.exec(pcBefore);
     watchArmed_ = false;
+    pendingWaitClkin_ = 0;
     int t = cpu_.step();
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
+    if (arb037_) {
+        // Свести накопленные ожидания ДОЗУ (CLKIN → такты ЦП, ÷2) в стоимость
+        // инструкции и продвинуть фазу 037 в лок-степе (1 такт ЦП = 2 такта CLKIN).
+        t += pendingWaitClkin_ / 2;
+        vp037_.tick(2 * t);
+    } else if (scanlineRender_) {
+        vp037_.tick(2 * t);   // фаза нужна и без арбитража — по ней рисуются строки
+    }
+    // Луч ушёл вперёд — дорисовать пройденные строки текущим значением скролла.
+    if (scanlineRender_) renderScanlinesUpTo(vp037_.scanline());
     totalTicks_ += static_cast<uint64_t>(t);
-    sound_.feed(speaker_ & 1, t);
+    sound_.feed(speaker_, t);
+    // Отложенный сброс флага готовности клавиатуры (см. ioRead REG_KBD_DATA).
+    if (kbdReadyClearAt_ && totalTicks_ >= kbdReadyClearAt_) {
+        kbdStatus_ &= ~0200;
+        kbdReadyClearAt_ = 0;
+    }
+    // Взведённые запросы разбираются после КАЖДОЙ команды, а не раз в кадр: иначе
+    // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
+    if (irqFramePending_ || keyIntPending_ || stopPending_) {
+        const int it = tryDeliverInterrupts();
+        if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; }
+    }
     if (trace_.enabled()) {
         uint16_t pcNow = cpu_.pc();
         int16_t delta = static_cast<int16_t>(pcNow - pcBefore);
@@ -177,24 +253,59 @@ void Board::reset() {
     scroll_ = 01330;   // 0330 + бит 9: полный экран (256 строк) по умолчанию
     kbdStatus_ = 0;    // bit 6 (0100) = interrupt MASK (0 => enabled), bit 7 = ready
     kbdData_ = 0;
-    keyIntPending_ = false; keyIntFresh_ = false;
+    keyIntPending_ = false;
+    keyIntDeferAt_ = 0;
+    irqFramePending_ = false;
+    stopPending_ = false;
     keyHeld_ = false;
     keyIntVec_ = 060;
-    // Timer power-on state (matches bk/timer.c timer_init: stopped).
+    // Timer power-on state: остановлен, счётчик и предел — «все единицы».
+    //
+    // Регистр предела 0177706 по включении питания НЕ ОПРЕДЕЛЁН («зависит от того,
+    // в какое псевдослучайное состояние встанут триггеры»; сброс его не меняет) —
+    // см. docs/BK0010-hardware.md и нормативное описание блока К1801ВМ1. Эталонный
+    // bk/timer.c (и BKBTL) кладут туда 011000, оставляя счётчик 0177777 — то есть
+    // трактуют «неопределённое» по-разному для двух соседних регистров одного блока.
+    // Берём для обоих одно и то же «все единицы»: тогда счётчик — обычный 16-битный
+    // вычитающий (перезагрузка из 0177777 после нуля тождественна свободному ходу),
+    // и он проходит через отрицательную половину диапазона.
+    //
+    // Это важно: распространённая идиома «ждать таймер» — `TST @#177710 / BPL` —
+    // ждёт именно знакового бита счётчика. При пределе 011000 счётчик навсегда
+    // остаётся в 0..011000, и любая программа, не программирующая предел сама,
+    // виснет или молчит: так пропадала музыка «Коробейники» в tetr-music.bin,
+    // где обработчик 014 сравнивает счётчик со своей константой по знаку.
     timerCsr_ = 0;
     timerCount_ = 0177777;
-    timerLimit_ = 0011000;
+    timerLimit_ = 0177777;
     totalTicks_ = 0;
     timerStart_ = 0;
     timerPeriod_ = TIMER_BASE_PERIOD;
     frameTicks_.clear();
     emtLog_.clear();
     ioLog_.clear();
+    spkLog_.clear();
     speaker_ = 0;
     framesSinceReset_ = 0;
     std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));
     screen_.setScroll(scroll_);
+    vp037_.reset();
+    vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
+    pendingWaitClkin_ = 0;
+    if (smkOn_) smk_.powerOn();        // включение питания: ДОЗУ чисто, режим SYS
     trace_.reset();
+}
+
+void Board::setSmk512(bool on) {
+    if (on == smkOn_) return;
+    smkOn_ = on;
+    if (on) {
+        smk_.powerOn();
+        mem_.setMpi(&smk_);
+    } else {
+        mem_.setMpi(nullptr);
+        smk_.release();
+    }
 }
 
 // ---- Save / restore state ---------------------------------------------------
@@ -202,36 +313,75 @@ namespace {
 constexpr char kMagic[8] = {'B','K','1','0','S','T','1','\0'};
 }
 
-bool Board::saveState(const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return false;
-    std::fwrite(kMagic, 1, 8, f);
-    // Mutable memory is RAM 0..0100000 (ROM above is constant).
-    std::fwrite(mem_.raw(), 1, ADDR_RAM_END, f);
-    std::fwrite(cpu_.r, sizeof(uint16_t), 8, f);
-    std::fwrite(&cpu_.psw, sizeof(uint16_t), 1, f);
-    uint16_t dev[7] = {scroll_, kbdStatus_, kbdData_, timerLimit_, timerCount_, timerCsr_, speaker_};
-    std::fwrite(dev, sizeof(uint16_t), 7, f);
-    std::fclose(f);
-    return true;
+// Раскладка снимка: магия(8) + ОЗУ(0100000) + R0-R7(8 слов) + PSW + dev[7] и —
+// с этой версии — хвост ext[2] = {joystick_, keyHeld_}. Магию не меняем: снимки
+// старого формата просто короче на хвост и читаются как «ввод отпущен».
+namespace {
+constexpr size_t kStateBase = 8 + ADDR_RAM_END + (8 + 1 + 7) * sizeof(uint16_t);
+constexpr size_t kStateFull = kStateBase + 2 * sizeof(uint16_t);          // + {joystick, keyHeld}
+constexpr size_t kStateV037 = kStateFull + sizeof(uint32_t);              // + фаза развёртки 037
+constexpr size_t kStateSmk  = kStateV037 + 4 * sizeof(uint16_t);          // + {есть, режим, страница, строб}
+constexpr size_t kStateSmkRam = kStateSmk + Smk512::RAM_BYTES;            // + 512 Кбайт ДОЗУ
 }
 
-bool Board::loadState(const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return false;
-    char magic[8];
-    if (std::fread(magic, 1, 8, f) != 8 || std::memcmp(magic, kMagic, 8) != 0) { std::fclose(f); return false; }
-    if (std::fread(mem_.raw(), 1, ADDR_RAM_END, f) != ADDR_RAM_END) { std::fclose(f); return false; }
-    std::fread(cpu_.r, sizeof(uint16_t), 8, f);
-    std::fread(&cpu_.psw, sizeof(uint16_t), 1, f);
+void Board::saveStateMem(std::vector<uint8_t>& out) const {
+    out.clear();
+    out.reserve(smkOn_ ? kStateSmkRam : kStateSmk);
+    auto put = [&](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        out.insert(out.end(), b, b + n);
+    };
+    put(kMagic, 8);
+    // Mutable memory is RAM 0..0100000 (ROM above is constant).
+    put(mem_.raw(), ADDR_RAM_END);
+    put(cpu_.r, 8 * sizeof(uint16_t));
+    put(&cpu_.psw, sizeof(uint16_t));
+    const uint16_t dev[7] = {scroll_, kbdStatus_, kbdData_, timerLimit_, timerCount_, timerCsr_, speaker_};
+    put(dev, sizeof dev);
+    const uint16_t ext[2] = {joystick_, static_cast<uint16_t>(keyHeld_ ? 1 : 0)};
+    put(ext, sizeof ext);
+    const uint32_t v037 = vp037_.pack();   // фаза развёртки: где стоял луч
+    put(&v037, sizeof v037);
+    // Блок СМК-512: конфигурация всегда, ДОЗУ — только если плата установлена.
+    const uint16_t smk[4] = {static_cast<uint16_t>(smkOn_ ? 1 : 0),
+                             static_cast<uint16_t>(smk_.mode()),
+                             static_cast<uint16_t>(smk_.page()),
+                             static_cast<uint16_t>(smk_.armed() ? 1 : 0)};
+    put(smk, sizeof smk);
+    if (smkOn_) put(smk_.ram().data(), Smk512::RAM_BYTES);
+}
+
+bool Board::loadStateMem(const std::vector<uint8_t>& in) {
+    if (in.size() < kStateBase || std::memcmp(in.data(), kMagic, 8) != 0) return false;
+    size_t off = 8;
+    auto get = [&](void* p, size_t n) { std::memcpy(p, in.data() + off, n); off += n; };
+    get(mem_.raw(), ADDR_RAM_END);
+    get(cpu_.r, 8 * sizeof(uint16_t));
+    get(&cpu_.psw, sizeof(uint16_t));
     uint16_t dev[7] = {0};
-    std::fread(dev, sizeof(uint16_t), 7, f);
-    std::fclose(f);
+    get(dev, sizeof dev);
+    uint16_t ext[2] = {0, 0};
+    if (in.size() >= kStateFull) get(ext, sizeof ext);   // иначе — снимок старого формата
+    if (in.size() >= kStateV037) { uint32_t v = 0; get(&v, sizeof v); vp037_.unpack(v); }
+    if (in.size() >= kStateSmk) {
+        uint16_t smk[4] = {0, 0, 0, 0};
+        get(smk, sizeof smk);
+        setSmk512(smk[0] != 0);           // сначала плата, потом её состояние
+        if (smkOn_) {
+            smk_.writeCtrl(Smk512::STROBE);
+            smk_.writeCtrl(static_cast<uint16_t>(Smk512::modeCode(static_cast<Smk512::Mode>(smk[1] & 7))
+                                               | Smk512::pageCode(smk[2])));
+            if (smk[3]) smk_.writeCtrl(Smk512::STROBE);   // строб был взведён
+            if (in.size() >= kStateSmkRam) get(smk_.ram().data(), Smk512::RAM_BYTES);
+        }
+    }
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
-    keyIntPending_ = false; keyIntFresh_ = false;
+    keyIntPending_ = false; keyIntDeferAt_ = 0;
     timerLimit_ = dev[3]; timerCount_ = dev[4];
     timerCsr_ = static_cast<uint8_t>(dev[5]);
     speaker_ = static_cast<uint8_t>(dev[6]);
+    joystick_ = ext[0];
+    keyHeld_  = ext[1] != 0;
     // Re-derive the timer phase so timerCheck() doesn't see a huge stale delta.
     timerPeriod_ = TIMER_BASE_PERIOD;
     if (timerCsr_ & TIM_DIV16) timerPeriod_ *= 16;
@@ -239,7 +389,30 @@ bool Board::loadState(const std::string& path) {
     timerStart_ = totalTicks_;
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
+    vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
+    pendingWaitClkin_ = 0;
     return true;
+}
+
+bool Board::saveState(const std::string& path) {
+    std::vector<uint8_t> buf;
+    saveStateMem(buf);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(buf.data(), 1, buf.size(), f) == buf.size();
+    std::fclose(f);
+    return ok;
+}
+
+bool Board::loadState(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    std::vector<uint8_t> buf;
+    uint8_t chunk[65536];
+    size_t got;
+    while ((got = std::fread(chunk, 1, sizeof chunk, f)) > 0) buf.insert(buf.end(), chunk, chunk + got);
+    std::fclose(f);
+    return loadStateMem(buf);
 }
 
 int Board::runTicks(int ticks) {
@@ -253,21 +426,27 @@ int Board::runTicks(int ticks) {
             break;
         }
         if (breakHit_) break;   // data watchpoint fired inside the instruction
-        if (cpu_.waiting()) { // idle: consume the rest of the frame quietly
-            cpu_.clearWait();
-            break;
-        }
+        // Простой по WAIT: остаток кадра пропускаем, но флаг ожидания НЕ снимаем —
+        // его снимает Cpu::interrupt(), и только там PC переставляется за команду
+        // WAIT. Если сбросить флаг здесь, пришедшее следующим кадром прерывание
+        // вернётся по RTI на тот же WAIT, и программа зависнет.
+        if (cpu_.waiting()) break;
     }
     screen_.setScroll(scroll_);
     return done;
 }
 
 bool Board::runUntil(uint16_t addr, int maxTicks) {
-    int done = 0;
+    int done = 0, frameTicks = 0;
     while (done < maxTicks) {
         if (cpu_.halted()) return false;
+        // Прогон отладчика обязан продолжать выдавать кадровые прерывания 50 Гц:
+        // подпрограмма, которая ждёт кадра (или стоит на WAIT), иначе не дождётся
+        // никогда, и «шаг с обходом»/«до адреса» просто упрётся в лимит тактов.
+        if (frameTicks == 0) { beginFrameRaster(); deliverFrameInterrupts(); }
         int t = stepCore();
-        done += t;
+        done += t; frameTicks += t;
+        if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
         if (cpu_.pc() == addr) { screen_.setScroll(scroll_); return true; }
         if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc()) && breakAllows(cpu_.pc())) {
             breakHit_ = true; screen_.setScroll(scroll_); return true;
@@ -282,7 +461,7 @@ bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
     int done = 0, frameTicks = 0;
     while (done < maxTicks) {
         if (cpu_.halted()) { screen_.setScroll(scroll_); return false; }
-        if (frameTicks == 0) deliverFrameInterrupts();   // keep the 50 Hz IRQ alive
+        if (frameTicks == 0) { beginFrameRaster(); deliverFrameInterrupts(); }  // 50 Hz IRQ
         int t = stepCore();
         done += t; frameTicks += t;
         if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
@@ -295,6 +474,7 @@ bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
 }
 
 void Board::runFrame() {
+    beginFrameRaster();                     // верх кадра: доотрисовать прошлый, ресинк 037
     deliverFrameInterrupts();
     runTicks(ticksPerFrame());
     trace_.tick();
@@ -303,8 +483,10 @@ void Board::runFrame() {
 
 void Board::runFrameSlice(int slice, int nslices) {
     if (nslices < 1) nslices = 1;
-    if (slice <= 0) { deliverFrameInterrupts(); sliceIdle_ = false; sliceFrameTicks_ = 0; }
-    else deliverKeyboardInterrupt();   // deliver a key deferred at slice 0 (~1/4-frame latency)
+    if (slice <= 0) {
+        beginFrameRaster();                     // верх кадра (VSYNC)
+        deliverFrameInterrupts(); sliceIdle_ = false; sliceFrameTicks_ = 0;
+    }
     if (!sliceIdle_) {
         // Run up to this slice's *cumulative* tick boundary, so per-slice overshoot
         // is compensated in the next slice and the frame totals exactly ticksPerFrame
@@ -326,60 +508,85 @@ void Board::runFrameSlice(int slice, int nslices) {
 // (vector 0100) every frame and the keyboard raises IRQ (vector 0060). Both are
 // blocked when the processor priority bit (PSW bit 7, 0200) is set.
 bool Board::pressKey(uint16_t bkCode) {
-    // Реальная БК-0010 (и референсный bk/tty.c): новое нажатие БЕЗУСЛОВНО
-    // перезаписывает регистр кода, даже если предыдущий код не был прочитан.
-    // Раньше мы отвергали новый код при непрочитанном старом — и игры, читающие
-    // код только по событию (LAND: ждёт нажатия по 0177716/0177660 и лишь потом
-    // читает код), получали ПРЕДЫДУЩУЮ клавишу (запаздывание на одно нажатие).
+    // Real BK-0010 (контроллер ВП1-014, как в референсном bk/tty.c tty_keyevent):
+    // новое нажатие ВСЕГДА перезаписывает регистр кода, даже если предыдущий код
+    // не был прочитан — флаг готовности лишь отмечает «код поступал с последнего
+    // чтения». Отбрасывание нового кода при занятом регистре — неверно: игры вроде
+    // PITON читают 0177662 только пока клавиша физически нажата (бит 6 0177716), а
+    // LAND — только по событию нажатия; обе получали бы код ПРЕДЫДУЩЕЙ клавиши.
     kbdData_ = bkCode & 0177;                 // 7-bit code -> 0177662
     kbdStatus_ |= 0200;                       // set "code ready"
+    kbdReadyClearAt_ = 0;                     // новый код отменяет отложенный сброс флага
     // Latch the interrupt vector: function keys / АР2 (bit 0200 set) go through
     // 0274, ordinary keys through 060. Whether the interrupt is actually delivered
     // is decided in deliverFrameInterrupts by the status bit-6 mask and the CPU
     // priority; the code is always latched so polling software can read it.
     keyIntVec_ = (bkCode & 0200) ? 0274 : Cpu::VEC_KEYBOARD;
     keyIntPending_ = true;
-    keyIntFresh_ = true;   // задержать IRQ на кадр — дать опрашивающей игре прочитать код
+    // Прерывание придерживаем на четверть кадра (см. keyIntDeferAt_ и разбор в
+    // tryDeliverInterrupts): опрашивающая игра должна успеть прочитать код.
+    keyIntDeferAt_ = totalTicks_ + static_cast<uint64_t>(ticksPerFrame() / 4);
     return true;
 }
 
-// Deliver the pending keyboard interrupt, if due. Returns true if it fired.
-//
-// On BK-0010 status bit 6 (0100) is the interrupt MASK: software that polls the
-// register with the IRQ masked (e.g. Digger sets bit 6) reads the code directly.
-// But some games ENABLE the IRQ (bit 6 = 0) AND still poll (e.g. SOKOBAN does
-// `CLR 177660`): they expect to read the code before the monitor's ISR consumes it.
-// So a freshly latched code is deferred one step (keyIntFresh_) — giving a polling
-// loop time to read it — and cancelled if it was read (ready bit cleared). This is
-// checked every SLICE (not just the frame boundary), so the deferral is ~1/4 frame
-// (~5 ms): short enough not to lag ISR-driven games, and the ISR still runs within
-// the same frame so the next code can be fed on time. Mirrors the reference bk,
-// which schedules the keyboard IRQ as a short deferred event, not an instant one.
-bool Board::deliverKeyboardInterrupt() {
-    if (cpu_.halted() || (cpu_.psw & 0200)) return false; // masked by CPU priority
-    if (!keyIntPending_) return false;
-    if (!(kbdStatus_ & 0200)) { keyIntPending_ = false; return false; }  // read -> cancel
-    if (keyIntFresh_) { keyIntFresh_ = false; return false; }            // defer one slice
-    if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {        // IRQ enabled
-        keyIntPending_ = false;
-        cpu_.interrupt(keyIntVec_);
-        trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
-        return true;
-    }
-    keyIntPending_ = false;              // IRQ disabled -> drop the pending code
-    return false;
+// Кадровый запрос 50 Гц ЗАЩЁЛКИВАЕТСЯ, а не выдаётся мгновенно: если в этот момент
+// у процессора закрыта маска (программа в критической секции после MTPS #340),
+// прерывание должно дождаться её открытия, а не пропасть. Раньше оно терялось
+// целиком — отсюда рывки анимации и музыки. Реальный запрос разбирается в
+// tryDeliverInterrupts() после каждой команды, как это делает GID (devemu/CPU.cpp:413).
+void Board::deliverFrameInterrupts() {
+    irqFramePending_ = true;
+    const int t = tryDeliverInterrupts();
+    if (t) { totalTicks_ += static_cast<uint64_t>(t); sound_.feed(speaker_, t); }
 }
 
-void Board::deliverFrameInterrupts() {
-    if (cpu_.halted()) return;
-    if (cpu_.psw & 0200) return; // interrupts masked
-
-    if (deliverKeyboardInterrupt()) return;   // a due key fires before the frame IRQ
-
-    if (mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
-        cpu_.interrupt(Cpu::VEC_IRQ2);         // 0100 (50 Hz)
-        trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
+// Возвращает стоимость входа в прерывание в тактах (0, если ничего не выдано).
+int Board::tryDeliverInterrupts() {
+    if (cpu_.halted()) return 0;
+    // «СТОП» разбирается ДО проверки маски: это внеприоритетное прерывание, разряды
+    // приоритета его не запрещают. Идёт по вектору 4 — тому же, что HALT и зависание.
+    if (stopPending_) {
+        stopPending_ = false;
+        if (mem_.peekWord(Cpu::VEC_BUS_ERROR) != 0) {
+            const int t = cpu_.interrupt(Cpu::VEC_BUS_ERROR);
+            trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
+            return t;
+        }
+        // Вектор не установлен — прерывать некуда, запрос просто гасим.
     }
+    if (cpu_.psw & 0200) return 0; // маска закрыта — запросы остаются взведёнными
+
+    // Защёлкнутый код клавиатуры выдаёт своё прерывание раньше кадрового — но не
+    // мгновенно и не при любых условиях.
+    //
+    // Разряд 6 регистра 0177660 — это МАСКА: программы, опрашивающие регистр сами
+    // (Digger), её ставят, и прерывать тогда нельзя — код остаётся защёлкнутым для
+    // опроса. Труднее случай, когда игра прерывание РАЗРЕШАЕТ и всё равно опрашивает
+    // (SOKOBAN: CLR 177660, затем TST 177660 / CMPB 177662): выдай мы IRQ сразу,
+    // ISR монитора забрал бы код первым и опрос вечно видел бы «нет клавиши».
+    // Поэтому свежий код придерживается до keyIntDeferAt_ — примерно четверть кадра,
+    // как в референсном bk, где прерывание клавиатуры планируется отложенным
+    // событием. Успели прочитать за это время — запрос снимается без прерывания.
+    if (keyIntPending_) {
+        if (!(kbdStatus_ & 0200)) {
+            keyIntPending_ = false;                  // код уже прочитан — прерывать незачем
+        } else if (totalTicks_ >= keyIntDeferAt_) {
+            keyIntPending_ = false;
+            if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
+                const int t = cpu_.interrupt(keyIntVec_);
+                trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
+                return t;
+            }
+        }
+    }
+
+    if (irqFramePending_ && mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
+        irqFramePending_ = false;
+        const int t = cpu_.interrupt(Cpu::VEC_IRQ2);   // 0100 (50 Hz)
+        trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
+        return t;
+    }
+    return 0;
 }
 
 int Board::stepInstruction() {
@@ -567,13 +774,35 @@ bool Board::handleEmt36() {
 
 // ---- I/O register dispatch --------------------------------------------------
 bool Board::ioRead(uint16_t addr, uint16_t& value) {
+    const bool handled = ioReadRaw(addr, value);
+    if (handled && ioLogOn_ && ioLogReads_ && addr >= ADDR_IO_PAGE &&
+        (!ioLogFilter_ || addr == ioLogFilter_)) {
+        ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, true});
+        while (ioLog_.size() > ioLogCap_) ioLog_.pop_front();
+    }
+    return handled;
+}
+
+bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
     switch (addr) {
     case REG_KBD_STATUS: value = kbdStatus_; return true;
-    case REG_KBD_DATA:   value = kbdData_; kbdStatus_ &= ~0200; return true;
+    case REG_KBD_DATA:
+        // Флаг готовности (бит 7 регистра 0177660) гаснет НЕ мгновенно, а примерно
+        // через 900 тактов ЦП после чтения кода — так ведёт себя ВП1-014
+        // (GID: devemu/Board.cpp:1081-1084, отсчёт :1855-1857). Программа, которая
+        // читает код и тут же перепроверяет готовность, на железе видит её ещё раз.
+        value = kbdData_;
+        if (!kbdReadyClearAt_) kbdReadyClearAt_ = totalTicks_ + KBD_READY_CLEAR_TICKS;
+        return true;
     case REG_SCROLL:     value = scroll_; return true;
     case REG_TIMER_LIM:  value = timerLimit_; return true;
     case REG_TIMER_CNT:  timerCheck(); value = timerCount_; return true;
     case REG_TIMER_CSR:  timerCheck(); value = 0177400 | timerCsr_; return true;
+    // Внутренние регистры периферийного блока самого ЦП (04-процессор, §4.3).
+    // В БК не используются, но физически существуют, и читать их программа может.
+    case REG_CPU_MODE:   value = 0177740 | (cpuMode_ & 7); return true;
+    case REG_CPU_IVEC:   value = 0177777; return true;     // только запись; читается как все единицы
+    case REG_CPU_ERROR:  value = 0177440; return true;     // флаги сбрасываются на выборке каждой команды
     case REG_PORT:       value = joystick_; return true;   // джойстик на парал. порту
     case REG_SYS: {
         // BK-0010: bit15 set, high byte 0200 (serial idle). Bit 6 (0100) is the
@@ -583,6 +812,9 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
         // seeing the key even after the monitor's ISR has drained the code register.
         uint16_t v = 0100000 | 0200;
         if (!keyHeld_) v |= 0100; // no key held -> bit 6 high
+        // Бит 2 (004) — «была запись в системный регистр»: взводится любой записью,
+        // гасится чтением (внешняя схема ВР1, см. GID devemu/Board.cpp:1264-1268).
+        if (sysWriteFlag_) { v |= 004; sysWriteFlag_ = false; }
         value = v;
         return true;
     }
@@ -595,21 +827,44 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
 
 bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     if (addr >= ADDR_IO_PAGE) ioLastWrite_[(addr - ADDR_IO_PAGE) >> 1] = value; // for the debugger
-    if (ioLogOn_ && addr >= ADDR_IO_PAGE) {
-        ioLog_.push_back({addr, value, totalTicks_});
-        if (ioLog_.size() > 2048) ioLog_.pop_front();
+    if (ioLogOn_ && addr >= ADDR_IO_PAGE && (!ioLogFilter_ || addr == ioLogFilter_)) {
+        ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, false});
+        while (ioLog_.size() > ioLogCap_) ioLog_.pop_front();
     }
     switch (addr) {
     // Скролл: биты 0-7 = строка, бит 9 (01000) = полный/малый экран. Бит 8 (0400)
     // аппаратно НЕ реализован — маскируем его (как bk/tty.c: & 01377). Иначе перенос
     // из младшего байта при ADD/INC регистра (прокрутка) прополз бы в бит 9 и ложно
     // включал бы малый экран (баг в RUNING.BIN при движении вниз по лабиринту).
-    case REG_SCROLL:    scroll_ = value & 01377; return true;
+    case REG_SCROLL:    scroll_ = value & 01377; vp037_.setM256(scroll_ & 01000); return true;
     case REG_TIMER_LIM: timerLimit_ = value; return true;
     case REG_TIMER_CNT: return true;                       // counter is read-only
     case REG_TIMER_CSR: timerSetMode(value & 0377); return true;
-    case REG_SYS:
-        speaker_ = (value >> 6) & 3; // bits 6,7: tape/speaker output
+    case REG_SYS: {
+        sysWriteFlag_ = true;   // бит 2 на чтение: «была запись в системный регистр»
+        const uint8_t was = speaker_;
+        // Динамик слышит сумму трёх бит (маска 0144): бит 6 — основной, биты 5 и 2
+        // подмешиваются в тот же аналоговый узел. Складываем их в уровень 0..7 так же,
+        // как GID (devemu/Speaker.cpp:132-139): бит 2 переносится в позицию 4, потом >>4.
+        uint16_t w = value & 0144;
+        if (w & 004) w |= 020;
+        speaker_ = static_cast<uint8_t>((w >> 4) & 7);
+        if (spkLogOn_ && was != speaker_) {          // смена уровня динамика
+            spkLog_.push_back({totalTicks_, speaker_});
+            while (spkLog_.size() > spkLogCap_) spkLog_.pop_front();
+        }
+        return true;
+    }
+    case REG_CPU_MODE:
+        cpuMode_ = value & 7;   // доступны по записи только разряды 0..2 (WT/ST)
+        return true;
+    case REG_CPU_IVEC:  return true;   // запись сохраняется в ЦП, программе не видна
+    case REG_CPU_ERROR: return true;   // писать бессмысленно: биты гаснут на выборке команды
+    case REG_PORT:
+        // Параллельный порт — ДВА раздельных регистра: чтение отдаёт джойстик
+        // (входные линии), запись защёлкивается отдельно (принтер/ковокс).
+        // Раньше запись просто проглатывалась, и отладчику её видно не было.
+        portOut_ = value;
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
     default:
@@ -626,8 +881,12 @@ uint16_t Board::peekReg(uint16_t addr) const {
     case REG_TIMER_LIM:  return timerLimit_;
     case REG_TIMER_CNT:  return timerCount_;                     // as of the last read
     case REG_TIMER_CSR:  return static_cast<uint16_t>(0177400 | timerCsr_);
+    case REG_CPU_MODE:   return static_cast<uint16_t>(0177740 | (cpuMode_ & 7));
+    case REG_CPU_IVEC:   return 0177777;
+    case REG_CPU_ERROR:  return 0177440;
     case REG_PORT:       return joystick_;                       // джойстик на парал. порту
-    case REG_SYS:        return static_cast<uint16_t>(0100000 | 0200 | (keyHeld_ ? 0 : 0100)); // bit6=0 while a key is held
+    case REG_SYS:        return static_cast<uint16_t>(0100000 | 0200 | (keyHeld_ ? 0 : 0100)
+                                                      | (sysWriteFlag_ ? 004 : 0)); // без побочки: флаг не гасим
     case 0176560:        return 0;   // ИРПС (последовательный порт) — не эмулируется
     default:             return mem_.peekWord(addr);
     }

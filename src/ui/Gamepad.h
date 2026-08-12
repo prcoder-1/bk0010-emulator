@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include "Joystick.h"
 
 // Опрос игрового геймпада и преобразование его состояния в значение джойстика БК-0010
 // на параллельном порту 0177714 (активный уровень высокий, нажато = 1).
@@ -25,7 +26,10 @@
 // Поддерживается горячее подключение (устройство переоткрывается на лету).
 class Gamepad {
 public:
-    enum class Standard { Standard, BreakHouse, SWCorp, Klad2 };
+    // Сама таблица раскладок живёт в ядре (src/core/Joystick.h) — ею пользуются и
+    // GUI, и MCP-сервер, и тесты. Здесь только псевдоним, чтобы Gamepad::Standard
+    // остался прежним для вызывающего кода.
+    using Standard = bk::JoyStandard;
 
     Gamepad();
     ~Gamepad();

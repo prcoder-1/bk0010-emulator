@@ -44,32 +44,72 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     tr.setEnabled(true); // ensure data is being collected while the view is open
 
     const bool word16 = (bpp == 16);        // 16 bpp: one pixel per 16-bit word (RGB565)
-    int pxPerByte = (bpp == 1) ? 8 : (bpp == 4 ? 2 : 1);
+    int pxPerByte = (bpp == 1) ? 8 : (bpp == 2 ? 4 : (bpp == 4 ? 2 : 1));
     int imgW = word16 ? (bytesPerRow / 2) : (bytesPerRow * pxPerByte);
     if (imgW <= 0) return;
+
+    // Источник: память самой БК или ДОЗУ платы СМК-512 (страница или все 16 подряд).
+    const bool smkMode = (smkPage != SRC_BK) && board_->smk512()
+                      && board_->smk().ram().size() >= bk::Smk512::RAM_BYTES;
+    const uint8_t* smkRam = smkMode ? board_->smk().ram().data() : nullptr;
 
     // Build the sequence of *visible* byte addresses, compacting out the hidden
     // regions (ROM and/or video RAM). Hidden memory takes up no space in the view:
     // the remaining bytes are laid out contiguously and the image is scaled to
     // fill the whole window. So with the screen hidden, ROM (if shown) moves up to
     // occupy that space instead of leaving a blank gap.
+    // В режиме ДОЗУ прятать нечего: там сплошная память, и vis — просто её отрезок.
     const int scrStart = 0040000, romStart = 0100000;
-    std::vector<uint16_t> vis;
-    vis.reserve(static_cast<size_t>(0x10000 - startAddr));
+    std::vector<int> vis;
     int scrBoundary = -1, romBoundary = -1; // compacted index where each region begins
-    for (int a = startAddr; a < 0x10000; ++a) {
-        uint16_t a16 = static_cast<uint16_t>(a);
-        // Скрывая ПЗУ, прячем и всё, что выше него (регистры ввода-вывода 0177600..
-        // 0177777) — иначе они висли двумя «лишними» строками под экраном, и нижняя
-        // строка экрана (самый высокий адрес видеопамяти) оказывалась не у нижнего
-        // края. Теперь при спрятанном ПЗУ видны ровно ОЗУ + экран (0..077777).
-        if (hideRom && a16 >= romStart) continue;
-        if (hideScreen && a16 >= scrStart && a16 < romStart) continue;
-        if (a16 == scrStart) scrBoundary = static_cast<int>(vis.size());
-        if (a16 == romStart) romBoundary = static_cast<int>(vis.size());
-        vis.push_back(a16);
+    if (smkMode) {
+        const size_t from = (smkPage >= 0)
+                          ? static_cast<size_t>(smkPage) * bk::Smk512::PAGE_BYTES : 0;
+        const size_t to = (smkPage >= 0) ? from + bk::Smk512::PAGE_BYTES
+                                         : bk::Smk512::RAM_BYTES;
+        vis.reserve(to - from);
+        for (size_t o = from; o < to; ++o) vis.push_back(static_cast<int>(o));
+    } else {
+        vis.reserve(static_cast<size_t>(0x10000 - startAddr));
+        for (int a = startAddr; a < 0x10000; ++a) {
+            uint16_t a16 = static_cast<uint16_t>(a);
+            // Скрывая ПЗУ, прячем и всё, что выше него (регистры ввода-вывода 0177600..
+            // 0177777) — иначе они висли двумя «лишними» строками под экраном, и нижняя
+            // строка экрана (самый высокий адрес видеопамяти) оказывалась не у нижнего
+            // края. Теперь при спрятанном ПЗУ видны ровно ОЗУ + экран (0..077777).
+            if (hideRom && a16 >= romStart) continue;
+            if (hideScreen && a16 >= scrStart && a16 < romStart) continue;
+            if (a16 == scrStart) scrBoundary = static_cast<int>(vis.size());
+            if (a16 == romStart) romBoundary = static_cast<int>(vis.size());
+            vis.push_back(a16);
+        }
     }
     if (vis.empty()) return;
+
+    // Тепловая карта для ДОЗУ. Trace ведёт учёт по 16-разрядным адресам БК, то
+    // есть «подогреть» можно только те байты платы, которые прямо сейчас выведены
+    // в адресное пространство. Строим карту «смещение в подключённой странице ->
+    // адрес БК» один раз за перерисовку: 9 блоков Табл. 1 по decode(), дальше
+    // поиск за одно обращение.
+    std::vector<int32_t> liveAddr;
+    if (smkMode) {
+        static const uint16_t kBlockBase[9] = {0100000, 0110000, 0120000, 0130000,
+                                               0140000, 0150000, 0160000, 0170000, 0177000};
+        liveAddr.assign(bk::Smk512::PAGE_BYTES, -1);
+        const bk::Smk512& smk = board_->smk();
+        for (int blk = 0; blk < 9; ++blk) {
+            bk::Smk512::Slot s;
+            if (!smk.decode(kBlockBase[blk], s)) continue;
+            if (s.cell == bk::Smk512::Cell::Rom) continue;
+            const int base = (blk <= 6) ? (0100000 + blk * 010000) : 0170000;
+            const int lo = (blk == 8) ? 07000 : 0;
+            const int hi = (blk == 7) ? 06777 : 07777;
+            for (int o = lo; o <= hi; ++o)
+                liveAddr[s.seg * bk::Smk512::SEG_BYTES + o] = base + o;
+        }
+    }
+    const int livePageBase = smkMode
+        ? static_cast<int>(board_->smk().page() * bk::Smk512::PAGE_BYTES) : -1;
 
     int rows = (static_cast<int>(vis.size()) + bytesPerRow - 1) / bytesPerRow;
     if (rows < 1) rows = 1;
@@ -109,21 +149,36 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         return qRgb(R, G, B);
     };
 
+    // Байт источника и «тепло» для него. У БК индекс — это и есть адрес; у ДОЗУ
+    // индекс линейный, и адрес у него есть только на подключённой странице и
+    // только там, где текущий режим открыл окно.
+    auto srcByte = [&](int i) -> uint8_t {
+        return smkMode ? smkRam[i] : mem.peekByte(static_cast<uint16_t>(i));
+    };
+    auto heatOf = [&](int i, double& hr, double& hw, double& he, double& act) {
+        if (!smkMode) { heatAt(static_cast<uint16_t>(i), hr, hw, he, act); return; }
+        hr = hw = he = act = 0.0;
+        const int off = i - livePageBase;
+        if (off < 0 || off >= static_cast<int>(bk::Smk512::PAGE_BYTES)) return;
+        const int32_t a = liveAddr[off];
+        if (a >= 0) heatAt(static_cast<uint16_t>(a), hr, hw, he, act);
+    };
+
     for (int idx = 0; idx < static_cast<int>(vis.size()); ++idx) {
         int row = idx / bytesPerRow, bx = idx % bytesPerRow;
-        uint16_t a16 = vis[idx];
+        int si = vis[idx];
         double hr, hw, he, act;
 
         if (word16) {                       // one pixel per 16-bit word
             if (bx & 1) continue;           // odd byte handled with its even partner
             if (bx / 2 >= imgW) continue;   // dangling byte of an odd-width row
-            heatAt(a16, hr, hw, he, act);
-            uint8_t lo = mem.peekByte(a16), hi = 0;
+            heatOf(si, hr, hw, he, act);
+            uint8_t lo = srcByte(si), hi = 0;
             if (bx + 1 < bytesPerRow && idx + 1 < static_cast<int>(vis.size())) {
-                uint16_t a2 = vis[idx + 1];
-                hi = mem.peekByte(a2);
+                int s2 = vis[idx + 1];
+                hi = srcByte(s2);
                 double hr2, hw2, he2, act2; // pixel heat = the hotter of the word's two bytes
-                heatAt(a2, hr2, hw2, he2, act2);
+                heatOf(s2, hr2, hw2, he2, act2);
                 hr = std::max(hr, hr2); hw = std::max(hw, hw2);
                 he = std::max(he, he2); act = std::max(act, act2);
             }
@@ -135,14 +190,24 @@ void MemCanvas::paintEvent(QPaintEvent*) {
             continue;
         }
 
-        heatAt(a16, hr, hw, he, act);
-        uint8_t byte = mem.peekByte(a16);
+        heatOf(si, hr, hw, he, act);
+        uint8_t byte = srcByte(si);
         int px = bx * pxPerByte;
         if (bpp == 1) {
             for (int b = 0; b < 8; ++b) {
                 int v = (byte >> b) & 1;
                 QRgb base = color ? colorMap(v ? 15 : 0) : (v ? qRgb(220,220,220) : qRgb(0,0,0));
                 img.setPixel(px + b, row, tint(base, hr, hw, he, act));
+            }
+        } else if (bpp == 2) {
+            // Как цветной экран БК: 2 бита на точку, младшие биты слева, палитра 0
+            // (чёрный / синий / зелёный / красный). В этом режиме сразу видно
+            // спрайты и экранные буферы в том виде, в каком их рисует машина.
+            static const QRgb kBkPal[4] = {qRgb(0,0,0), qRgb(0,0,255), qRgb(0,255,0), qRgb(255,0,0)};
+            for (int n = 0; n < 4; ++n) {
+                const int v = (byte >> (n * 2)) & 3;
+                const QRgb base = color ? kBkPal[v] : qRgb(v * 85, v * 85, v * 85);
+                img.setPixel(px + n, row, tint(base, hr, hw, he, act));
             }
         } else if (bpp == 4) {
             for (int n = 0; n < 2; ++n) {
@@ -208,15 +273,31 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         double y = double(idx) / bytesPerRow / imgH * height();
         if (y >= 0 && y < height()) { p.setPen(c); p.drawLine(0, int(y), width(), int(y)); }
     };
-    boundary(scrBoundary, QColor(80, 160, 255, 120));  // 0040000 video RAM
-    boundary(romBoundary, QColor(255, 160, 80, 120));  // 0100000 ROM
+    if (!smkMode) {
+        boundary(scrBoundary, QColor(80, 160, 255, 120));  // 0040000 video RAM
+        boundary(romBoundary, QColor(255, 160, 80, 120));  // 0100000 ROM
+    } else if (smkPage >= 0) {
+        // Одна страница: отчёркиваем восемь сегментов по 010000.
+        for (size_t o = bk::Smk512::SEG_BYTES; o < bk::Smk512::PAGE_BYTES;
+             o += bk::Smk512::SEG_BYTES)
+            boundary(static_cast<int>(o), QColor(255, 180, 60, 90));
+    } else {
+        // Все 16 страниц: сегментов было бы 128 линий на 600 точек — рисуем только
+        // границы страниц, а подключённую подсвечиваем ярче.
+        for (size_t o = bk::Smk512::PAGE_BYTES; o < bk::Smk512::RAM_BYTES;
+             o += bk::Smk512::PAGE_BYTES)
+            boundary(static_cast<int>(o), QColor(255, 160, 80, 110));
+        if (livePageBase > 0) boundary(livePageBase, QColor(120, 230, 160, 200));
+    }
 }
 
 MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     setWindowTitle("Визуализация памяти БК-0010");
     canvas_ = new MemCanvas(board, this);
 
-    auto* bpp = new QComboBox; bpp->addItems({"1 бит", "4 бита", "8 бит", "16 бит"}); bpp->setCurrentIndex(1);
+    auto* bpp = new QComboBox;
+    bpp->addItems({"1 бит", "2 бита (БК)", "4 бита", "8 бит", "16 бит"});
+    bpp->setCurrentIndex(1);   // по умолчанию — как цветной экран БК: 2 бита на точку
     auto* mode = new QComboBox; mode->addItems({"Ч/Б", "Цвет"}); mode->setCurrentIndex(1);
     auto* heat = new QCheckBox("Тепловая карта"); heat->setChecked(true);
     auto* showRom = new QCheckBox("Показать ПЗУ"); // ROM hidden by default
@@ -225,15 +306,33 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     addr->setPrefix("адрес 0"); addr->setSingleStep(0100); addr->setValue(0);
     auto* row = new QSpinBox; row->setRange(8, 512); row->setValue(64); row->setPrefix("шир ");
 
+    // Источник картинки: сама БК или ДОЗУ платы СМК-512. Пункты по страницам есть
+    // всегда, но выбирать их без платы нечего — тогда список просто заблокирован.
+    auto* src = new QComboBox;
+    src->addItem("Память БК");
+    src->addItem("СМК: все 16 страниц");
+    for (size_t i = 0; i < bk::Smk512::PAGES; ++i)
+        src->addItem(QString::fromUtf8("СМК: страница %1").arg(i));
+    src->setEnabled(board->smk512());
+    if (!board->smk512()) src->setToolTip("Блок расширения памяти СМК-512 не установлен");
+
     auto apply = [=] {
-        static const int bppVals[4] = {1, 4, 8, 16};
-        canvas_->bpp = bppVals[std::clamp(bpp->currentIndex(), 0, 3)];
+        static const int bppVals[5] = {1, 2, 4, 8, 16};
+        canvas_->bpp = bppVals[std::clamp(bpp->currentIndex(), 0, 4)];
         canvas_->color = (mode->currentIndex() == 1);
         canvas_->heatmap = heat->isChecked();
         canvas_->hideRom = !showRom->isChecked();
         canvas_->hideScreen = !showScreen->isChecked();
         canvas_->startAddr = addr->value();
         canvas_->bytesPerRow = row->value();
+        const int si = src->currentIndex();
+        canvas_->smkPage = (si == 0) ? MemCanvas::SRC_BK
+                         : (si == 1) ? MemCanvas::SRC_SMK_ALL : si - 2;
+        // В режиме ДОЗУ прятать нечего и начальный адрес БК ни при чём.
+        const bool bkSrc = (si == 0);
+        showRom->setEnabled(bkSrc);
+        showScreen->setEnabled(bkSrc);
+        addr->setEnabled(bkSrc);
         canvas_->update();
     };
     connect(bpp,  QOverload<int>::of(&QComboBox::currentIndexChanged), this, [=](int){ apply(); });
@@ -243,8 +342,10 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     connect(showScreen, &QCheckBox::toggled, this, [=](bool){ apply(); });
     connect(addr, QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
     connect(row,  QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
+    connect(src,  QOverload<int>::of(&QComboBox::currentIndexChanged), this, [=](int){ apply(); });
 
     auto* controls = new QHBoxLayout;
+    controls->addWidget(src);
     controls->addWidget(new QLabel("бит/пиксель:")); controls->addWidget(bpp);
     controls->addWidget(mode); controls->addWidget(heat); controls->addWidget(showRom);
     controls->addWidget(showScreen);

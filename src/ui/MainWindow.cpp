@@ -2,6 +2,7 @@
 #include "GlScreen.h"
 #include "DebuggerOverlay.h"
 #include "MemVisWidget.h"
+#include "SmkRamWidget.h"
 #include "HotPathWidget.h"
 #include "CallGraphWidget.h"
 #include "FlameWidget.h"
@@ -30,10 +31,24 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QSettings>
+#include <QSignalBlocker>
+#include <cstdio>
 
-MainWindow::MainWindow(const QString& romDir, QWidget* parent)
+MainWindow::MainWindow(const QString& romDir, int smkOverride, QWidget* parent)
     : QMainWindow(parent) {
     board_ = std::make_unique<bk::Board>();
+    // Блок расширения памяти СМК-512: настройка запоминается между запусками,
+    // ключ --smk/--no-smk перекрывает её на один запуск.
+    const bool smkOn = smkOverride >= 0 ? smkOverride > 0
+                                        : QSettings().value("smk512", false).toBool();
+    board_->setSmk512(smkOn);
+    if (smkOn) {
+        // Стоит сказать вслух: с платой карта верхней половины адресов не штатная
+        // (в режиме SYS ОЗУ контроллера перекрывает ПЗУ Бейсика), и это объясняет
+        // «странности», если пользователь про плату забыл.
+        std::fprintf(stderr, "БК-0010: блок расширения памяти СМК-512 подключён (512 Кбайт)\n");
+    }
     if (!board_->loadRoms(romDir.toStdString())) {
         QMessageBox::warning(this, "BK-0010",
             QString("Не удалось загрузить ПЗУ из:\n%1\nПоложите monit10.rom (и basic10.rom) в эту папку.")
@@ -84,8 +99,18 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
         : QString::fromUtf8("Геймпад не найден"));
     joyStatus->setEnabled(false);
 
+    emu->addSeparator();
+    // Блок расширения памяти СМК-512 («АльтПро») в разъёме МПИ. На живой машине
+    // плату ставят только при выключенном питании, поэтому переключатель
+    // перезапускает машину — раскладка верхней половины адресов меняется целиком.
+    smkAction_ = emu->addAction("Блок расширения памяти &СМК-512 (512 Кбайт)");
+    smkAction_->setCheckable(true);
+    smkAction_->setChecked(smkOn);
+    connect(smkAction_, &QAction::toggled, this, [this](bool on) { setSmk512(on); });
+
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
+    dbg->addAction("&ДОЗУ СМК-512 по страницам…", this, &MainWindow::openSmkRam, QKeySequence("Ctrl+D"));
     dbg->addAction("Горячий &путь…", this, &MainWindow::openHotPath, QKeySequence("Ctrl+G"));
     dbg->addAction("Граф &вызовов…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
     dbg->addAction("&Пламенный граф…", this, &MainWindow::openFlame, QKeySequence("Ctrl+F"));
@@ -128,14 +153,17 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
     status_ = new QLabel("Готов", this);
     statusBar()->addWidget(status_);
 
-    // --- Emulation timer at 4× the 50 Hz frame rate (200 Hz). Each tick runs a
-    // quarter-frame so audio is fed continuously instead of in one 20 ms burst
-    // (which caused an audible wobble); the screen + profiler refresh stays at
-    // 50 Hz (once every 4 ticks). ---
+    // --- Таймер эмуляции. Кадр разбит на 4 слайса, чтобы звук подавался непрерывно,
+    // а не одним всплеском на кадр (это давало слышимое «вобблирование»); экран и
+    // профилировщик обновляются раз в кадр. Сам темп задаётся НЕ частотой таймера:
+    // кадр БК = 61440 тактов = 20,48 мс, слайс = 5,12 мс, целым числом миллисекунд
+    // это не выражается. Поэтому таймер только «будит» нас почаще, а сколько слайсов
+    // исполнить — считается по реальному времени в onTick(). ---
     timer_ = new QTimer(this);
     timer_->setTimerType(Qt::PreciseTimer);
     connect(timer_, &QTimer::timeout, this, &MainWindow::onTick);
-    timer_->start(5); // 200 Hz
+    clock_.start();
+    timer_->start(4);
 
     // --- Audio (only if built with Qt6 Multimedia) ---
 #ifdef HAVE_QT_MULTIMEDIA
@@ -157,16 +185,31 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::onTick() {
-    static constexpr int kSlices = 4;   // sub-slices per 50 Hz frame (200 Hz timer)
+    static constexpr int kSlices = 4;   // слайсов на кадр
+    // Длительность слайса в наносекундах: кадр 61440 тактов при 3 МГц = 20,48 мс.
+    static constexpr qint64 kSliceNs = 61440LL * 1000000000LL / (3000000LL * kSlices);
+    // Сколько слайсов должно было пройти к этому моменту реального времени. Догоняем,
+    // но не больше kCatchUp за раз — иначе после паузы (или тормоза системы) эмулятор
+    // ушёл бы в долгую «отработку долга» и подвис бы интерфейс.
+    static constexpr qint64 kCatchUp = kSlices * 2;
+    qint64 due = clock_.nsecsElapsed() / kSliceNs;
+    if (due - slicesDone_ > kCatchUp) slicesDone_ = due - kCatchUp;  // долг списываем
+    int steps = static_cast<int>(due - slicesDone_);
+    if (steps <= 0) return;
+    slicesDone_ = due;
+    while (steps-- > 0) runOneSlice(kSlices);
+}
+
+void MainWindow::runOneSlice(int kSlices) {
     if (!paused_ && !suspended_) {
         // Опросить геймпад раз в кадр и обновить байт джойстика (порт 0177714) до
         // прогона кадра, чтобы игра увидела актуальное состояние в своём ISR.
         if (phase_ == 0) board_->setJoystick(gamepad_.poll());
-        // Подать один код из очереди раз в кадр (как нажатия с интервалом 20 мс).
-        // НЕ ждём освобождения регистра: реальный контроллер БК перезаписывает
-        // непрочитанный код новым нажатием — если придерживать код до чтения
-        // старого, игры, читающие код только по событию (LAND), получают
-        // предыдущую клавишу вместо новой.
+        // Подать один код из очереди раз в кадр. НЕ ждём освобождения регистра:
+        // на реальной БК новое нажатие перезаписывает непрочитанный код (см.
+        // Board::pressKey) — иначе игра, читающая 0177662 только при физически
+        // нажатой клавише (PITON) или только по событию нажатия (LAND), получала
+        // бы застрявший код ПРЕДЫДУЩЕЙ клавиши.
         if (phase_ == 0 && !keyFeed_.empty()) {
             board_->pressKey(keyFeed_.front());
             keyFeed_.pop_front();
@@ -185,6 +228,7 @@ void MainWindow::onTick() {
     renderScreen();
     if (paused_) overlay_->update();
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
+    if (smkram_ && smkram_->isVisible()) smkram_->refresh();
     if (hotpath_ && hotpath_->isVisible()) hotpath_->refresh();
     if (callgraph_ && callgraph_->isVisible()) callgraph_->refresh();
     if (flame_ && flame_->isVisible()) flame_->refresh();
@@ -194,7 +238,7 @@ void MainWindow::onTick() {
 
 void MainWindow::renderScreen() {
     board_->screen().setColorMode(colorMode_);
-    board_->screen().render(board_->memory());
+    if (!board_->scanlineRender()) board_->screen().render(board_->memory());
     screen_->setFrame(board_->screen().pixels());
 }
 
@@ -462,6 +506,17 @@ void MainWindow::resetMachine() {
     status_->setText("Сброс");
 }
 
+// Подключение и снятие платы — операция «при выключенном питании»: меняется вся
+// карта верхней половины адресов, поэтому машину перезапускаем. Настройка
+// сохраняется между запусками; ключ --smk её не перезаписывает.
+void MainWindow::setSmk512(bool on) {
+    board_->setSmk512(on);
+    QSettings().setValue("smk512", on);
+    resetMachine();
+    status_->setText(on ? "СМК-512 подключён, машина перезапущена"
+                        : "СМК-512 снят, машина перезапущена");
+}
+
 void MainWindow::toggleColorMode() {
     colorMode_ = !colorMode_;
     status_->setText(colorMode_ ? "Режим: 256×256 цвет" : "Режим: 512×256 ч/б");
@@ -485,6 +540,9 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     }
 
     if (paused_) {
+        // Идёт правка значения на месте — все клавиши уходят в поле ввода,
+        // иначе цифры и Enter разошлись бы по командам отладчика.
+        if (overlay_->handleEditKey(e)) { e->accept(); return; }
         // --- Debugger controls (SoftICE overlay is visible) ---
         switch (e->key()) {
         case Qt::Key_F4:       runToCursor(); return;   // дойти до инструкции под курсором
@@ -515,16 +573,41 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         }
     }
 
+    // Esc при выключенном отладчике — клавиша «СТОП» БК. Она вынесена из матрицы
+    // и кода не даёт, поэтому идёт мимо BkKeymap: внеприоритетное прерывание по
+    // вектору 4. (Внутри отладчика Esc по-прежнему «продолжить»/«отменить ввод».)
+    if (e->key() == Qt::Key_Escape) {
+        board_->pressStop();
+        status_->setText(QString::fromUtf8("Клавиша СТОП (прерывание по вектору 4)"));
+        e->accept();
+        return;
+    }
+
     // --- SoftICE off: feed the BK-0010 keyboard ---
+    // Автоповтор Qt отбрасываем целиком: у реальной БК типematic-повтора нет
+    // (для повтора была клавиша ПОВТ). Иначе дубликаты удерживаемой клавиши
+    // встают в очередь ВПЕРЕДИ только что нажатой — и игра, читающая код по биту
+    // «клавиша нажата» (PITON), срабатывает по коду предыдущей клавиши.
+    if (e->isAutoRepeat()) { e->accept(); return; }
     std::vector<uint16_t> codes = keymap_.translate(e);
     if (!codes.empty()) {
-        for (uint16_t c : codes) {
-            // Drop pile-ups from auto-repeat (a duplicate of the last queued code)
-            // and cap the buffer, mirroring the fact that the real controller
-            // keeps only one pending code.
-            if (keyFeed_.size() >= 16) break;
-            if (!keyFeed_.empty() && keyFeed_.back() == c) continue;
-            keyFeed_.push_back(c);
+        // Одиночный код при пустой очереди защёлкиваем НЕМЕДЛЕННО — атомарно с
+        // битом «клавиша нажата» (setKeyHeld выше): эмуляция однопоточная, между
+        // ними не исполняется ни одной инструкции БК. Если отложить код до подачи
+        // из очереди в onTick, игра, читающая 0177662 по биту 0177716 (PITON),
+        // целый кадр видела бы «клавиша нажата» с кодом ПРЕДЫДУЩЕЙ клавиши.
+        // Многокодовые последовательности (РУС/ЛАТ + символ) и накопившийся хвост
+        // по-прежнему идут через очередь — по одному коду на кадр, чтобы монитор
+        // успевал прочитать каждый.
+        if (keyFeed_.empty() && codes.size() == 1) {
+            board_->pressKey(codes[0]);
+        } else {
+            for (uint16_t c : codes) {
+                // Cap the buffer, mirroring the fact that the real controller
+                // keeps only one pending code.
+                if (keyFeed_.size() >= 16) break;
+                keyFeed_.push_back(c);
+            }
         }
         e->accept();
         return;
@@ -547,6 +630,17 @@ void MainWindow::openMemVis() {
     board_->trace().setEnabled(true);
     memvis_->show();
     memvis_->raise();
+}
+
+// Отдельное окно на ДОЗУ нужно потому, что обычный дамп ходит по адресам БК и
+// показывает только подключённую страницу, да и то не целиком: верхние 512 байт
+// сегмента не читаются ни в одном режиме (docs/smk512.md).
+void MainWindow::openSmkRam() {
+    if (!smkram_) smkram_ = new SmkRamWidget(board_.get());
+    smkram_->show();
+    smkram_->raise();
+    if (!board_->smk512())
+        status_->setText("СМК-512 не установлен: окно ДОЗУ пустое");
 }
 
 void MainWindow::broadcastHighlight(int addr, QWidget* src) {
@@ -663,6 +757,13 @@ void MainWindow::loadState() {
     if (path.isEmpty()) return;
     if (board_->loadState(path.toStdString())) {
         status_->setText("Состояние восстановлено: " + QFileInfo(path).fileName());
+        // В снимке лежит и конфигурация машины, поэтому плата СМК могла появиться
+        // или исчезнуть. Галку в меню синхронизируем без сигнала: иначе она тут же
+        // перезапустила бы машину и стёрла только что восстановленное состояние.
+        if (smkAction_) {
+            QSignalBlocker block(smkAction_);
+            smkAction_->setChecked(board_->smk512());
+        }
         renderScreen();
         if (paused_) overlay_->followPc();
     } else {
