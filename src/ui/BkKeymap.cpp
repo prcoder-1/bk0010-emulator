@@ -1,13 +1,14 @@
 #include "BkKeymap.h"
+#include "BkKeys.h"
 #include <QKeyEvent>
 #include <QString>
 
 // КОИ-7 Н1 (РУС) uppercase Cyrillic letters, in code order 0140..0177.
-// index i -> BK code (0140 + i).
-static const QString kCyrH1 = QString::fromUtf8("ЮАБЦДЕФГХИЙКЛМНОПЯРСТУЖВЬЫЗШЭЩЧЪ");
+// index i -> BK code (0140 + i). Таблица общая с ядром (src/core/BkKeys.h).
+static const QString kCyrH1 = QString::fromUtf8(bk::kKoi7H1Utf8);
 
 // Control codes for switching the register (as sent by the РУС/ЛАТ keys).
-enum : uint16_t { CODE_LAT = 017, CODE_RUS = 016 };
+enum : uint16_t { CODE_LAT = bk::BK_CODE_LAT, CODE_RUS = bk::BK_CODE_RUS };
 
 std::vector<uint16_t> BkKeymap::translate(QKeyEvent* e) {
     // ---- Special keys (authoritative BK codes; bit 0200 => vector 0274) ----

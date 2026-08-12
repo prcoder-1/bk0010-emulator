@@ -11,6 +11,7 @@
 #include "ui/MainWindow.h"
 #include "ui/DebuggerOverlay.h"
 #include "ui/MemVisWidget.h"
+#include "ui/SmkRamWidget.h"
 #include "ui/HotPathWidget.h"
 #include "ui/CallGraphWidget.h"
 #include "ui/FlameWidget.h"
@@ -60,6 +61,14 @@ static int runKeyTest() {
     return 0;
 }
 
+// Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ во время
+// активной развёртки). По умолчанию ВКЛ; выключается ключом --no-arb037.
+static bool g_arb037 = true;
+static bool g_scanline = false;   // --scanline: построчная отрисовка экрана
+// --smk / --no-smk: блок расширения памяти СМК-512. -1 — ключ не задан (в GUI
+// берётся сохранённая настройка, в безголовом режиме и в MCP — выключено).
+static int  g_smk = -1;
+
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
 static int runHeadless(const QString& romDir, const QString& bin,
@@ -76,6 +85,9 @@ static int runHeadless(const QString& romDir, const QString& bin,
         if (fc.size() == 2) keys.push_back({fc[0].toInt(), fc[1].toInt(nullptr, 0)});
     }
     bk::Board board;
+    board.setArbitration(g_arb037);
+    board.setScanlineRender(g_scanline);
+    board.setSmk512(g_smk > 0);
     if (!board.loadRoms(romDir.toStdString())) {
         std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
         return 2;
@@ -107,7 +119,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
         }
         board.runFrame();
     }
-    board.screen().render(board.memory());
+    if (!board.scanlineRender()) board.screen().render(board.memory());
 
     QImage img(reinterpret_cast<const uchar*>(board.screen().pixels()),
                bk::Screen::TEX_W, bk::Screen::TEX_H, QImage::Format_ARGB32);
@@ -150,6 +162,38 @@ static int runHeadless(const QString& romDir, const QString& bin,
         QString noScreenPath = memvisShot; noScreenPath.replace(".png", "_noscreen.png");
         cs.grab().save(noScreenPath);
         std::printf("headless: wrote memvis (screen hidden, ROM shown) %s\n", qPrintable(noScreenPath));
+        // Вид по умолчанию — 2 бита/пиксель в палитре БК (экранное ОЗУ выглядит как
+        // сама картинка), поэтому проверяем заодно и байтовый режим 4 бита/пиксель.
+        MemCanvas c4(&board);
+        c4.resize(560, 640);
+        c4.bpp = 4;
+        QString bk4Path = memvisShot; bk4Path.replace(".png", "_4bpp.png");
+        c4.grab().save(bk4Path);
+        std::printf("headless: wrote memvis (4 бита/пиксель) %s\n", qPrintable(bk4Path));
+        // С установленной платой СМК-512 — заодно её ДОЗУ: все 16 страниц подряд,
+        // отдельно подключённая страница и дамп окна «ДОЗУ по страницам».
+        if (board.smk512()) {
+            MemCanvas ca(&board);
+            ca.resize(560, 640);
+            ca.smkPage = MemCanvas::SRC_SMK_ALL;
+            QString allPath = memvisShot; allPath.replace(".png", "_smkall.png");
+            ca.grab().save(allPath);
+            std::printf("headless: wrote memvis (СМК, все 16 страниц) %s\n", qPrintable(allPath));
+
+            MemCanvas cp(&board);
+            cp.resize(560, 640);
+            cp.smkPage = board.smk().page();
+            QString pgPath = memvisShot; pgPath.replace(".png", "_smkpage.png");
+            cp.grab().save(pgPath);
+            std::printf("headless: wrote memvis (СМК, страница %d) %s\n",
+                        board.smk().page(), qPrintable(pgPath));
+
+            SmkRamWidget sr(&board);
+            sr.resize(900, 620);
+            QString srPath = memvisShot; srPath.replace(".png", "_smkram.png");
+            sr.grab().save(srPath);
+            std::printf("headless: wrote ДОЗУ СМК по страницам %s\n", qPrintable(srPath));
+        }
     }
     if (!hpShot.isEmpty()) {
         HotPathWidget w(&board);
@@ -255,6 +299,11 @@ static int runHeadless(const QString& romDir, const QString& bin,
 }
 
 int main(int argc, char** argv) {
+    // Имя организации и приложения нужно QSettings: без них настройки легли бы в
+    // файл, названный по имени исполняемого файла.
+    QCoreApplication::setOrganizationName("bk0010-emulator");
+    QCoreApplication::setApplicationName("bk0010-emulator");
+
     // MCP server mode: a headless JSON-RPC-over-stdio server for debugging BK
     // programs from an MCP client (e.g. Claude Code). Handled before the GUI so
     // no display/OpenGL is needed; offscreen QGuiApplication enables PNG output.
@@ -267,9 +316,12 @@ int main(int argc, char** argv) {
             romDir = BK_DEFAULT_ROM_DIR;
 #endif
             if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
-            for (int j = 1; j < argc; ++j)
+            bool smk = false;
+            for (int j = 1; j < argc; ++j) {
                 if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
-            McpServer server(romDir.toStdString());
+                else if (std::string(argv[j]) == "--smk") smk = true;
+            }
+            McpServer server(romDir.toStdString(), smk);
             return server.run();
         }
     }
@@ -322,6 +374,10 @@ int main(int argc, char** argv) {
         else if (args[i] == "--flamechart" && i + 1 < args.size()) { fcShot = args[++i]; headless = true; }
         else if (args[i] == "--hotchart" && i + 1 < args.size()) { hcShot = args[++i]; headless = true; }
         else if (args[i] == "--mono") color = false;
+        else if (args[i] == "--scanline") g_scanline = true;
+        else if (args[i] == "--no-arb037") g_arb037 = false;
+        else if (args[i] == "--smk") g_smk = 1;
+        else if (args[i] == "--no-smk") g_smk = 0;
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
         else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
         else if (args[i] == "--type" && i + 1 < args.size()) { typeStr = args[++i]; headless = true; }
@@ -336,7 +392,8 @@ int main(int argc, char** argv) {
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
                            dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList);
 
-    MainWindow w(romDir);
+    MainWindow w(romDir, g_smk);
+    w.setArbitration(g_arb037);
     w.show();
     if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
 

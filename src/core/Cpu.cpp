@@ -151,9 +151,16 @@ void Cpu::service(uint16_t vector) {
     psw = rword(vector + 2) & 0377;
 }
 
-void Cpu::interrupt(uint16_t vector) {
-    waiting_ = false;
+int Cpu::interrupt(uint16_t vector) {
+    // Выход из WAIT по прерыванию: op_wait() откатывает PC на саму команду, чтобы
+    // она «исполнялась» повторно, пока ЦП простаивает. Но в стек обязан лечь адрес
+    // СЛЕДУЮЩЕЙ команды — иначе RTI вернёт нас на тот же WAIT и программа, которая
+    // синхронизируется с кадром штатной идиомой PDP-11, зависнет навсегда.
+    // Тот же приём в эталонном bk (in_wait_instr: main.c:546 -> service.c:162-165)
+    // и в GID BKemu (devemu/CPU.cpp:627-634).
+    if (waiting_) { waiting_ = false; r[7] += 2; }
     service(vector);
+    return INT_ENTRY_TICKS;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +179,7 @@ int Cpu::op_movb() {
     uint8_t data = srcMode() ? loadbSrc() : (r[srcReg()] & 0377);
     chgNb(data); chgZb(data); clrV();
     if (dstMode()) storebDst(data);
-    else r[dstReg()] = (data & 0200) ? (0177400 + data) : data; // sign-extend into reg
+    else { r[dstReg()] = (data & 0200) ? (0177400 + data) : data; cBugArmed_ = true; } // sign-extend into reg
     return OK;
 }
 int Cpu::op_cmp() {
@@ -378,7 +385,7 @@ int Cpu::op_mfps() {
     uint8_t data = psw & 0377;
     chgNb(data); chgZb(data); clrV();
     if (dstMode()) storebDst(data);
-    else r[dstReg()] = (data & 0200) ? (0177400 + data) : data;
+    else { r[dstReg()] = (data & 0200) ? (0177400 + data) : data; cBugArmed_ = true; }
     return OK;
 }
 
@@ -478,7 +485,8 @@ int Cpu::op_aslb() {
 // ---- branches ----
 int Cpu::brx(uint16_t clear, uint16_t set) {
     lastBranch_ = r[7];
-    if (((psw & set) == set) && ((psw & clear) == 0)) {
+    const uint16_t f = brFlags();
+    if (((f & set) == set) && ((f & clear) == 0)) {
         uint16_t off = ir_ & 0377;
         if (off & 0200) off |= 0177400;
         r[7] += off * 2;
@@ -497,7 +505,7 @@ int Cpu::op_bcc()  { return brx(CC_C, 0); }
 int Cpu::op_bcs()  { return brx(0, CC_C); }
 int Cpu::op_blos() {
     lastBranch_ = r[7];
-    if ((psw & CC_C) || (psw & CC_Z)) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
+    if ((brFlags() & CC_C) || (brFlags() & CC_Z)) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
     return OK;
 }
 int Cpu::op_bge() {
@@ -564,7 +572,11 @@ int Cpu::op_rti()   { r[7] = pop(); psw = pop() & 0377; return OK; }
 int Cpu::op_rtt()   { r[7] = pop(); psw = pop() & 0377; return R_RTT; }
 int Cpu::op_bpt()   { return R_BPT; }
 int Cpu::op_iot()   { return R_IOT; }
-int Cpu::op_reset() { psw = 0200; return OK; }
+// RESET сбрасывает ПЕРИФЕРИЮ и не трогает PSW. Раньше здесь стояло `psw = 0200`
+// (порт из bk/weird.c, где сброса устройств тоже нет): это выставляло бит маски, и
+// кадровое прерывание не проходило до следующей записи PSW — «после RESET игра встала».
+// Сверено с GID: devemu/CPU.cpp:1111-1116 -> Board.cpp:716-732.
+int Cpu::op_reset() { if (resetHook_) resetHook_(); return OK; }
 int Cpu::op_emt()   { return R_EMT; }
 int Cpu::op_trap()  { return R_TRAP; }
 
@@ -658,8 +670,11 @@ void Cpu::buildTable() {
 // ---------------------------------------------------------------------------
 int Cpu::timingFor(uint16_t ir) const {
     // Timings measured on a real БК-0010.01 (Manwe's "clock cycles meter" + the XOP
-    // timing test suite), FAST (main) memory. Screen-RAM (0o40000..0o77777)
-    // wait-states are address-dependent and added on top in Cpu::step().
+    // timing test suite), FAST (main) memory — this is the no-extra-wait baseline.
+    // The КР1801ВП1-037 memory arbitration adds wait-states on top; those are NOT
+    // address-dependent (the 037 controls ALL dynamic RAM uniformly) but raster-
+    // dependent — asserted only while the beam is in active display. They are modelled
+    // outside the CPU, in Board via the Vp037 device (see src/core/Vp037.h).
     //
     // Two-operand: 12 + SRC[sm] + DST[dm], where DST depends on whether the source
     // is a register (sm==0) or memory (sm!=0) and on the op class (read/write/rmw).
@@ -709,9 +724,17 @@ int Cpu::timingFor(uint16_t ir) const {
         return REGREG + OP_W[dm];                          // clrb..negb, ror..asl b, mfps
     }
     if (idx == 0) {                                         // 0000xx
+        // Редкие команды: у нас они стояли «на глаз» одним числом. Значения ниже —
+        // из таблицы GID timing_Misk_10 (devemu/CPU.cpp:36); RTI/RTT и BPT там же
+        // совпадают с нашими измеренными. Особенно грубо было у RESET: он держит
+        // сигнал INIT сотни тактов, а не 40.
         if (ir == 0002 || ir == 0006) return 40;           // RTI/RTT
-        if (ir == 0003 || ir == 0004) return 64;           // BPT/IOT
-        return 40;                                          // HALT/WAIT/RESET (approx)
+        if (ir == 0003) return 64;                          // BPT
+        if (ir == 0004) return 104;                         // IOT
+        if (ir == 0000) return 68;                          // HALT
+        if (ir == 0001) return 12;                          // WAIT
+        if (ir == 0005) return 1140;                        // RESET (длинный INIT)
+        return 40;                                          // прочие 0000xx
     }
     return 40;                                              // fallback
 }
@@ -721,6 +744,13 @@ int Cpu::timingFor(uint16_t ir) const {
 // ---------------------------------------------------------------------------
 int Cpu::step() {
     if (halted_) return 4;
+    // Промежуточный регистр флагов перезагружается из PSW перед каждой командой —
+    // кроме случая, когда предыдущая команда была MOVB/MFPS с приёмником-регистром:
+    // тогда C в нём остаётся нулевым и это увидит условный переход. Флаг взводится
+    // заново самой командой-триггером, поэтому подряд идущие MOVB/MFPS продлевают
+    // эффект (см. второй пример в [ВМ1 §10]).
+    cBugActive_ = cBugArmed_ && emulateCBug_;
+    cBugArmed_ = false;
     ir_ = rword(r[7]);
     r[7] += 2;
     int ticks = timingFor(ir_);
@@ -749,6 +779,21 @@ int Cpu::step() {
         break;
     case R_WAIT: waiting_ = true;    break;
     }
+    // Ловушка трассировки: пока в PSW стоит T (бит 4, 020), ПОСЛЕ КАЖДОЙ команды
+    // делается trap через вектор 014. Подавляется ровно на самой команде RTT —
+    // порт 1:1 из эталонного bk (main.c: `if ((p->psw & 020) && (rtt == 0))`,
+    // где rtt взводится только обработчиком RTT и сбрасывается тут же). Отсюда
+    // разница RTI/RTT: RTI, восстановивший T=1, ловится немедленно, а RTT даёт
+    // выполниться ровно одной следующей команде.
+    //
+    // На этом построена «музыка параллельно с игрой» у ряда программ БК (напр.
+    // Коробейники в тетрисе tetr-music.bin): основной код идёт с PSW=0360, а
+    // обработчик 014 после каждой его команды подкручивает динамик по регистру
+    // 0177716 и возвращается по RTT. Без T-бита обработчик не вызывается вовсе —
+    // не будет ни звука, ни замедления, и игра летит на полной скорости ЦП.
+    // В режиме ожидания ловушка не срабатывает: WAIT «исполняется» повторно, и иначе
+    // обработчик 014 вызывался бы бесконечно, пока ЦП простаивает (GID: devemu/CPU.cpp:558).
+    if ((psw & CC_T) && res != R_RTT && res != R_WAIT) service(VEC_TBIT);
     return ticks;
 }
 

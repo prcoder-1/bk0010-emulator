@@ -1,11 +1,13 @@
 #pragma once
 #include <QWidget>
 #include <QRect>
+#include <QString>
 #include <cstdint>
 #include <vector>
 
 class QFontMetrics;
-class QString;
+class QKeyEvent;
+class QPainter;
 
 namespace bk { class Board; }
 
@@ -39,6 +41,13 @@ public:
     void scrollDisasm(int lines);    // move the disasm window
     void scrollMem(int rows);
 
+    // --- Правка значения на месте ---
+    // Клик по регистру, ССП или слову в дампе начинает ввод нового значения
+    // восьмеричными цифрами. Пока правка идёт, MainWindow отдаёт клавиши сюда:
+    // цифры 0-7 набирают значение, Backspace стирает, Enter применяет, Esc отменяет.
+    bool editing() const { return editTarget_ != EditTarget::None; }
+    bool handleEditKey(QKeyEvent* e);   // true = клавиша использована правкой
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
@@ -57,9 +66,28 @@ private:
     uint16_t prevPsw_ = 0;
     bool havePrev_ = false;
 
+    // --- состояние правки на месте ---
+    enum class EditTarget { None, Reg, Psw, Mem, Stack };
+    EditTarget editTarget_ = EditTarget::None;
+    int      editReg_  = 0;          // 0..7 для EditTarget::Reg
+    uint16_t editAddr_ = 0;          // адрес слова для EditTarget::Mem / EditTarget::Stack
+    QString  editBuf_;               // набранные восьмеричные цифры
+    void beginEdit(EditTarget t, int reg, uint16_t addr);
+    void commitEdit();
+    void cancelEdit();
+    // Нарисовать редактируемое поле поверх обычного значения. `current` —
+    // прежнее значение: пока ничего не набрано, показываем его приглушённым.
+    void drawEditField(QPainter& p, int x, int baselineY, const QFontMetrics& fm,
+                       const QString& current) const;
+
     // Layout rectangles (computed each paint) used by the mouse handlers.
     QRect disasmRect_;
     QRect memRect_;
+    QRect regRect_;                  // панель регистров (попадание мышью)
+    QRect stkRect_;                  // панель стека (попадание мышью)
+    int regX_ = 0, regY_ = 0;        // левый верхний угол сетки регистров (базовая линия первой строки)
+    int cw_ = 8;                     // ширина моноширинного символа на последней отрисовке
+    int memWpr_ = 8;                 // слов в строке дампа памяти
     QRect bpRect_;                   // breakpoints panel (top-right of the registers)
     std::vector<uint16_t> bpVisible_; // breakpoint addresses currently drawn, row order (hit test)
     std::vector<uint16_t> navBack_, navForward_;  // disasm navigation history

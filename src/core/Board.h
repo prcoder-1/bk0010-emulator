@@ -3,10 +3,13 @@
 #include <set>
 #include <map>
 #include <deque>
+#include <vector>
 #include "Memory.h"
 #include "Cpu.h"
 #include "Screen.h"
 #include "Speaker.h"
+#include "Vp037.h"
+#include "Smk.h"
 #include "Trace.h"
 #include "Symbols.h"
 
@@ -38,7 +41,38 @@ public:
     // If the CPU goes idle (WAIT/HALT) it stays idle for the rest of the frame, just
     // like runFrame(). Equivalent to runFrame() when run for all slices 0..nslices-1.
     void runFrameSlice(int slice, int nslices);
-    int  ticksPerFrame() const { return cpuFreqHz_ / frameHz_; }
+    // Длительность кадра БК — НЕ 1/50 секунды: развёртка идёт на 48,83 Гц, что при
+    // 3 МГц даёт ровно 61440 тактов ЦП на кадр (docs/БК-docs 11-экран, «Кадровая
+    // частота»; подтверждается и конфигом bkemu-QT: -framerate 48.828). Берём величину
+    // прямо из геометрии 037 — 320 строк x 384 такта CLKIN, 1 такт ЦП = 2 CLKIN, —
+    // чтобы кадр эмулятора и кадр видеоконтроллера совпадали точно.
+    int  ticksPerFrame() const { return Vp037::CLKIN_PER_FRAME / 2; }
+    // Кадровая частота, Гц (нецелая: 3'000'000 / 61440 = 48,83).
+    double frameRateHz() const { return double(cpuFreqHz_) / ticksPerFrame(); }
+
+    // Потактовая эмуляция арбитража КР1801ВП1-037: добавляет такты ожидания к
+    // обращениям в ДОЗУ во время активной развёртки (см. Vp037). По умолчанию ВКЛ;
+    // выключение возвращает прежнее поведение «идеальной» памяти.
+    void setArbitration(bool on) { arb037_ = on; }
+
+    // Построчная отрисовка: экран формируется по мере движения луча (модель Vp037),
+    // и каждая строка рисуется тем значением регистра 0177664, какое стояло, когда
+    // луч её проходил. Даёт построчные эффекты (параллакс, «разрезанный» экран),
+    // которые при покадровой отрисовке теряются. Выключено — прежнее поведение:
+    // весь кадр рисуется один раз последним значением скролла.
+    void setScanlineRender(bool on) { scanlineRender_ = on; }
+    bool scanlineRender() const { return scanlineRender_; }
+    bool arbitration() const { return arb037_; }
+    const Vp037& vp037() const { return vp037_; }
+
+    // Блок расширения памяти СМК-512 в разъёме МПИ (опционально; по умолчанию ВЫКЛ).
+    // Включение эквивалентно установке платы в выключенную машину: ДОЗУ обнуляется,
+    // контроллер встаёт в режим SYS страницу 0, машину надо перезапустить —
+    // раскладка верхней половины адресов меняется целиком. См. docs/smk512.md.
+    void setSmk512(bool on);
+    bool smk512() const { return smkOn_; }
+    const Smk512& smk() const { return smk_; }
+    Smk512&       smk()       { return smk_; }
 
     // Run enough frames for the monitor ROM to initialise (vectors, stack,
     // display driver) if it hasn't yet. A game must not be started before this,
@@ -48,12 +82,23 @@ public:
     }
 
     // Present a raw BK key code to the keyboard controller, exactly like the
-    // real BK-0010: the code register (0177662) holds a SINGLE code. A new code
-    // is latched only while the "ready" flag (0177660 bit 7) is clear — i.e. the
-    // previous code has been read; otherwise the keypress is lost. The interrupt
-    // (vector 060, or 0274 for codes with bit 0200) fires only if enabled
-    // (0177660 bit 6). Returns true if the code was latched, false if dropped.
+    // real BK-0010 (ВП1-014, ср. bk/tty.c): the code register (0177662) holds a
+    // SINGLE code, and a new keypress ALWAYS overwrites it — read or not; the
+    // "ready" flag (0177660 bit 7) just marks "a code arrived since the last
+    // read" and is cleared by reading 0177662. The interrupt (vector 060, or
+    // 0274 for codes with bit 0200) fires only if enabled (0177660 bit 6).
+    // Always returns true (kept bool for call-site compatibility).
     bool pressKey(uint16_t bkCode);
+
+    // Клавиша «СТОП». Физически вынесена из матрицы (отдельная цепь STOP_IN/STOP_OUT),
+    // кода в 0177662 не даёт, а вызывает прерывание по вектору 4 — тому же, что HALT и
+    // зависание. Прерывание ВНЕПРИОРИТЕТНОЕ: запретить его установкой разрядов приоритета
+    // нельзя, «СТОП» прерывает программу всегда (см. docs/BK0010-hardware.md).
+    // Кнопка заодно дёргает линию ОСТ разъёма МПИ (контакт А1), а по ней блок
+    // расширения СМК-512 асинхронно обнуляет регистр режима — SYS, страница 0.
+    // Без этого машина после «СТОП» осталась бы с ОЗУ платы на месте ПЗУ и
+    // обработать вектор было бы нечем (docs/smk512.md).
+    void pressStop() { stopPending_ = true; if (smkOn_) smk_.reset(); }
 
     // True while an unread code sits in the register (ready flag set).
     bool keyReady() const { return (kbdStatus_ & 0200) != 0; }
@@ -71,6 +116,9 @@ public:
     // геймпада (SDL2), выбранная раскладка — в классе Gamepad.
     void setJoystick(uint16_t bits) { joystick_ = bits; }
     uint16_t joystick() const { return joystick_; }
+    // Последнее значение, записанное программой в 0177714 (отдельный выходной
+    // регистр: принтер / ковокс). Чтение порта отдаёт джойстик, а не это.
+    uint16_t portOut() const { return portOut_; }
 
     // --- Breakpoints / debugger support ---
     void toggleBreakpoint(uint16_t addr) {
@@ -138,10 +186,28 @@ public:
 
     // I/O-register write log (0177600..0177776), captured only while enabled — for
     // debugging how a game programs the keyboard / timer / sound / port.
-    struct IoWrite { uint16_t addr, value; uint64_t tick; };
-    void setIoLog(bool on) { ioLogOn_ = on; }
+    // `pc` — адрес инструкции, выполнившей обращение (см. curInstrPc_); logReads
+    // включает запись ЧТЕНИЙ (опрос джойстика/клавиатуры — это чтения, без них их
+    // не видно). Монитор непрерывно опрашивает 0177660/0177662, поэтому чтения
+    // имеет смысл включать вместе с addrFilter (0 = без фильтра).
+    struct IoAccess { uint16_t addr, value, pc; uint64_t tick; bool isRead; };
+    void setIoLog(bool on, bool logReads = false, size_t cap = 2048, uint16_t addrFilter = 0) {
+        ioLogOn_ = on; ioLogReads_ = logReads;
+        ioLogCap_ = cap ? cap : 1; ioLogFilter_ = addrFilter;
+    }
     void clearIoLog() { ioLog_.clear(); }
-    const std::deque<IoWrite>& ioLog() const { return ioLog_; }
+    const std::deque<IoAccess>& ioLog() const { return ioLog_; }
+    bool     ioLogReads()  const { return ioLogReads_; }
+    uint16_t ioLogFilter() const { return ioLogFilter_; }
+
+    // Лог фронтов пьезодинамика (бит 6 регистра 0177716) с тактами: позволяет
+    // разложить звук игры на тоны (частота = 1/период меандра) точно, а не гадать
+    // по нулевым пересечениям PCM.
+    struct SpkEdge { uint64_t tick; uint8_t level; };
+    void setSpeakerLog(bool on, size_t cap = 65536) { spkLogOn_ = on; spkLogCap_ = cap ? cap : 1; }
+    bool speakerLogOn() const { return spkLogOn_; }
+    void clearSpeakerLog() { spkLog_.clear(); }
+    const std::deque<SpkEdge>& speakerLog() const { return spkLog_; }
 
     // Execute exactly one instruction (for the debugger). Returns ticks.
     int  stepInstruction();
@@ -181,9 +247,13 @@ public:
     // an I/O-page address). Reads may differ from this on real hardware.
     uint16_t peekRegWritten(uint16_t addr) const;
 
-    // Save/restore full emulator state (RAM, CPU, device registers).
+    // Save/restore full emulator state (RAM, CPU, device registers, ввод).
     bool saveState(const std::string& path);
     bool loadState(const std::string& path);
+    // То же самое в память — для быстрых чекпоинтов без файлов (MCP-слоты,
+    // побитовый перебор джойстика с откатом).
+    void saveStateMem(std::vector<uint8_t>& out) const;
+    bool loadStateMem(const std::vector<uint8_t>& in);
 
     // IoBus
     bool ioRead(uint16_t addr, uint16_t& value) override;
@@ -193,9 +263,18 @@ private:
     Memory mem_;
     Cpu    cpu_{mem_};
     Screen screen_;
+    Vp037  vp037_;                 // видеоконтроллер 037: арбитраж доступа к ДОЗУ
+    Smk512 smk_;                   // блок расширения памяти в разъёме МПИ
+    bool   smkOn_ = false;         // плата СМК-512 установлена
 
-    int cpuFreqHz_ = 3000000;
-    int frameHz_   = 50;
+    bool arb037_ = true;           // моделировать ожидания 037 (по умолчанию ВКЛ)
+    bool scanlineRender_ = false;  // построчная отрисовка экрана
+    int  renderedLine_ = 0;        // следующая строка кадра, ещё не отрисованная
+    void renderScanlinesUpTo(int line);   // догнать отрисовку до строки `line`
+    void beginFrameRaster();              // верх кадра: доотрисовать и сбросить счётчик
+    int  pendingWaitClkin_ = 0;    // накопленное ожидание ДОЗУ (CLKIN) за инструкцию
+
+    int cpuFreqHz_ = 3000000;   // тактовая частота ЦП
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()
     bool sliceIdle_ = false;     // CPU went idle (WAIT/HALT) mid-frame — skip its remaining slices
     int  sliceFrameTicks_ = 0;   // ticks run so far this frame (across slices), for exact boundaries
@@ -209,11 +288,21 @@ private:
     uint16_t kbdStatus_ = 0;    // 0177660: bit7 = code ready, bit6 = IRQ mask (0=enabled)
     uint16_t kbdData_   = 0;    // 0177662: the single latched key code (7 bits)
     bool     keyIntPending_ = false;
-    bool     keyIntFresh_ = false;   // код только что защёлкнут — задержать IRQ на кадр
+    // Свежезащёлкнутый код придерживает своё прерывание примерно на четверть кадра:
+    // игры, которые РАЗРЕШАЮТ прерывание клавиатуры и при этом сами опрашивают
+    // регистр (SOKOBAN), должны успеть прочитать код раньше ISR монитора.
+    uint64_t keyIntDeferAt_ = 0;        // такт, с которого IRQ клавиатуры выдавать можно
+    bool     irqFramePending_ = false;  // взведённый запрос кадрового прерывания 0100
+    bool     stopPending_ = false;      // нажата клавиша «СТОП» (вектор 4, вне приоритета)
     bool     keyHeld_ = false;   // physical key down (0177716 bit 6, active-low)
     uint16_t keyIntVec_ = 060;
-    uint8_t  speaker_   = 0;
-    uint16_t joystick_  = 0;     // 0177714: состояние джойстика (нажато = 1)
+    uint8_t  speaker_   = 0;     // уровень пьезодинамика 0..7 (биты 6,5,2 регистра 0177716)
+    uint16_t joystick_  = 0;     // 0177714 на ЧТЕНИЕ: состояние джойстика (нажато = 1)
+    uint16_t portOut_   = 0;     // 0177714 на ЗАПИСЬ: отдельная защёлка (принтер/ковокс)
+    uint16_t cpuMode_ = 0;            // 0177700 CPU_MODE: доступные по записи разряды 0..2
+    bool     sysWriteFlag_ = false;   // бит 2 регистра 0177716: «была запись в системный регистр»
+    uint64_t kbdReadyClearAt_ = 0;    // такт отложенного сброса бита готовности (0 = не запланирован)
+    void resetDevices();              // сброс периферии по команде RESET
 
     // 1801VM1 programmable interval timer (0177706 limit / 0177710 counter /
     // 0177712 control). Decrements at f/128 (optionally /4, /16); sets the FL
@@ -232,8 +321,18 @@ private:
 
     std::deque<EmtOp> emtLog_;   // recent EMT 36 file operations (capped ring)
 
-    std::deque<IoWrite> ioLog_;  // recent I/O-register writes (capped ring)
-    bool ioLogOn_ = false;
+    std::deque<IoAccess> ioLog_; // recent I/O-register accesses (capped ring)
+    bool ioLogOn_ = false, ioLogReads_ = false;
+    size_t   ioLogCap_ = 2048;
+    uint16_t ioLogFilter_ = 0;   // 0 = все адреса страницы В-В
+    uint16_t curInstrPc_ = 0;    // PC исполняемой сейчас инструкции (для лога В-В)
+
+    std::deque<SpkEdge> spkLog_; // фронты динамика (capped ring)
+    bool   spkLogOn_ = false;
+    size_t spkLogCap_ = 65536;
+
+    // Разбор чтения регистра без побочки логирования (ioRead — обёртка над ним).
+    bool ioReadRaw(uint16_t addr, uint16_t& value);
 
     std::set<uint16_t> breakpoints_;
     std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
@@ -248,8 +347,8 @@ private:
     uint16_t watchAddr_ = 0, watchPc_ = 0;
     void checkWatch(uint16_t addr, bool write, bool isByte);
 
-    void deliverFrameInterrupts(); // 50 Hz IRQ (vector 0100) + keyboard (0060)
-    bool deliverKeyboardInterrupt(); // pending key IRQ (vector 0060/0274), deferred one slice
+    void deliverFrameInterrupts(); // взвести кадровый запрос 50 Гц и попробовать выдать
+    int  tryDeliverInterrupts();   // выдать взведённые запросы; возвращает такты входа
     int  stepCore();               // one instruction + sound/trace bookkeeping
 
     // EMT 36 handler: reads the tape/disk parameter block (address in R1) and
