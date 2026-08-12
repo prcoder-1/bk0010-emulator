@@ -10,6 +10,7 @@
 class GlScreen;
 class DebuggerOverlay;
 class MemVisWidget;
+class SmkRamWidget;
 class HotPathWidget;
 class CallGraphWidget;
 class FlameWidget;
@@ -52,6 +53,7 @@ private slots:
     void resetMachine();
     void toggleColorMode();
     void openMemVis();
+    void openSmkRam();
     void openHotPath();
     void openCallGraph();
     void openFlame();
@@ -85,6 +87,7 @@ private:
     GlScreen* screen_ = nullptr;
     DebuggerOverlay* overlay_ = nullptr;
     MemVisWidget* memvis_ = nullptr;
+    SmkRamWidget* smkram_ = nullptr;
     HotPathWidget* hotpath_ = nullptr;
     CallGraphWidget* callgraph_ = nullptr;
     FlameWidget* flame_ = nullptr;

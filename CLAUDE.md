@@ -150,7 +150,11 @@ Key cross-cutting facts to know before editing the CPU or screen:
   NOT by the `RESET` instruction — that is bus INIT on pin Б19, a separate signal in
   the replica's CPLD. Mode/page show up in the
   Soft-ICE «СИСТ. РЕГИСТРЫ» panel (only when the board is in, so the no-board
-  overlay layout is unchanged) and in `bk_io_state`. End-to-end coverage is the
+  overlay layout is unchanged) and in `bk_io_state`; the DRAM itself has its own
+  window (`src/ui/SmkRamWidget.cpp`, Ctrl+D — per-page hex dump that also resolves
+  each row to the BK address it is visible at right now) and is selectable as a
+  source in the memory visualiser (`MemCanvas::smkPage`). The heatmap only works
+  for the mapped page — `Trace` is indexed by 16-bit BK addresses. End-to-end coverage is the
   third-party `tests/data/SMKTEST.bin`, run automatically by `cpu_tests` — it OCRs
   the report off the screen, and the glyph table must come from a SEPARATE pristine
   `Memory`, because ОЗУ10/All cover the ROM font at `0112036`. Details and the
