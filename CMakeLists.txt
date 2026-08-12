@@ -72,8 +72,10 @@ target_compile_definitions(bk0010-emulator PRIVATE
 enable_testing()
 add_executable(cpu_tests tests/cpu_tests.cpp)
 target_link_libraries(cpu_tests PRIVATE bkcore)
-# Тестам OCR нужен знакогенератор из ПЗУ монитора (тест пропускается, если ПЗУ нет).
+# Тестам OCR нужен знакогенератор из ПЗУ монитора (тест пропускается, если ПЗУ нет),
+# сквозному тесту СМК — сторонний SMKTEST.bin из tests/data.
 target_compile_definitions(cpu_tests PRIVATE
     BK_DEFAULT_ROM_DIR="${CMAKE_CURRENT_SOURCE_DIR}/roms"
+    BK_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
 )
 add_test(NAME cpu_tests COMMAND cpu_tests)

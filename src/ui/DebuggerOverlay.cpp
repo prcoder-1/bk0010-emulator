@@ -457,9 +457,12 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         ma += static_cast<uint16_t>(wpr * 2);
     }
 
-    // ---- Stack (middle) fills the space between memory and the bottom-anchored
-    // register box, which is sized to fit exactly its title row + 9 registers. ----
-    int sregH = 10 * lineH_ + 8;
+    // ---- Панель стека занимает всё между памятью и прибитой к низу панелью
+    // системных регистров. Та рассчитана ровно на своё содержимое: строка
+    // заголовка, строка «луч + шапка колонок» и 9 регистров. С установленным
+    // блоком СМК-512 там же появляется строка режима — панель растёт на строку,
+    // стек ровно на столько же сжимается. ----
+    int sregH = (board_->smk512() ? 12 : 11) * lineH_ + 8;
     QRect stkRect(mx, memRect.bottom() + margin, mw,
                   dTop + dH - sregH - 2 * margin - memRect.bottom());
     stkRect_ = stkRect;   // для попадания мышью при правке
@@ -512,10 +515,13 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         {0177716, "внеш устр."},   // управление внешними устройствами (динамик/лента/клавиша)
     };
     const int srx = sregRect.x() + 10, srw = sregRect.width() - 16;
-    // Column headers over the two value columns (written / read), on the title row.
+    // Первая строка содержимого — вторая строка панели: на первой стоит заголовок,
+    // как во всех остальных панелях (регистры, память, стек).
+    int gy = sregRect.y() + 2 * lineH_;
+    // Заголовки над колонками значений (записано / прочитано).
     p.setPen(QColor(150, 180, 230));
-    p.drawText(srx + 20 * cw, sregRect.y() + lineH_, "запись");
-    p.drawText(srx + 27 * cw, sregRect.y() + lineH_, "чтение");
+    p.drawText(srx + 20 * cw, gy, "запись");
+    p.drawText(srx + 27 * cw, gy, "чтение");
     // Где сейчас луч: строка развёртки и фаза. Модель Vp037 это знает, а при
     // отладке видеоэффектов и гонок с ВОЗУ без этого не обойтись.
     {
@@ -524,11 +530,29 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
                             : tv.hgate() ? QString::fromUtf8("строч.гаш")
                                          : QString::fromUtf8("видимая");
         p.setPen(tv.inActiveDisplay() ? chg : fg);
-        p.drawText(srx, sregRect.y() + lineH_,
-                   QString::fromUtf8("луч %1 %2").arg(tv.scanline(), 3).arg(phase));
+        p.drawText(srx, gy, QString::fromUtf8("луч %1 %2").arg(tv.scanline(), 3).arg(phase));
         p.setPen(fg);
     }
-    int gy = sregRect.y() + lineH_ + lineH_;
+    gy += lineH_;
+    // Блок расширения памяти СМК-512: без режима и номера страницы отладка идёт
+    // вслепую — одни и те же адреса выше 0100000 в разных режимах значат разное.
+    // Показываем только с установленной платой (см. расчёт sregH выше). Брать
+    // peekRegWritten(0177130) нельзя: СМК перехватывает запись в Memory раньше
+    // IoBus, и журнал записей регистра остаётся пустым — истина в самом Smk512.
+    if (board_->smk512()) {
+        const auto& smk = board_->smk();
+        QString s = QString::fromUtf8("СМК %1 (%2) стр %3")
+                        .arg(QString::fromUtf8(bk::Smk512::modeName(smk.mode())), -5)
+                        .arg(oct6(bk::Smk512::modeCode(smk.mode())))
+                        .arg(smk.page(), -2);
+        p.setPen(fg);
+        p.drawText(srx, gy, s);
+        if (smk.armed()) {   // взведён строб — машина в середине трёхтактного протокола
+            p.setPen(chg);
+            p.drawText(srx + cw * static_cast<int>(s.size()) + cw, gy, QString::fromUtf8("строб"));
+        }
+        gy += lineH_;
+    }
     for (const auto& sr : sregs) {
         if (gy > sregRect.bottom()) break;
         uint16_t rd = board_->peekReg(sr.addr);
