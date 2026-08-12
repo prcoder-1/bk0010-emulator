@@ -136,6 +136,9 @@ void Board::resetDevices() {
     sysWriteFlag_ = false;
     cpuMode_ = 0;
     timerSetMode(0);            // остановить таймер
+    // Команда RESET дёргает СБРОС (INIT) шины МПИ, и контроллер СМК возвращается
+    // в режим SYS страницу 0 — как после включения питания, но ДОЗУ сохраняется.
+    if (smkOn_) smk_.reset();
 }
 
 Board::Board() {
@@ -285,7 +288,20 @@ void Board::reset() {
     vp037_.reset();
     vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
     pendingWaitClkin_ = 0;
+    if (smkOn_) smk_.powerOn();        // включение питания: ДОЗУ чисто, режим SYS
     trace_.reset();
+}
+
+void Board::setSmk512(bool on) {
+    if (on == smkOn_) return;
+    smkOn_ = on;
+    if (on) {
+        smk_.powerOn();
+        mem_.setMpi(&smk_);
+    } else {
+        mem_.setMpi(nullptr);
+        smk_.release();
+    }
 }
 
 // ---- Save / restore state ---------------------------------------------------
@@ -300,11 +316,13 @@ namespace {
 constexpr size_t kStateBase = 8 + ADDR_RAM_END + (8 + 1 + 7) * sizeof(uint16_t);
 constexpr size_t kStateFull = kStateBase + 2 * sizeof(uint16_t);          // + {joystick, keyHeld}
 constexpr size_t kStateV037 = kStateFull + sizeof(uint32_t);              // + фаза развёртки 037
+constexpr size_t kStateSmk  = kStateV037 + 4 * sizeof(uint16_t);          // + {есть, режим, страница, строб}
+constexpr size_t kStateSmkRam = kStateSmk + Smk512::RAM_BYTES;            // + 512 Кбайт ДОЗУ
 }
 
 void Board::saveStateMem(std::vector<uint8_t>& out) const {
     out.clear();
-    out.reserve(kStateFull);
+    out.reserve(smkOn_ ? kStateSmkRam : kStateSmk);
     auto put = [&](const void* p, size_t n) {
         const uint8_t* b = static_cast<const uint8_t*>(p);
         out.insert(out.end(), b, b + n);
@@ -320,6 +338,13 @@ void Board::saveStateMem(std::vector<uint8_t>& out) const {
     put(ext, sizeof ext);
     const uint32_t v037 = vp037_.pack();   // фаза развёртки: где стоял луч
     put(&v037, sizeof v037);
+    // Блок СМК-512: конфигурация всегда, ДОЗУ — только если плата установлена.
+    const uint16_t smk[4] = {static_cast<uint16_t>(smkOn_ ? 1 : 0),
+                             static_cast<uint16_t>(smk_.mode()),
+                             static_cast<uint16_t>(smk_.page()),
+                             static_cast<uint16_t>(smk_.armed() ? 1 : 0)};
+    put(smk, sizeof smk);
+    if (smkOn_) put(smk_.ram().data(), Smk512::RAM_BYTES);
 }
 
 bool Board::loadStateMem(const std::vector<uint8_t>& in) {
@@ -334,6 +359,18 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     uint16_t ext[2] = {0, 0};
     if (in.size() >= kStateFull) get(ext, sizeof ext);   // иначе — снимок старого формата
     if (in.size() >= kStateV037) { uint32_t v = 0; get(&v, sizeof v); vp037_.unpack(v); }
+    if (in.size() >= kStateSmk) {
+        uint16_t smk[4] = {0, 0, 0, 0};
+        get(smk, sizeof smk);
+        setSmk512(smk[0] != 0);           // сначала плата, потом её состояние
+        if (smkOn_) {
+            smk_.writeCtrl(Smk512::STROBE);
+            smk_.writeCtrl(static_cast<uint16_t>(Smk512::modeCode(static_cast<Smk512::Mode>(smk[1] & 7))
+                                               | Smk512::pageCode(smk[2])));
+            if (smk[3]) smk_.writeCtrl(Smk512::STROBE);   // строб был взведён
+            if (in.size() >= kStateSmkRam) get(smk_.ram().data(), Smk512::RAM_BYTES);
+        }
+    }
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
     keyIntPending_ = false;
     timerLimit_ = dev[3]; timerCount_ = dev[4];

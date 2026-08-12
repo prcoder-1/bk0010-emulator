@@ -431,7 +431,10 @@ int main() {
         }
 
         // Снимок старого формата (без хвоста ext[2]) должен читаться как «ввод отпущен».
-        std::vector<uint8_t> old(snap.begin(), snap.end() - 8);
+        // Длину базовой части считаем явно: магия + ОЗУ + R0..R7 + PSW + dev[7]. Раньше
+        // здесь было «snap.end() - 8», и любой новый хвост (037, СМК) молча ломал смысл.
+        const size_t kBaseLen = 8 + 0100000 + (8 + 1 + 7) * sizeof(uint16_t);
+        std::vector<uint8_t> old(snap.begin(), snap.begin() + kBaseLen);
         CHECK(b.loadStateMem(old), "снимок старого формата читается");
         CHECK(b.joystick() == 0 && !b.keyHeld(), "старый формат -> ввод отпущен");
         CHECK(!b.loadStateMem(std::vector<uint8_t>(8, 0)), "мусор отвергается");
@@ -905,6 +908,218 @@ int main() {
             CHECK(r.nonBlank == 0 && r.unknown == 0, "OCR: пустой экран — нечего распознавать");
             CHECK(r.text().find_first_not_of('\n') == std::string::npos, "OCR: пустой экран -> пустой текст");
         }
+    }
+
+    // ---- Блок расширения памяти СМК-512 («АльтПро») ------------------------
+    // Таблица режимов переписана из документации разработчиков (БК-docs,
+    // 17-контроллер-СМК.md, Табл. 1) НЕЗАВИСИМО от реализации — это и есть
+    // проверка. Вариант «новой» версии контроллера, то есть реплики СМК-512.
+    {
+        using bk::Smk512;
+        bk::Board b;
+        CHECK(!b.smk512(), "СМК: по умолчанию плата не установлена");
+        b.setSmk512(true);
+        b.reset();
+        CHECK(b.smk512(), "СМК: плата устанавливается");
+        CHECK(b.smk().ram().size() == Smk512::RAM_BYTES, "СМК: 512 Кбайт ДОЗУ");
+        CHECK(b.smk().mode() == Smk512::SYS && b.smk().page() == 0,
+              "СМК: после включения питания — режим SYS, страница 0");
+
+        auto& ram = b.smk().ram();
+        // Каждое слово ДОЗУ равно своему номеру: внутри одной страницы (16384
+        // слова) значения уникальны, так что подмену сегмента видно сразу.
+        auto seed = [&] {
+            for (size_t i = 0; i + 1 < ram.size(); i += 2) {
+                const uint16_t w = static_cast<uint16_t>(i / 2);
+                ram[i] = static_cast<uint8_t>(w & 0xff);
+                ram[i + 1] = static_cast<uint8_t>(w >> 8);
+            }
+        };
+        seed();
+        auto sw = [&](Smk512::Mode m, int page) {   // трёхтактное переключение
+            b.memory().writeWord(0177130, Smk512::STROBE);
+            b.memory().writeWord(0177130,
+                static_cast<uint16_t>(Smk512::modeCode(m) | Smk512::pageCode(page)));
+            b.memory().writeWord(0177130, 0);
+        };
+        auto smkWord = [&](int page, int seg, uint16_t inSeg) {
+            const size_t o = static_cast<size_t>(page) * Smk512::PAGE_BYTES
+                           + static_cast<size_t>(seg) * Smk512::SEG_BYTES + inSeg;
+            return static_cast<uint16_t>(ram[o] | (ram[o + 1] << 8));
+        };
+        auto bkWord = [&](uint16_t a) {              // что по этому адресу у самой БК
+            const uint8_t* r = b.memory().raw();
+            return static_cast<uint16_t>(r[a] | (r[a + 1] << 8));
+        };
+
+        // Блоки: 0100000 0110000 0120000 0130000 0140000 0150000 0160000
+        //        0170000 (до 0176777) и 0177000 (страница регистров).
+        // seg: 0..7 — номер сегмента, -1 — контроллер молчит, -2 — его ПЗУ.
+        // acc: 'x' чтение и запись, 'r' только чтение, 'w' только запись, '-' нет.
+        struct Row { Smk512::Mode m; int seg[9]; const char* acc; };
+        static const Row kTab1[8] = {
+            {Smk512::SYS,   {-1,-1, 6, 7, 0, 1,-2,-2,-2}, "--xxxx---"},
+            {Smk512::STD10, {-1,-1, 2, 3, 4, 5,-2, 7,-1}, "--xxxx-x-"},
+            {Smk512::RAM10, { 0, 1, 2, 3, 4, 5, 6, 7,-1}, "xxxxxxxx-"},
+            {Smk512::ALL,   { 4, 5, 6, 7, 0, 1, 2, 3, 3}, "xxxxxxxxr"},
+            {Smk512::STD11, {-1,-1,-1,-1,-1,-1,-2, 7,-1}, "-------x-"},
+            {Smk512::RAM11, {-1,-1,-1,-1, 4, 5, 6, 7,-1}, "----xxxx-"},
+            {Smk512::HLT10, { 0, 1, 2, 3, 4, 5, 6, 7, 7}, "rxxxxxxxw"},
+            {Smk512::HLT11, {-1,-1,-1,-1, 4, 5, 6, 7, 7}, "----xxxxw"},
+        };
+        static const uint16_t kBase[9] = {0100000, 0110000, 0120000, 0130000,
+                                          0140000, 0150000, 0160000, 0170000, 0177000};
+        const int kPage = 5;
+
+        // Чтение: ОЗУ контроллера видно в ячейках 'x' и 'r'; в 'w' (теневая
+        // запись) и там, где контроллер молчит, читается сама БК.
+        int rdOk = 0;
+        for (const Row& row : kTab1) {
+            sw(row.m, kPage);
+            for (int k = 0; k < 9; ++k) {
+                const uint16_t a = kBase[k];
+                const bool fromSmk = (row.acc[k] == 'x' || row.acc[k] == 'r');
+                const uint16_t want = fromSmk ? smkWord(kPage, row.seg[k], a & 07777) : bkWord(a);
+                if (b.memory().readWord(a) == want) ++rdOk;
+                else std::printf("  СМК чтение: режим %s адрес %06o -> %06o, ждали %06o\n",
+                                 Smk512::modeName(row.m), a, b.memory().readWord(a), want);
+            }
+        }
+        CHECK(rdOk == 72, "СМК: чтение по всем 72 ячейкам Табл. 1");
+
+        // Запись: проходит в ОЗУ в ячейках 'x' и 'w'; в 'r' (квази-ПЗУ) и там,
+        // где контроллер молчит, ОЗУ остаётся нетронутым.
+        int wrOk = 0;
+        for (const Row& row : kTab1) {
+            sw(row.m, kPage);
+            for (int k = 0; k < 9; ++k) {
+                const uint16_t a = static_cast<uint16_t>(kBase[k] + 2);
+                const bool toSmk = (row.acc[k] == 'x' || row.acc[k] == 'w');
+                const uint16_t before = row.seg[k] >= 0 ? smkWord(kPage, row.seg[k], a & 07777) : 0;
+                const uint16_t mark = static_cast<uint16_t>(0140000 + row.m * 16 + k);
+                b.memory().writeWord(a, mark);
+                const uint16_t now = row.seg[k] >= 0 ? smkWord(kPage, row.seg[k], a & 07777) : 0;
+                if (now == (toSmk ? mark : before)) ++wrOk;
+                else std::printf("  СМК запись: режим %s адрес %06o -> ОЗУ %06o (ждали %06o)\n",
+                                 Smk512::modeName(row.m), a, now, toSmk ? mark : before);
+            }
+        }
+        CHECK(wrOk == 72, "СМК: запись по всем 72 ячейкам Табл. 1 (включая 'R' и 'W')");
+        seed();
+
+        // Строб. Без него конфигурация не защёлкивается; реплика опознаёт строб
+        // только по точному значению 6 в младшей тетраде.
+        sw(Smk512::RAM10, 2);
+        b.memory().writeWord(0177130, Smk512::modeCode(Smk512::ALL));
+        CHECK(b.smk().mode() == Smk512::RAM10 && b.smk().page() == 2,
+              "СМК: запись без строба конфигурацию не меняет");
+        b.memory().writeWord(0177130, 016);      // разряды 01 и 02 есть, но и 03 тоже
+        b.memory().writeWord(0177130, Smk512::modeCode(Smk512::ALL));
+        CHECK(b.smk().mode() == Smk512::RAM10, "СМК: реплика требует точного кода строба 6");
+
+        // Восемь кодов включения режима и шестнадцать кодов страниц.
+        static const struct { uint16_t code; Smk512::Mode m; } kModes[8] = {
+            {0160, Smk512::SYS},   {060, Smk512::STD10}, {0120, Smk512::RAM10}, {020, Smk512::ALL},
+            {0140, Smk512::STD11}, {040, Smk512::RAM11}, {0100, Smk512::HLT10}, {0, Smk512::HLT11}};
+        int modeOk = 0;
+        for (const auto& e : kModes) {
+            b.memory().writeWord(0177130, Smk512::STROBE);
+            b.memory().writeWord(0177130, e.code);
+            if (b.smk().mode() == e.m && Smk512::modeCode(e.m) == e.code) ++modeOk;
+        }
+        CHECK(modeOk == 8, "СМК: восемь кодов включения режима (160,60,120,20,140,40,100,0)");
+
+        static const uint16_t kPageCodes[16] = {0, 02000, 04, 02004, 010, 02010, 014, 02014,
+                                                01, 02001, 05, 02005, 011, 02011, 015, 02015};
+        int pageOk = 0;
+        for (int p = 0; p < 16; ++p) {
+            b.memory().writeWord(0177130, Smk512::STROBE);
+            b.memory().writeWord(0177130,
+                static_cast<uint16_t>(Smk512::modeCode(Smk512::RAM10) | kPageCodes[p]));
+            if (b.smk().page() == p && Smk512::pageCode(p) == kPageCodes[p]) ++pageOk;
+        }
+        CHECK(pageOk == 16, "СМК: все 16 кодов страниц (0,2000,4,2004,...,2015)");
+
+        // Одновременно подключена ровно одна страница.
+        sw(Smk512::RAM10, 1);  b.memory().writeWord(0100000, 012345);
+        sw(Smk512::RAM10, 2);  b.memory().writeWord(0100000, 054321);
+        sw(Smk512::RAM10, 1);
+        CHECK(b.memory().readWord(0100000) == 012345, "СМК: страница 1 не задета записью в страницу 2");
+        sw(Smk512::RAM10, 2);
+        CHECK(b.memory().readWord(0100000) == 054321, "СМК: страница 2 хранит своё");
+
+        // Байтовая запись в ДОЗУ.
+        sw(Smk512::RAM10, 3);
+        b.memory().writeWord(0110000, 0);
+        b.memory().writeByte(0110001, 0252);
+        CHECK(b.memory().readWord(0110000) == 0125000, "СМК: байтовая запись в ДОЗУ");
+
+        // A15 = 0: на нижние 32 Кбайт дешифратор контроллера не включается вовсе.
+        b.memory().writeWord(01000, 07777);
+        CHECK(bkWord(01000) == 07777, "СМК: адреса ниже 0100000 идут в ОЗУ самой БК");
+
+        // Слово модели и версии — то, по чему программы опознают контроллер.
+        sw(Smk512::STD10, 0);
+        CHECK(b.memory().readWord(0167776) == 0177605,
+              "СМК: 0167776 = 177605 (СМК-512, ПЗУ 2.05) — CMP #176200/BHIS проходит");
+        sw(Smk512::RAM10, 0);
+        CHECK(b.memory().readWord(0167776) == smkWord(0, 6, 07776),
+              "СМК: в режиме ОЗУ10 по 0167776 уже ДОЗУ, а не ПЗУ");
+
+        // Теневая запись (7W): оседает в ОЗУ И доходит до регистра БК, а чтение
+        // по-прежнему идёт из настоящего регистра — ради этого режимы Hlt и нужны.
+        sw(Smk512::HLT10, 4);
+        b.memory().writeWord(0177716, 0100);
+        CHECK(smkWord(4, 7, 07716) == 0100, "СМК: Hlt10 — запись в 0177716 осела в теневом ОЗУ");
+        CHECK(b.peekRegWritten(0177716) == 0100, "СМК: теневая запись не отменяет запись в регистр БК");
+        const uint16_t sysBefore = b.peekReg(0177716);   // чтение регистра не идемпотентно
+        CHECK(b.memory().readWord(0177716) == sysBefore,
+              "СМК: Hlt10 — чтение 0177716 идёт из регистра БК, а не из ОЗУ");
+        // Побочный эффект, о котором предупреждает документация: при выходе из Hlt
+        // первые два такта протокола ещё видны теневому ОЗУ, поэтому в нём по адресу
+        // 0177130 остаётся код НОВОГО режима — «<20 + код страницы>» для All.
+        sw(Smk512::ALL, 4);
+        CHECK(smkWord(4, 7, 07130) == static_cast<uint16_t>(Smk512::modeCode(Smk512::ALL)
+                                                          | Smk512::pageCode(4)),
+              "СМК: при выходе из Hlt10 в теневом ОЗУ по 0177130 остаётся код режима All");
+
+        // Режим All перекрывает страницу регистров по чтению, но в реплике
+        // оставлена «дыра» для клавиатуры и скролла.
+        sw(Smk512::ALL, 6);
+        CHECK(b.memory().readWord(0177000) == smkWord(6, 3, 07000),
+              "СМК: All — 0177000 читается из сегмента 3");
+        CHECK(b.memory().readWord(0177660) == b.peekReg(0177660), "СМК: All — 0177660 не перекрыт");
+        CHECK(b.memory().readWord(0177664) == b.peekReg(0177664), "СМК: All — 0177664 не перекрыт");
+        CHECK(b.memory().readWord(0177740) == bkWord(0177740),
+              "СМК: регистры НЖМД 0177740..0177757 контроллеру не отданы");
+
+        // Команда RESET дёргает СБРОС шины: режим SYS, страница 0, ДОЗУ цела.
+        sw(Smk512::ALL, 6);
+        b.memory().writeWord(0140000, 07654);      // All: 0140000 -> сегмент 0
+        b.memory().pokeWord(01000, 05);            // RESET
+        b.cpu().r[7] = 01000;
+        b.stepInstruction();
+        CHECK(b.smk().mode() == Smk512::SYS && b.smk().page() == 0,
+              "СМК: команда RESET -> режим SYS, страница 0");
+        CHECK(smkWord(6, 0, 0) == 07654, "СМК: RESET не стирает ДОЗУ");
+
+        // Снимок состояния: конфигурация контроллера и все 512 Кбайт.
+        sw(Smk512::HLT11, 9);
+        b.memory().writeWord(0140000, 011111);
+        std::vector<uint8_t> snap;
+        b.saveStateMem(snap);
+        sw(Smk512::SYS, 0);
+        b.memory().writeWord(0140000, 022222);
+        CHECK(b.loadStateMem(snap), "СМК: снимок состояния прочитан");
+        CHECK(b.smk().mode() == Smk512::HLT11 && b.smk().page() == 9,
+              "СМК: снимок вернул режим и страницу");
+        CHECK(b.memory().readWord(0140000) == 011111, "СМК: снимок вернул содержимое ДОЗУ");
+
+        // Снятие платы возвращает штатную карту памяти БК.
+        b.setSmk512(false);
+        CHECK(!b.smk512(), "СМК: плату можно снять");
+        CHECK(b.memory().readWord(0120000) == bkWord(0120000),
+              "СМК: без платы по 0120000 снова ПЗУ Бейсика");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

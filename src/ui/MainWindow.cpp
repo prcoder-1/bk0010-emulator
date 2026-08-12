@@ -30,10 +30,24 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QSettings>
+#include <QSignalBlocker>
+#include <cstdio>
 
-MainWindow::MainWindow(const QString& romDir, QWidget* parent)
+MainWindow::MainWindow(const QString& romDir, int smkOverride, QWidget* parent)
     : QMainWindow(parent) {
     board_ = std::make_unique<bk::Board>();
+    // Блок расширения памяти СМК-512: настройка запоминается между запусками,
+    // ключ --smk/--no-smk перекрывает её на один запуск.
+    const bool smkOn = smkOverride >= 0 ? smkOverride > 0
+                                        : QSettings().value("smk512", false).toBool();
+    board_->setSmk512(smkOn);
+    if (smkOn) {
+        // Стоит сказать вслух: с платой карта верхней половины адресов не штатная
+        // (в режиме SYS ОЗУ контроллера перекрывает ПЗУ Бейсика), и это объясняет
+        // «странности», если пользователь про плату забыл.
+        std::fprintf(stderr, "БК-0010: блок расширения памяти СМК-512 подключён (512 Кбайт)\n");
+    }
     if (!board_->loadRoms(romDir.toStdString())) {
         QMessageBox::warning(this, "BK-0010",
             QString("Не удалось загрузить ПЗУ из:\n%1\nПоложите monit10.rom (и basic10.rom) в эту папку.")
@@ -83,6 +97,15 @@ MainWindow::MainWindow(const QString& romDir, QWidget* parent)
         ? QString::fromStdString("Подключён: " + gamepad_.name())
         : QString::fromUtf8("Геймпад не найден"));
     joyStatus->setEnabled(false);
+
+    emu->addSeparator();
+    // Блок расширения памяти СМК-512 («АльтПро») в разъёме МПИ. На живой машине
+    // плату ставят только при выключенном питании, поэтому переключатель
+    // перезапускает машину — раскладка верхней половины адресов меняется целиком.
+    smkAction_ = emu->addAction("Блок расширения памяти &СМК-512 (512 Кбайт)");
+    smkAction_->setCheckable(true);
+    smkAction_->setChecked(smkOn);
+    connect(smkAction_, &QAction::toggled, this, [this](bool on) { setSmk512(on); });
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
@@ -479,6 +502,17 @@ void MainWindow::resetMachine() {
     status_->setText("Сброс");
 }
 
+// Подключение и снятие платы — операция «при выключенном питании»: меняется вся
+// карта верхней половины адресов, поэтому машину перезапускаем. Настройка
+// сохраняется между запусками; ключ --smk её не перезаписывает.
+void MainWindow::setSmk512(bool on) {
+    board_->setSmk512(on);
+    QSettings().setValue("smk512", on);
+    resetMachine();
+    status_->setText(on ? "СМК-512 подключён, машина перезапущена"
+                        : "СМК-512 снят, машина перезапущена");
+}
+
 void MainWindow::toggleColorMode() {
     colorMode_ = !colorMode_;
     status_->setText(colorMode_ ? "Режим: 256×256 цвет" : "Режим: 512×256 ч/б");
@@ -708,6 +742,13 @@ void MainWindow::loadState() {
     if (path.isEmpty()) return;
     if (board_->loadState(path.toStdString())) {
         status_->setText("Состояние восстановлено: " + QFileInfo(path).fileName());
+        // В снимке лежит и конфигурация машины, поэтому плата СМК могла появиться
+        // или исчезнуть. Галку в меню синхронизируем без сигнала: иначе она тут же
+        // перезапустила бы машину и стёрла только что восстановленное состояние.
+        if (smkAction_) {
+            QSignalBlocker block(smkAction_);
+            smkAction_->setChecked(board_->smk512());
+        }
         renderScreen();
         if (paused_) overlay_->followPc();
     } else {

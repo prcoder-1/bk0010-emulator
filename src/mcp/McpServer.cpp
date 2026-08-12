@@ -82,8 +82,9 @@ static bool parseNumber(const QJsonValue& v, long& out) {
     return false;
 }
 
-McpServer::McpServer(std::string romDir) : romDir_(std::move(romDir)) {
+McpServer::McpServer(std::string romDir, bool smk512) : romDir_(std::move(romDir)) {
     romsOk_ = board_.loadRoms(romDir_);
+    board_.setSmk512(smk512);             // --smk: блок расширения памяти в разъёме МПИ
     board_.reset();
     board_.trace().setEnabled(true);      // collect hot-spot data from the start
     board_.trace().setFlameEnabled(true); // maintain the shadow call stack (bk_backtrace)
@@ -1608,7 +1609,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             "  Timer     limit 0177706=%6  count 0177710=%7  csr 0177712=%8 [%9]\n"
             "  Port      0177714=%10  [%11]  раскладка=%12\n"
             "  System    0177716=%13  (key-held bit6=%14)\n"
-            "  Развёртка строка %15/320 %16%17")
+            "  Развёртка строка %15/320 %16%17%18")
             .arg(oct6(r(0177660))).arg(oct6(r(0177662))).arg(board_.keyReady() ? "code ready" : "empty")
             .arg(keyLabel(r(0177662)))
             .arg(oct6(r(0177664)))
@@ -1620,7 +1621,15 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             .arg(board_.vp037().vgate() ? "кадровое гашение"
                  : board_.vp037().hgate() ? "строчное гашение" : "видимая часть")
             .arg(board_.vp037().inActiveDisplay() ? " (037 занимает шину: такты ожидания ДОЗУ)"
-                                                  : ""));
+                                                  : "")
+            .arg(board_.smk512()
+                 ? QString("\n  СМК-512   режим %1 (код %2), страница %3 (код %4)%5")
+                       .arg(QString::fromUtf8(bk::Smk512::modeName(board_.smk().mode())))
+                       .arg(oct6(bk::Smk512::modeCode(board_.smk().mode())))
+                       .arg(board_.smk().page())
+                       .arg(oct6(bk::Smk512::pageCode(board_.smk().page())))
+                       .arg(board_.smk().armed() ? ", строб взведён" : "")
+                 : QString()));
     }
     if (name == "bk_io_log") {
         if (args.contains("enable")) {

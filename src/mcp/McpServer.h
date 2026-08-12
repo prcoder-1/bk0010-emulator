@@ -16,7 +16,7 @@
 // such as Claude Code. Reuses the Qt-free core (bk::Board) plus QtCore JSON.
 class McpServer {
 public:
-    explicit McpServer(std::string romDir);
+    explicit McpServer(std::string romDir, bool smk512 = false);
 
     // Run the stdio message loop until EOF. Returns a process exit code.
     int run();

@@ -64,6 +64,9 @@ static int runKeyTest() {
 // активной развёртки). По умолчанию ВКЛ; выключается ключом --no-arb037.
 static bool g_arb037 = true;
 static bool g_scanline = false;   // --scanline: построчная отрисовка экрана
+// --smk / --no-smk: блок расширения памяти СМК-512. -1 — ключ не задан (в GUI
+// берётся сохранённая настройка, в безголовом режиме и в MCP — выключено).
+static int  g_smk = -1;
 
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
@@ -83,6 +86,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     bk::Board board;
     board.setArbitration(g_arb037);
     board.setScanlineRender(g_scanline);
+    board.setSmk512(g_smk > 0);
     if (!board.loadRoms(romDir.toStdString())) {
         std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
         return 2;
@@ -270,6 +274,11 @@ static int runHeadless(const QString& romDir, const QString& bin,
 }
 
 int main(int argc, char** argv) {
+    // Имя организации и приложения нужно QSettings: без них настройки легли бы в
+    // файл, названный по имени исполняемого файла.
+    QCoreApplication::setOrganizationName("bk0010-emulator");
+    QCoreApplication::setApplicationName("bk0010-emulator");
+
     // MCP server mode: a headless JSON-RPC-over-stdio server for debugging BK
     // programs from an MCP client (e.g. Claude Code). Handled before the GUI so
     // no display/OpenGL is needed; offscreen QGuiApplication enables PNG output.
@@ -282,9 +291,12 @@ int main(int argc, char** argv) {
             romDir = BK_DEFAULT_ROM_DIR;
 #endif
             if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
-            for (int j = 1; j < argc; ++j)
+            bool smk = false;
+            for (int j = 1; j < argc; ++j) {
                 if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
-            McpServer server(romDir.toStdString());
+                else if (std::string(argv[j]) == "--smk") smk = true;
+            }
+            McpServer server(romDir.toStdString(), smk);
             return server.run();
         }
     }
@@ -339,6 +351,8 @@ int main(int argc, char** argv) {
         else if (args[i] == "--mono") color = false;
         else if (args[i] == "--scanline") g_scanline = true;
         else if (args[i] == "--no-arb037") g_arb037 = false;
+        else if (args[i] == "--smk") g_smk = 1;
+        else if (args[i] == "--no-smk") g_smk = 0;
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
         else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
         else if (args[i] == "--type" && i + 1 < args.size()) { typeStr = args[++i]; headless = true; }
@@ -353,7 +367,7 @@ int main(int argc, char** argv) {
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
                            dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList);
 
-    MainWindow w(romDir);
+    MainWindow w(romDir, g_smk);
     w.setArbitration(g_arb037);
     w.show();
     if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
