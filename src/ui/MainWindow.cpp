@@ -2,6 +2,7 @@
 #include "GlScreen.h"
 #include "DebuggerOverlay.h"
 #include "MemVisWidget.h"
+#include "SmkRamWidget.h"
 #include "HotPathWidget.h"
 #include "CallGraphWidget.h"
 #include "FlameWidget.h"
@@ -109,6 +110,7 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, QWidget* parent)
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
+    dbg->addAction("&ДОЗУ СМК-512 по страницам…", this, &MainWindow::openSmkRam, QKeySequence("Ctrl+D"));
     dbg->addAction("Горячий &путь…", this, &MainWindow::openHotPath, QKeySequence("Ctrl+G"));
     dbg->addAction("Граф &вызовов…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
     dbg->addAction("&Пламенный граф…", this, &MainWindow::openFlame, QKeySequence("Ctrl+F"));
@@ -225,6 +227,7 @@ void MainWindow::runOneSlice(int kSlices) {
     renderScreen();
     if (paused_) overlay_->update();
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
+    if (smkram_ && smkram_->isVisible()) smkram_->refresh();
     if (hotpath_ && hotpath_->isVisible()) hotpath_->refresh();
     if (callgraph_ && callgraph_->isVisible()) callgraph_->refresh();
     if (flame_ && flame_->isVisible()) flame_->refresh();
@@ -626,6 +629,17 @@ void MainWindow::openMemVis() {
     board_->trace().setEnabled(true);
     memvis_->show();
     memvis_->raise();
+}
+
+// Отдельное окно на ДОЗУ нужно потому, что обычный дамп ходит по адресам БК и
+// показывает только подключённую страницу, да и то не целиком: верхние 512 байт
+// сегмента не читаются ни в одном режиме (docs/smk512.md).
+void MainWindow::openSmkRam() {
+    if (!smkram_) smkram_ = new SmkRamWidget(board_.get());
+    smkram_->show();
+    smkram_->raise();
+    if (!board_->smk512())
+        status_->setText("СМК-512 не установлен: окно ДОЗУ пустое");
 }
 
 void MainWindow::broadcastHighlight(int addr, QWidget* src) {

@@ -11,6 +11,7 @@
 #include "ui/MainWindow.h"
 #include "ui/DebuggerOverlay.h"
 #include "ui/MemVisWidget.h"
+#include "ui/SmkRamWidget.h"
 #include "ui/HotPathWidget.h"
 #include "ui/CallGraphWidget.h"
 #include "ui/FlameWidget.h"
@@ -169,6 +170,30 @@ static int runHeadless(const QString& romDir, const QString& bin,
         QString bk4Path = memvisShot; bk4Path.replace(".png", "_4bpp.png");
         c4.grab().save(bk4Path);
         std::printf("headless: wrote memvis (4 бита/пиксель) %s\n", qPrintable(bk4Path));
+        // С установленной платой СМК-512 — заодно её ДОЗУ: все 16 страниц подряд,
+        // отдельно подключённая страница и дамп окна «ДОЗУ по страницам».
+        if (board.smk512()) {
+            MemCanvas ca(&board);
+            ca.resize(560, 640);
+            ca.smkPage = MemCanvas::SRC_SMK_ALL;
+            QString allPath = memvisShot; allPath.replace(".png", "_smkall.png");
+            ca.grab().save(allPath);
+            std::printf("headless: wrote memvis (СМК, все 16 страниц) %s\n", qPrintable(allPath));
+
+            MemCanvas cp(&board);
+            cp.resize(560, 640);
+            cp.smkPage = board.smk().page();
+            QString pgPath = memvisShot; pgPath.replace(".png", "_smkpage.png");
+            cp.grab().save(pgPath);
+            std::printf("headless: wrote memvis (СМК, страница %d) %s\n",
+                        board.smk().page(), qPrintable(pgPath));
+
+            SmkRamWidget sr(&board);
+            sr.resize(900, 620);
+            QString srPath = memvisShot; srPath.replace(".png", "_smkram.png");
+            sr.grab().save(srPath);
+            std::printf("headless: wrote ДОЗУ СМК по страницам %s\n", qPrintable(srPath));
+        }
     }
     if (!hpShot.isEmpty()) {
         HotPathWidget w(&board);

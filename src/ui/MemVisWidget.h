@@ -21,6 +21,12 @@ public:
     bool hideScreen = false; // blank out the video RAM region (0040000..0077777)
     int startAddr = 0;
     int bytesPerRow = 64;
+    // Что показываем: -1 — память самой БК (как было), -2 — все 16 страниц ДОЗУ
+    // СМК-512 подряд, 0..15 — одну страницу. Тепловая карта в режиме ДОЗУ есть
+    // только у сегментов ПОДКЛЮЧЁННОЙ страницы: Trace знает лишь 16-разрядные
+    // адреса БК, а неподключённой страницы на шине нет вовсе.
+    enum : int { SRC_BK = -1, SRC_SMK_ALL = -2 };
+    int smkPage = SRC_BK;
 protected:
     void paintEvent(QPaintEvent*) override;
 private:
