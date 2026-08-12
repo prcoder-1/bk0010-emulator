@@ -145,8 +145,16 @@ Key cross-cutting facts to know before editing the CPU or screen:
   is gated on `A15 = 1`. A write returns "did the controller swallow it": for the
   `W` cells of Табл. 1 the write must ALSO reach the BK's own register, which is
   what makes HALT-mode shadow RAM work. `Board` owns the `Smk512` and allocates its
-  512 KB only while the board is enabled (`setSmk512`). Details and the deliberate
-  omissions (controller ROM, FDD, HDD) are in `docs/smk512.md`.
+  512 KB only while the board is enabled (`setSmk512`). Its mode register is reset by
+  power-on and by the «СТОП» key (МПИ pin А1 = ОСТ, hence `Board::pressStop`), but
+  NOT by the `RESET` instruction — that is bus INIT on pin Б19, a separate signal in
+  the replica's CPLD. Mode/page show up in the
+  Soft-ICE «СИСТ. РЕГИСТРЫ» panel (only when the board is in, so the no-board
+  overlay layout is unchanged) and in `bk_io_state`. End-to-end coverage is the
+  third-party `tests/data/SMKTEST.bin`, run automatically by `cpu_tests` — it OCRs
+  the report off the screen, and the glyph table must come from a SEPARATE pristine
+  `Memory`, because ОЗУ10/All cover the ROM font at `0112036`. Details and the
+  deliberate omissions (controller ROM, FDD, HDD) are in `docs/smk512.md`.
 - **Pixel format** is `0xAARRGGBB` uint32; uploaded to GL as `GL_BGRA` and wrapped as
   `QImage::Format_ARGB32` — keep these in sync if you touch either.
 - **GL context**: `main.cpp` sets `Qt::AA_UseDesktopOpenGL` before `QApplication`.

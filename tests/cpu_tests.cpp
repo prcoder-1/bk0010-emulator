@@ -1093,15 +1093,24 @@ int main() {
         CHECK(b.memory().readWord(0177740) == bkWord(0177740),
               "СМК: регистры НЖМД 0177740..0177757 контроллеру не отданы");
 
-        // Команда RESET дёргает СБРОС шины: режим SYS, страница 0, ДОЗУ цела.
+        // Команда RESET дёргает ШИННЫЙ сброс (INIT, контакт Б19) — регистра режима
+        // он не касается: в прошивке ПЛИС реплики это отдельный сигнал, а
+        // extended_reg обнуляется только по btn_reset с контакта А1 (ОСТ).
         sw(Smk512::ALL, 6);
         b.memory().writeWord(0140000, 07654);      // All: 0140000 -> сегмент 0
         b.memory().pokeWord(01000, 05);            // RESET
         b.cpu().r[7] = 01000;
         b.stepInstruction();
-        CHECK(b.smk().mode() == Smk512::SYS && b.smk().page() == 0,
-              "СМК: команда RESET -> режим SYS, страница 0");
+        CHECK(b.smk().mode() == Smk512::ALL && b.smk().page() == 6,
+              "СМК: команда RESET режим и страницу не трогает");
         CHECK(smkWord(6, 0, 0) == 07654, "СМК: RESET не стирает ДОЗУ");
+
+        // А «СТОП» — трогает: кнопка дёргает линию ОСТ (контакт А1), и контроллер
+        // возвращается в SYS со страницей 0, сохраняя содержимое ДОЗУ.
+        b.pressStop();
+        CHECK(b.smk().mode() == Smk512::SYS && b.smk().page() == 0,
+              "СМК: «СТОП» (ОСТ) -> режим SYS, страница 0");
+        CHECK(smkWord(6, 0, 0) == 07654, "СМК: «СТОП» не стирает ДОЗУ");
 
         // Снимок состояния: конфигурация контроллера и все 512 Кбайт.
         sw(Smk512::HLT11, 9);
@@ -1120,6 +1129,66 @@ int main() {
         CHECK(!b.smk512(), "СМК: плату можно снять");
         CHECK(b.memory().readWord(0120000) == bkWord(0120000),
               "СМК: без платы по 0120000 снова ПЗУ Бейсика");
+    }
+
+    // ---- Сквозной тест СМК: сторонний SMKTEST.bin -------------------------
+    // tests/data/SMKTEST.bin — тест из комплекта Gryphon-MPI (SD/BK_Test), не наш.
+    // Он заливает своим узором и посегментно сверяет все 16 страниц ДОЗУ в режимах
+    // ОЗУ10 и All, печатая отчёт на экран. Это проверка совсем другого сорта, чем
+    // таблица выше: там мы сверяем реализацию с документацией, здесь — с чужой
+    // программой, написанной под живое железо. Результат читается с экрана тем же
+    // OCR, что и в MCP (bk_ocr).
+    {
+        Board probe;
+        const std::string binPath = std::string(BK_TEST_DATA_DIR) + "/SMKTEST.bin";
+        bool haveBin = false;
+        if (std::FILE* f = std::fopen(binPath.c_str(), "rb")) { haveBin = true; std::fclose(f); }
+        if (!haveBin) {
+            std::printf("SKIP: нет %s — сквозной тест СМК пропущен\n", binPath.c_str());
+        } else if (!probe.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            std::printf("SKIP: ПЗУ не найдено в %s — сквозной тест СМК пропущен\n", BK_DEFAULT_ROM_DIR);
+        } else {
+            // Итоговая строка теста — «Все ОК!»: в ней ВСЕ буквы омоглифы (В с е
+            // О К), и к какому алфавиту их отнесёт разбор большинства по строке —
+            // дело вкуса реализации. Принимаем обе записи, чтобы тест ловил
+            // регрессию памяти, а не смену правила разрешения омоглифов.
+            auto reportedOk = [](const std::string& t) {
+                return t.find("Все") != std::string::npos || t.find("Bce") != std::string::npos;
+            };
+            // Прогнать тест и вернуть текст с экрана. Крутим кадры порциями и
+            // выходим, как только тест отчитался, — полный прогон это 4000 кадров.
+            auto runTest = [&](bool withSmk) {
+                Board brd;
+                brd.setSmk512(withSmk);
+                brd.loadRoms(BK_DEFAULT_ROM_DIR);
+                brd.reset();
+                for (int i = 0; i < 25; ++i) brd.runFrame();   // монитор поднимает вектора
+                if (!brd.loadBin(binPath, true)) return std::string();
+                std::string text;
+                std::vector<uint8_t> bits;
+                for (int done = 0; done < 4000; done += 250) {
+                    for (int i = 0; i < 250; ++i) brd.runFrame();
+                    screenBitmap(brd.memory(), brd.peekReg(0177664), bits);
+                    // Знакогенератор берём из ЧУЖОЙ памяти с чистым ПЗУ: тест
+                    // работает в режимах ОЗУ10 и All, где ДОЗУ платы накрывает и
+                    // 0112036 — таблицу глифов. По своей памяти OCR прочёл бы мусор.
+                    text = ocrAuto(probe.memory(), bits, OcrOptions{}).text();
+                    if (reportedOk(text) || text.find("ОШИБКА") != std::string::npos) break;
+                }
+                return text;
+            };
+
+            const std::string withBoard = runTest(true);
+            CHECK(withBoard.find("ОШИБКА") == std::string::npos,
+                  "СМК/SMKTEST: с платой ни одной ошибки сверки");
+            CHECK(reportedOk(withBoard), "СМК/SMKTEST: с платой тест дошёл до «Все ОК!»");
+
+            // Зеркальная проверка: без платы тест обязан споткнуться на первом же
+            // сегменте — иначе он не проверяет ничего и «успех» выше ничего не стоит.
+            const std::string noBoard = runTest(false);
+            CHECK(noBoard.find("ОШИБКА") != std::string::npos,
+                  "СМК/SMKTEST: без платы тест сообщает об ошибке");
+        }
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
