@@ -37,6 +37,7 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
 `--no-arb037` (disable КР1801ВП1-037 memory-arbitration wait-states, on by default),
+`--smk` / `--no-smk` (СМК-512 memory-expansion board, off by default),
 `--scanline` (per-scanline rendering — each line drawn with the scroll register value
 that was live when the beam crossed it, driven off the `Vp037` raster; OFF by default,
 see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
@@ -137,6 +138,15 @@ Key cross-cutting facts to know before editing the CPU or screen:
   sends: Cyrillic is 0300..0337 (lower) / 0340..0377 (upper) in the `kKoi7H1Utf8`
   order. Latin `A B C E H K M O P T X` and Cyrillic `А В С Е Н К М О Р Т Х` have
   bit-identical glyphs — `ocrScreen` resolves the script per line by majority.
+- **СМК-512 hooks into `Memory`, not into `IoBus`.** Its control register `0177130`
+  sits BELOW the I/O page (`0177600`), and the board overrides ROM as well, so the
+  interception point is a separate `MpiDevice` interface consulted first by
+  `read/write/peek/poke` — and only for `addr >= 0100000`, because the real decoder
+  is gated on `A15 = 1`. A write returns "did the controller swallow it": for the
+  `W` cells of Табл. 1 the write must ALSO reach the BK's own register, which is
+  what makes HALT-mode shadow RAM work. `Board` owns the `Smk512` and allocates its
+  512 KB only while the board is enabled (`setSmk512`). Details and the deliberate
+  omissions (controller ROM, FDD, HDD) are in `docs/smk512.md`.
 - **Pixel format** is `0xAARRGGBB` uint32; uploaded to GL as `GL_BGRA` and wrapped as
   `QImage::Format_ARGB32` — keep these in sync if you touch either.
 - **GL context**: `main.cpp` sets `Qt::AA_UseDesktopOpenGL` before `QApplication`.

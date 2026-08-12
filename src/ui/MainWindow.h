@@ -17,6 +17,7 @@ class FlameChartWidget;
 class HotChartWidget;
 class AudioOut;
 #include <QElapsedTimer>
+class QAction;
 
 class QTimer;
 class QLabel;
@@ -26,13 +27,17 @@ class QLabel;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(const QString& romDir, QWidget* parent = nullptr);
+    // smkOverride: 1 — включить блок СМК-512, 0 — выключить, -1 — взять
+    // сохранённую настройку (ключ командной строки перекрывает её, но не
+    // перезаписывает: настройка меняется только переключателем в меню).
+    explicit MainWindow(const QString& romDir, int smkOverride = -1, QWidget* parent = nullptr);
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
 
     // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
+    void setSmk512(bool on);            // подключить/снять плату и перезапустить машину
 
 protected:
     void keyPressEvent(QKeyEvent* e) override;
@@ -88,6 +93,7 @@ private:
     AudioOut* audio_ = nullptr;
     QTimer* timer_ = nullptr;
     QLabel* status_ = nullptr;
+    QAction* smkAction_ = nullptr;   // галка «СМК-512» — синхронизируется при загрузке снимка
     QString lastBin_;
     BkKeymap keymap_;
     Gamepad gamepad_;           // джойстик на порту 0177714 через SDL2-геймпад

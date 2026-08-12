@@ -9,6 +9,7 @@
 #include "Screen.h"
 #include "Speaker.h"
 #include "Vp037.h"
+#include "Smk.h"
 #include "Trace.h"
 #include "Symbols.h"
 
@@ -63,6 +64,15 @@ public:
     bool scanlineRender() const { return scanlineRender_; }
     bool arbitration() const { return arb037_; }
     const Vp037& vp037() const { return vp037_; }
+
+    // Блок расширения памяти СМК-512 в разъёме МПИ (опционально; по умолчанию ВЫКЛ).
+    // Включение эквивалентно установке платы в выключенную машину: ДОЗУ обнуляется,
+    // контроллер встаёт в режим SYS страницу 0, машину надо перезапустить —
+    // раскладка верхней половины адресов меняется целиком. См. docs/smk512.md.
+    void setSmk512(bool on);
+    bool smk512() const { return smkOn_; }
+    const Smk512& smk() const { return smk_; }
+    Smk512&       smk()       { return smk_; }
 
     // Run enough frames for the monitor ROM to initialise (vectors, stack,
     // display driver) if it hasn't yet. A game must not be started before this,
@@ -250,6 +260,8 @@ private:
     Cpu    cpu_{mem_};
     Screen screen_;
     Vp037  vp037_;                 // видеоконтроллер 037: арбитраж доступа к ДОЗУ
+    Smk512 smk_;                   // блок расширения памяти в разъёме МПИ
+    bool   smkOn_ = false;         // плата СМК-512 установлена
 
     bool arb037_ = true;           // моделировать ожидания 037 (по умолчанию ВКЛ)
     bool scanlineRender_ = false;  // построчная отрисовка экрана
