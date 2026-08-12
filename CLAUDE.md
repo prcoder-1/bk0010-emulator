@@ -152,7 +152,8 @@ Key cross-cutting facts to know before editing the CPU or screen:
   Soft-ICE «СИСТ. РЕГИСТРЫ» panel (only when the board is in, so the no-board
   overlay layout is unchanged) and in `bk_io_state`; the DRAM itself has its own
   window (`src/ui/SmkRamWidget.cpp`, Ctrl+D — per-page hex dump that also resolves
-  each row to the BK address it is visible at right now) and is selectable as a
+  each row to the BK address it is visible at right now, and edits words straight
+  into `smk().ram()`, since unmapped pages have no BK address to poke) and is selectable as a
   source in the memory visualiser (`MemCanvas::smkPage`). The heatmap only works
   for the mapped page — `Trace` is indexed by 16-bit BK addresses. End-to-end coverage is the
   third-party `tests/data/SMKTEST.bin`, run automatically by `cpu_tests` — it OCRs

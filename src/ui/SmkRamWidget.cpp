@@ -3,6 +3,8 @@
 #include <QPainter>
 #include <QFontDatabase>
 #include <QWheelEvent>
+#include <QMouseEvent>
+#include <QKeyEvent>
 #include <QScrollBar>
 #include <QComboBox>
 #include <QCheckBox>
@@ -10,6 +12,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <algorithm>
+#include <vector>
 
 using bk::Board;
 using bk::Smk512;
@@ -64,7 +67,9 @@ int SmkRamView::visibleRows() const {
 }
 
 void SmkRamView::setPage(int p) {
-    page_ = std::clamp(p, 0, static_cast<int>(Smk512::PAGES) - 1);
+    const int np = std::clamp(p, 0, static_cast<int>(Smk512::PAGES) - 1);
+    if (np != page_) cancelEdit();   // набранное относилось к прежней странице
+    page_ = np;
     update();
 }
 
@@ -107,13 +112,8 @@ void SmkRamView::paintEvent(QPaintEvent*) {
     const bool livePage = (page_ == smk.page());
     if (livePage) buildSegBases(smk, segBase); else for (int& b : segBase) b = -1;
 
-    // Колонки в знакоместах: смещение, восемь слов, текст, адрес БК, доступ.
-    const int xOff  = 6;
-    const int xWord = xOff + 8;
-    const int xText = xWord + 8 * 7 + 2;
-    const int xAddr = xText + BYTES_PER_ROW + 3;
-    const int xAcc  = xAddr + 8;
-    auto X = [&](int col) { return 6 + col * cw_; };
+    auto X = [&](int col) { return xOf(col); };
+    const int xWord = COL_WORD, xText = COL_TEXT, xAddr = COL_ADDR, xAcc = COL_ACC;
 
     int y = lineH_;
     p.setPen(hdr);
@@ -140,17 +140,37 @@ void SmkRamView::paintEvent(QPaintEvent*) {
         p.setPen(dim);
         p.drawText(X(0), y, oct6(static_cast<unsigned>(off)));
 
-        QString words, text;
+        QString text;
         for (int w = 0; w < 8; ++w) {
             const size_t o = pageBase + static_cast<size_t>(off) + w * 2;
-            words += oct6(static_cast<unsigned>(ram[o] | (ram[o + 1] << 8))) + " ";
+            const QString v = oct6(static_cast<unsigned>(ram[o] | (ram[o + 1] << 8)));
+            const int x = X(xWord + w * 7);
+            if (editRow_ == top_ + i && editWord_ == w) {
+                // Правка на месте — как в оверлее отладчика: рамка, прежнее
+                // значение приглушённым, пока ничего не набрано.
+                const QRect r(x - 1, y - QFontMetrics(mono_).ascent(),
+                              cw_ * 7 + 1, lineH_);
+                p.fillRect(r, QColor(230, 200, 40, 50));
+                p.setPen(QColor(255, 220, 80));
+                p.drawRect(r);
+                if (editBuf_.isEmpty()) {
+                    p.setPen(QColor(150, 150, 150));
+                    p.drawText(x, y, v);
+                    p.setPen(QColor(255, 240, 120));
+                    p.drawText(x + cw_ * v.size(), y, "_");
+                } else {
+                    p.setPen(QColor(255, 240, 120));
+                    p.drawText(x, y, editBuf_ + "_");
+                }
+            } else {
+                p.setPen(fg);
+                p.drawText(x, y, v);
+            }
         }
         for (int b = 0; b < BYTES_PER_ROW; ++b) {
             const uint8_t c = ram[pageBase + off + b];
             text += (c >= 040 && c < 0177) ? QChar(c) : QChar('.');
         }
-        p.setPen(fg);
-        p.drawText(X(xWord), y, words);
         p.setPen(dim);
         p.drawText(X(xText), y, text);
 
@@ -169,6 +189,97 @@ void SmkRamView::paintEvent(QPaintEvent*) {
                 }
             }
         }
+    }
+}
+
+// ---- Правка слова на месте -------------------------------------------------
+//
+// Пишем ПРЯМО в ДОЗУ платы, а не через Memory::poke по адресу БК. Так правится
+// и неподключённая страница, и «хвост» сегмента, для которого в текущем режиме
+// окна нет вовсе — а это ровно то, ради чего окно и заведено. Ограничения
+// «только чтение / только запись» отладчику, как и везде, не помеха.
+
+void SmkRamView::beginEdit(int row, int word) {
+    editRow_ = row;
+    editWord_ = word;
+    editBuf_.clear();
+    setFocus(Qt::MouseFocusReason);
+    update();
+}
+
+void SmkRamView::cancelEdit() {
+    editRow_ = -1;
+    editBuf_.clear();
+    update();
+}
+
+void SmkRamView::commitEdit(bool advance) {
+    if (editRow_ < 0) return;
+    const int row = editRow_, word = editWord_;
+    if (!editBuf_.isEmpty() && board_->smk512()) {
+        bool ok = false;
+        const uint16_t v = static_cast<uint16_t>(editBuf_.toUInt(&ok, 8) & 0xFFFF);
+        if (ok) {
+            std::vector<uint8_t>& ram = board_->smk().ram();
+            const size_t o = static_cast<size_t>(page_) * Smk512::PAGE_BYTES
+                           + static_cast<size_t>(row) * BYTES_PER_ROW + word * 2;
+            if (o + 1 < ram.size()) {
+                ram[o]     = static_cast<uint8_t>(v & 0xff);
+                ram[o + 1] = static_cast<uint8_t>(v >> 8);
+                emit edited(page_, static_cast<int>(row * BYTES_PER_ROW + word * 2), v);
+            }
+        }
+    }
+    editRow_ = -1;
+    editBuf_.clear();
+    if (advance) {   // ввод таблицы подряд: Enter переводит на следующее слово
+        int nr = row, nw = word + 1;
+        if (nw > 7) { nw = 0; ++nr; }
+        if (nr < ROWS) {
+            if (nr >= top_ + visibleRows()) setTop(nr - visibleRows() + 1);
+            beginEdit(nr, nw);
+            return;
+        }
+    }
+    update();
+}
+
+void SmkRamView::mousePressEvent(QMouseEvent* e) {
+    if (editing()) { commitEdit(false); return; }   // клик в стороне применяет набранное
+    if (e->button() != Qt::LeftButton || !board_->smk512()) return;
+    const int r = (e->position().y() - lineH_ - 2) / lineH_;   // минус строка заголовка
+    const int chars = (e->position().x() - xOf(0)) / cw_;
+    const int w = (chars - COL_WORD) / 7;
+    if (r < 0 || top_ + r >= ROWS) return;
+    if (chars < COL_WORD || w < 0 || w > 7) return;
+    beginEdit(top_ + r, w);
+}
+
+void SmkRamView::keyPressEvent(QKeyEvent* e) {
+    if (editing()) {
+        switch (e->key()) {
+        case Qt::Key_Escape:    cancelEdit(); return;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+        case Qt::Key_Tab:       commitEdit(true); return;
+        case Qt::Key_Backspace: if (!editBuf_.isEmpty()) editBuf_.chop(1); update(); return;
+        default: break;
+        }
+        const QString t = e->text();
+        if (t.size() == 1 && t[0] >= '0' && t[0] <= '7') {   // значения БК — восьмеричные
+            if (editBuf_.size() < 6) editBuf_ += t;
+            update();
+        }
+        return;   // пока идёт правка, прочие клавиши никуда не уходят
+    }
+    switch (e->key()) {
+    case Qt::Key_Up:       setTop(top_ - 1); return;
+    case Qt::Key_Down:     setTop(top_ + 1); return;
+    case Qt::Key_PageUp:   setTop(top_ - visibleRows()); return;
+    case Qt::Key_PageDown: setTop(top_ + visibleRows()); return;
+    case Qt::Key_Home:     setTop(0); return;
+    case Qt::Key_End:      setTop(ROWS); return;
+    default: QWidget::keyPressEvent(e);
     }
 }
 
@@ -195,6 +306,10 @@ SmkRamWidget::SmkRamWidget(Board* board, QWidget* parent)
     follow_ = new QCheckBox("Следить за подключённой");
     follow_->setChecked(true);
     status_ = new QLabel;
+    hint_ = new QLabel(QString::fromUtf8(
+        "ЛКМ по слову — правка: цифры 0-7, Enter — применить и перейти к следующему, "
+        "Esc — отмена. Пишется прямо в ДОЗУ платы, мимо ограничений режима."));
+    hint_->setEnabled(false);
 
     connect(pageBox_, QOverload<int>::of(&QComboBox::activated), this, [this](int i) {
         follow_->setChecked(false);     // ручной выбор отменяет слежение
@@ -206,6 +321,10 @@ SmkRamWidget::SmkRamWidget(Board* board, QWidget* parent)
         view_->setTop((i - 1) * static_cast<int>(Smk512::SEG_BYTES) / SmkRamView::BYTES_PER_ROW);
         syncBar();
         segBox_->setCurrentIndex(0);
+    });
+    connect(view_, &SmkRamView::edited, this, [this](int page, int off, uint16_t v) {
+        hint_->setText(QString::fromUtf8("записано: страница %1, смещение %2 = %3")
+                           .arg(page).arg(oct6(static_cast<unsigned>(off))).arg(oct6(v)));
     });
     connect(bar_, &QScrollBar::valueChanged, this, [this](int v) { view_->setTop(v); });
     connect(view_, &SmkRamView::topChanged, this, [this](int v) {
@@ -231,6 +350,7 @@ SmkRamWidget::SmkRamWidget(Board* board, QWidget* parent)
     lay->setSpacing(3);
     lay->addLayout(controls);
     lay->addLayout(body, 1);
+    lay->addWidget(hint_);
 
     // Открываемся сразу на подключённой странице — смотреть чужую пустую
     // страницу 0, пока программа работает с пятнадцатой, смысла нет.
@@ -267,7 +387,8 @@ void SmkRamWidget::updateStatus() {
 // Троттлинг как у визуализатора памяти: перерисовывать дамп на каждом кадре ни к
 // чему, а время это отнимает у эмуляции — она в том же потоке.
 void SmkRamWidget::refresh() {
-    if (board_->smk512() && follow_->isChecked() && view_->page() != board_->smk().page()) {
+    if (board_->smk512() && follow_->isChecked() && !view_->editing()
+        && view_->page() != board_->smk().page()) {
         view_->setPage(board_->smk().page());
         QSignalBlocker b(pageBox_);
         pageBox_->setCurrentIndex(view_->page());

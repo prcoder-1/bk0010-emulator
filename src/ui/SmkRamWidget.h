@@ -32,20 +32,43 @@ public:
     void setTop(int row);
     int  top() const { return top_; }
     int  visibleRows() const;
+    // Идёт правка слова: пока она не кончилась, окно не переключает страницу
+    // само (иначе набранное значение ушло бы в чужую страницу).
+    bool editing() const { return editRow_ >= 0; }
 
 signals:
     void topChanged(int row);
+    void edited(int page, int offset, uint16_t value);
 
 protected:
     void paintEvent(QPaintEvent*) override;
     void wheelEvent(QWheelEvent*) override;
     void resizeEvent(QResizeEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+    void keyPressEvent(QKeyEvent*) override;
 
 private:
+    // Колонки в знакоместах: нужны и рисованию, и попаданию мышью, поэтому
+    // считаются в одном месте.
+    enum : int {
+        COL_OFF  = 0,                            // смещение, 6 знакомест
+        COL_WORD = 14,                           // восемь слов по 7 знакомест
+        COL_TEXT = COL_WORD + 8 * 7 + 2,
+        COL_ADDR = COL_TEXT + BYTES_PER_ROW + 3,
+        COL_ACC  = COL_ADDR + 8,
+    };
+    int xOf(int col) const { return 6 + col * cw_; }
+
+    void beginEdit(int row, int word);
+    void commitEdit(bool advance);
+    void cancelEdit();
+
     bk::Board* board_;
     QFont mono_;
     int lineH_ = 14, cw_ = 8;
     int page_ = 0, top_ = 0;
+    int editRow_ = -1, editWord_ = 0;   // строка (абсолютная) и слово 0..7
+    QString editBuf_;                   // набранные восьмеричные цифры
 };
 
 // Окно: выбор страницы, переход к сегменту, слежение за подключённой страницей.
@@ -66,5 +89,6 @@ private:
     QComboBox*  segBox_;
     QCheckBox*  follow_;
     QLabel*     status_;
+    QLabel*     hint_;      // подсказка по правке; сюда же — что записали последним
     int tick_ = 0;
 };
