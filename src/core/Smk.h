@@ -67,6 +67,11 @@ public:
     Mode mode() const { return mode_; }
     int  page() const { return page_; }
     bool armed() const { return armed_; }   // строб взведён, ждём код режима
+    // Пока идёт трёхтактный протокол, плата БЛОКИРУЕТ регистры НГМД: строб
+    // блокировку ставит, третий такт снимает (§17.5, «третья снимает блокировку
+    // регистров НГМД»). Иначе те же три записи дошли бы до микросхемы
+    // 1801ВП1-128 как команды приводу и сорвали бы идущий обмен с диском.
+    bool fddBlocked() const { return fddBlocked_; }
 
     // Сырой доступ к ДОЗУ по линейному смещению — для отладчика и снимков состояния.
     const std::vector<uint8_t>& ram() const { return ram_; }
@@ -106,6 +111,7 @@ private:
     Mode    mode_  = SYS;
     uint8_t page_  = 0;
     bool    armed_ = false;
+    bool    fddBlocked_ = false;
 };
 
 } // namespace bk

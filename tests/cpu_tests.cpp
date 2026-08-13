@@ -1380,6 +1380,26 @@ int main() {
             b.memory().writeWord(0177130, 1 | bk::Fdd::CMD_MOTOR);
             CHECK((b.memory().readWord(0177130) & bk::Fdd::ST_RDY) != 0,
                   "МПИ: состояние 0177130 отдаёт дисковод, а не ДОЗУ");
+
+            // Переключение страниц НЕ ДОЛЖНО сбивать дисковод. На время трёх тактов
+            // протокола плата блокирует регистры НГМД (§17.5), иначе строб «6»
+            // дошёл бы до микросхемы как «выбрать привод 1», а завершающий «MOV #0»
+            // — как «снять выбор и выключить двигатель», и обмен, идущий в этот
+            // момент, оборвался бы. На этом вставала ANDOS с диска LAND.bkd: она
+            // меняет страницы, пока драйвер читает сектор.
+            const int driveBefore = b.kngmd().fdd().drive();
+            const bool motorBefore = b.kngmd().fdd().motor();
+            b.memory().writeWord(0177130, bk::Smk512::STROBE);
+            CHECK(b.kngmd().fdd().drive() == driveBefore && b.kngmd().fdd().motor() == motorBefore,
+                  "МПИ: строб СМК не трогает выбор привода и двигатель");
+            b.memory().writeWord(0177130, bk::Smk512::modeCode(bk::Smk512::SYS));
+            b.memory().writeWord(0177130, 0);
+            CHECK(b.smk().mode() == bk::Smk512::SYS, "МПИ: режим всё-таки защёлкнулся");
+            CHECK(b.kngmd().fdd().drive() == driveBefore && b.kngmd().fdd().motor() == motorBefore,
+                  "МПИ: после всего протокола дисковод остался в прежнем состоянии");
+            // А обычная команда после протокола до дисковода доходит.
+            b.memory().writeWord(0177130, 0);
+            CHECK(b.kngmd().fdd().drive() == -1, "МПИ: команда вне протокола снимает выбор привода");
             std::filesystem::remove(img);
         }
     }

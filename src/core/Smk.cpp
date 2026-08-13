@@ -63,6 +63,7 @@ void Smk512::reset() {
     mode_  = SYS;
     page_  = 0;
     armed_ = false;
+    fddBlocked_ = false;
 }
 
 void Smk512::writeCtrl(uint16_t value) {
@@ -74,8 +75,13 @@ void Smk512::writeCtrl(uint16_t value) {
     // СМК-64 и A16M достаточно разрядов 01 и 02). Спутать строб с рабочим кодом
     // нельзя: разряд 01 в коде страницы не участвует никогда, а коды режимов
     // занимают только разряды 04..06.
-    if ((value & 017) == STROBE) { armed_ = true; return; }
-    if (!armed_) return;            // без строба конфигурация не защёлкивается
+    if ((value & 017) == STROBE) { armed_ = true; fddBlocked_ = true; return; }
+    if (!armed_) {
+        // Третий такт протокола («MOV #0») снимает блокировку регистров НГМД.
+        // Конфигурацию он не меняет — она защёлкнута вторым тактом.
+        fddBlocked_ = false;
+        return;
+    }
     armed_ = false;
     static const Mode kByCode[8] = {HLT11, ALL, RAM11, STD10, HLT10, RAM10, STD11, SYS};
     mode_ = kByCode[(value >> 4) & 7];
