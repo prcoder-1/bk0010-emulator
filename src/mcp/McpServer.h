@@ -16,7 +16,11 @@
 // such as Claude Code. Reuses the Qt-free core (bk::Board) plus QtCore JSON.
 class McpServer {
 public:
-    explicit McpServer(std::string romDir, bool smk512 = false);
+    QString fddState() const;
+    QString fddLog(int limit) const;      // сводка по контроллеру НГМД для bk_io_state
+
+    explicit McpServer(std::string romDir, bool smk512 = false,
+                       std::string disk = {}, bool diskRw = false);
 
     // Run the stdio message loop until EOF. Returns a process exit code.
     int run();

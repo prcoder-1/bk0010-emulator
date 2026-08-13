@@ -10,6 +10,7 @@
 #include "Speaker.h"
 #include "Vp037.h"
 #include "Smk.h"
+#include "Kngmd.h"
 #include "Trace.h"
 #include "Symbols.h"
 
@@ -73,6 +74,25 @@ public:
     bool smk512() const { return smkOn_; }
     const Smk512& smk() const { return smk_; }
     Smk512&       smk()       { return smk_; }
+
+    // Контроллер НГМД (КНГМД) и загрузка с образа диска. Образ — сырой дамп
+    // секторов: 800 Кбайт (80 x 2 x 10 x 512), расширения .bkd и .img.
+    // Появление контроллера на шине требует его ПЗУ (roms/disk326.rom): без
+    // прошивки грузиться нечем — сектора читает драйвер, а не эмулятор.
+    //
+    // Контроллер и блок СМК-512 работают ВМЕСТЕ: обращения разводит MpiMux (см.
+    // ниже). Это не роскошь — системы вроде BKUNIX грузятся только с ОЗУ платы:
+    // у голой БК-0010-01 под ядро остаётся около 16 Кбайт.
+    bool attachDisk(int drive, const std::string& path, bool readOnly = true, int sides = 0);
+    void detachDisk(int drive);
+    bool diskAttached(int drive = 0) const { return kngmd_.fdd().attached(drive); }
+    const std::string& diskPath(int drive = 0) const { return kngmd_.fdd().path(drive); }
+    bool diskControllerOn() const { return diskOn_; }
+    const Kngmd& kngmd() const { return kngmd_; }
+    Kngmd&       kngmd()       { return kngmd_; }
+    // Передать управление автозагрузчику в ПЗУ контроллера (точка входа 0160000).
+    // Монитор к этому моменту должен быть поднят — см. ensureMonitorBooted().
+    bool bootFromDisk();
 
     // Run enough frames for the monitor ROM to initialise (vectors, stack,
     // display driver) if it hasn't yet. A game must not be started before this,
@@ -266,6 +286,33 @@ private:
     Vp037  vp037_;                 // видеоконтроллер 037: арбитраж доступа к ДОЗУ
     Smk512 smk_;                   // блок расширения памяти в разъёме МПИ
     bool   smkOn_ = false;         // плата СМК-512 установлена
+    Kngmd  kngmd_;                 // контроллер НГМД: ПЗУ драйвера + 1801ВП1-128
+    bool   diskOn_ = false;        // контроллер НГМД на шине
+    uint64_t fddNextTick_ = 0;     // такт следующего поворота диска (раз в 64 мкс)
+    std::string romDir_;           // откуда грузили ПЗУ — оттуда же берём прошивку НГМД
+
+    // На шине МПИ могут быть оба устройства сразу — блок расширения памяти и
+    // контроллер НГМД, — поэтому обращения разводит мультиплексор.
+    //
+    // Порядок разбора повторяет живую машину: регистры 0177130/0177132 физически
+    // принадлежат микросхеме 1801ВП1-128 (запись в них видят ОБА — у СМК это
+    // защёлка режима, у дисковода команда); дальше приоритет у ДОЗУ платы, если
+    // текущий режим Табл. 1 подключил её по этому адресу; и только потом окно
+    // 0160000 отдаётся ПЗУ драйвера НГМД.
+    class MpiMux : public MpiDevice {
+    public:
+        Smk512* smk = nullptr;
+        Kngmd*  fdc = nullptr;
+        bool empty() const { return !smk && !fdc; }
+        bool mpiRead(uint16_t addr, uint16_t& value) override;
+        bool mpiPeek(uint16_t addr, uint16_t& value) const override;
+        bool mpiWrite(uint16_t addr, uint16_t value, bool isByte) override;
+        bool mpiPoke(uint16_t addr, uint16_t value, bool isByte) override;
+    private:
+        bool smkRam(uint16_t addr) const;   // ДОЗУ платы подключено по этому адресу?
+    };
+    MpiMux mux_;
+    void updateMpi();
 
     bool arb037_ = true;           // моделировать ожидания 037 (по умолчанию ВКЛ)
     bool scanlineRender_ = false;  // построчная отрисовка экрана

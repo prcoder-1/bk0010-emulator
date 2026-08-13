@@ -68,6 +68,12 @@ static bool g_scanline = false;   // --scanline: построчная отрис
 // --smk / --no-smk: блок расширения памяти СМК-512. -1 — ключ не задан (в GUI
 // берётся сохранённая настройка, в безголовом режиме и в MCP — выключено).
 static int  g_smk = -1;
+// --disk <образ>: вставить дискету в привод 0 и передать управление автозагрузчику
+// в ПЗУ контроллера. По умолчанию образ открывается ТОЛЬКО НА ЧТЕНИЕ — чужой
+// рабочий образ портить нельзя; --disk-rw разрешает запись обратно в файл.
+static QString g_disk, g_diskB;
+static bool    g_diskRw = false;
+static int     g_diskSides = 0;      // 0 — по размеру образа, 1 или 2 — принудительно
 
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
@@ -101,6 +107,18 @@ static int runHeadless(const QString& romDir, const QString& bin,
     // Let the monitor ROM initialise (vectors, stack, display driver) before
     // jumping into a game.
     for (int i = 0; i < 25; ++i) board.runFrame();
+    // Дискета: вставляем после того, как поднялся монитор, и сразу отдаём
+    // управление автозагрузчику ПЗУ контроллера — как «160000G» в мониторе.
+    if (!g_disk.isEmpty()) {
+        if (!g_diskB.isEmpty())
+            board.attachDisk(1, g_diskB.toStdString(), !g_diskRw, g_diskSides);
+        if (!board.attachDisk(0, g_disk.toStdString(), !g_diskRw, g_diskSides)) {
+            std::fprintf(stderr, "headless: не удалось вставить образ %s\n", qPrintable(g_disk));
+            return 6;
+        }
+        board.bootFromDisk();
+        std::printf("headless: загрузка с диска %s\n", qPrintable(g_disk));
+    }
     if (!bin.isEmpty() && !board.loadBin(bin.toStdString(), true)) {
         std::fprintf(stderr, "headless: failed to load bin %s\n", qPrintable(bin));
         return 3;
@@ -317,11 +335,14 @@ int main(int argc, char** argv) {
 #endif
             if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
             bool smk = false;
+            std::string disk; bool diskRw = false;
             for (int j = 1; j < argc; ++j) {
                 if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
                 else if (std::string(argv[j]) == "--smk") smk = true;
+                else if (std::string(argv[j]) == "--disk" && j + 1 < argc) disk = argv[j + 1];
+                else if (std::string(argv[j]) == "--disk-rw") diskRw = true;
             }
-            McpServer server(romDir.toStdString(), smk);
+            McpServer server(romDir.toStdString(), smk, disk, diskRw);
             return server.run();
         }
     }
@@ -376,6 +397,10 @@ int main(int argc, char** argv) {
         else if (args[i] == "--mono") color = false;
         else if (args[i] == "--scanline") g_scanline = true;
         else if (args[i] == "--no-arb037") g_arb037 = false;
+        else if (args[i] == "--disk" && i + 1 < args.size()) g_disk = args[++i];
+        else if (args[i] == "--disk-b" && i + 1 < args.size()) g_diskB = args[++i];
+        else if (args[i] == "--disk-sides" && i + 1 < args.size()) g_diskSides = args[++i].toInt();
+        else if (args[i] == "--disk-rw") g_diskRw = true;
         else if (args[i] == "--smk") g_smk = 1;
         else if (args[i] == "--no-smk") g_smk = 0;
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);

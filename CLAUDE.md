@@ -160,6 +160,26 @@ Key cross-cutting facts to know before editing the CPU or screen:
   the report off the screen, and the glyph table must come from a SEPARATE pristine
   `Memory`, because ОЗУ10/All cover the ROM font at `0112036`. Details and the
   deliberate omissions (controller ROM, FDD, HDD) are in `docs/smk512.md`.
+- **Floppy (КНГМД)** — `src/core/Fdd.{h,cpp}` (chip 1801ВП1-128 + drives) behind
+  `src/core/Kngmd.{h,cpp}` (MpiDevice: driver ROM `roms/disk326.rom` at
+  `0160000–0167777` + the two registers). The chip does NOT find sectors: it streams
+  a raw IBM-format track and flags a word every 64 µs (`Fdd::PERIOD_TICKS`, pumped
+  after EVERY instruction in `stepCore`), so the model is the track stream, ported
+  from BKBTL and cross-checked against BKemu. Three details the driver depends on:
+  the marker search starts on the FALLING edge of GDR (and clears TR), `RDY` follows
+  the motor, and the index window sits at the START of the track. `Board::attachDisk`
+  + `bootFromDisk` (entry `0160000`). The disk and СМК-512 live on the bus TOGETHER
+  through `Board::MpiMux`: the FDD owns `0177130`/`0177132` (a write to `0177130`
+  goes to BOTH — mode latch for СМК, command for the drive), СМК RAM wins wherever
+  Табл. 1 maps it, and only then the `0160000` window falls to the driver ROM. Many
+  systems need that combo — a bare BK-0010-01 leaves ~16 KB of RAM, too little for
+  a kernel; BKUNIX (`disks/bkunix_bk0010.bkd`) boots with `--smk --disk`. Diagnostics:
+  field lengths (ID = 4-5 words, data = 258) in the Soft-ICE panel and `bk_io_state`,
+  plus a ring log with the CPU PC behind `{"fdd_log": true}`. Details in
+  `docs/floppy.md`.
+- **`MpiDevice` has two read paths**: `mpiRead` (side effects allowed — reading
+  `0177132` clears TR) for the CPU and `mpiPeek` (const, side-effect-free) for the
+  debugger/disassembler/screen. `Memory::peek*` must never call `mpiRead`.
 - **Pixel format** is `0xAARRGGBB` uint32; uploaded to GL as `GL_BGRA` and wrapped as
   `QImage::Format_ARGB32` — keep these in sync if you touch either.
 - **GL context**: `main.cpp` sets `Qt::AA_UseDesktopOpenGL` before `QApplication`.

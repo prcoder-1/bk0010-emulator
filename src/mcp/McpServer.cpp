@@ -82,13 +82,76 @@ static bool parseNumber(const QJsonValue& v, long& out) {
     return false;
 }
 
-McpServer::McpServer(std::string romDir, bool smk512) : romDir_(std::move(romDir)) {
+McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool diskRw)
+    : romDir_(std::move(romDir)) {
     romsOk_ = board_.loadRoms(romDir_);
     board_.setSmk512(smk512);             // --smk: блок расширения памяти в разъёме МПИ
     board_.reset();
+    // --disk <образ>: вставить дискету и отдать управление автозагрузчику ПЗУ
+    // контроллера. Монитор к этому моменту поднимаем, как и в безголовом режиме.
+    if (!disk.empty()) {
+        for (int i = 0; i < 25; ++i) board_.runFrame();
+        if (board_.attachDisk(0, disk, !diskRw)) {
+            board_.kngmd().fdd().setLog(true);   // сервер — инструмент отладки: журнал сразу
+            board_.bootFromDisk();
+        }
+    }
     board_.trace().setEnabled(true);      // collect hot-spot data from the start
     board_.trace().setFlameEnabled(true); // maintain the shadow call stack (bk_backtrace)
     board_.setSpeakerLog(true);           // фронты динамика — для разбора звука в bk_audio
+}
+
+// Сводка по контроллеру НГМД для bk_io_state. Длины последних полей — главное:
+// поле идентификатора это 5 слов, поле данных 258; всё, что короче, означает, что
+// процессор не поспел за темпом обмена и передача оборвалась.
+QString McpServer::fddLog(int limit) const {
+    const bk::Fdd& f = board_.kngmd().fdd();
+    const auto& lg = f.log();
+    QString out = QString("\nЖурнал НГМД (последние %1 из %2):").arg(limit).arg(lg.size());
+    // Кольцо: если оно заполнено, самая старая запись лежит в logPos().
+    const int n = static_cast<int>(lg.size());
+    const int start = (n < 4096) ? 0 : static_cast<int>(f.logPos());
+    const int show = std::min(limit, n);
+    for (int j = n - show; j < n; ++j) {
+        const auto& e = lg[(start + j) % n];
+        const char* k = e.kind == bk::Fdd::LogEntry::Kind::Cmd    ? "КОМАНДА"
+                      : e.kind == bk::Fdd::LogEntry::Kind::Marker ? "МАРКЕР "
+                      : e.kind == bk::Fdd::LogEntry::Kind::Data   ? "слово  " : "сост.  ";
+        out += QString("\n  %1 %2  дор %3 ст %4 гол %5  из %6")
+                   .arg(k).arg(oct6(e.value)).arg(e.track).arg(e.side).arg(e.head).arg(oct6(e.pc));
+    }
+    return out;
+}
+
+QString McpServer::fddState() const {
+    const bk::Fdd& f = board_.kngmd().fdd();
+    const bk::Fdd::Stats& st = f.stats();
+    QString disks;
+    for (int d = 0; d < bk::Fdd::DRIVES; ++d)
+        if (f.attached(d))
+            disks += QString("\n    привод %1: %2%3").arg(d)
+                         .arg(QString::fromStdString(f.path(d)))
+                         .arg(f.readOnly(d) ? " (только чтение)" : "");
+    QString lens;
+    for (int i = 0; i < 8; ++i) {
+        const int v = st.lastLen[(st.lastIdx + i) & 7];
+        if (v) lens += QString(" %1").arg(v);
+    }
+    const uint16_t sv = f.statusView();
+    return QString("\n  НГМД      привод %1, дорожка %2, сторона %3, сектор под головкой %4"
+                   "\n            состояние %5 [%6%7%8%9], последняя команда %10"
+                   "\n            слов %11, полей %12 (оборвано данных: %13), маркеров %14, шагов %15"
+                   "\n            длины последних полей:%16%17")
+        .arg(f.drive()).arg(f.track()).arg(f.side()).arg(f.sectorUnderHead())
+        .arg(oct6(sv))
+        .arg((sv & bk::Fdd::ST_TR)     ? "TR "   : "")
+        .arg((sv & bk::Fdd::ST_INDEX)  ? "инд "  : "")
+        .arg((sv & bk::Fdd::ST_CRCOK)  ? "CRC "  : "")
+        .arg((sv & bk::Fdd::ST_TRACK0) ? "дор0"  : "")
+        .arg(oct6(st.lastCmd))
+        .arg(st.words).arg(st.fields).arg(st.shortData).arg(st.markers).arg(st.steps)
+        .arg(lens.isEmpty() ? QString(" —") : lens)
+        .arg(disks);
 }
 
 // ---------------------------------------------------------------------------
@@ -1629,7 +1692,10 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                        .arg(board_.smk().page())
                        .arg(oct6(bk::Smk512::pageCode(board_.smk().page())))
                        .arg(board_.smk().armed() ? ", строб взведён" : "")
-                 : QString()));
+                 : QString())
+        + (board_.diskControllerOn() ? fddState() : QString())
+        + ((board_.diskControllerOn() && args.value("fdd_log").toBool())
+               ? fddLog(std::max(4, args.value("fdd_log_count").toInt(40))) : QString()));
     }
     if (name == "bk_io_log") {
         if (args.contains("enable")) {

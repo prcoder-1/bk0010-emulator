@@ -43,8 +43,14 @@ public:
 class MpiDevice {
 public:
     virtual ~MpiDevice() = default;
+    // Чтение процессором: МОЖЕТ иметь побочные эффекты. У КНГМД они есть — любое
+    // обращение к регистру данных 0177132 сбрасывает флаг готовности TR, поэтому
+    // отладчику, дизассемблеру и экрану нужен отдельный путь (mpiPeek), иначе
+    // простой показ регистра в дампе ломал бы обмен с диском.
     // addr выровнен по слову вызывающим. true — обращение обслужил контроллер.
-    virtual bool mpiRead(uint16_t addr, uint16_t& value) const = 0;
+    virtual bool mpiRead(uint16_t addr, uint16_t& value) = 0;
+    // То же, но БЕЗ побочных эффектов — для отладочного просмотра.
+    virtual bool mpiPeek(uint16_t addr, uint16_t& value) const = 0;
     // addr НЕ выровнен при isByte. true — контроллер поглотил запись (БК её не видит).
     virtual bool mpiWrite(uint16_t addr, uint16_t value, bool isByte) = 0;
     // Отладочная запись: игнорирует ограничения «только чтение/только запись».

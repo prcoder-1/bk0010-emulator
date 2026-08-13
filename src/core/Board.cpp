@@ -158,6 +158,8 @@ Board::Board() {
         // одной инструкции видят одну фазу (табличный тайминг ЦП не даёт точный
         // внутриинструкционный график обращений; сама модель 037 потактовая).
         if (arb037_ && a < 0100000) pendingWaitClkin_ += vp037_.stallForAccess();
+        // Журналу НГМД нужен адрес команды, которая лезет в его регистры.
+        if (diskOn_ && (a == 0177130 || a == 0177132)) kngmd_.fdd().setContextPc(curInstrPc_);
     });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
@@ -187,6 +189,18 @@ int Board::stepCore() {
     if (scanlineRender_) renderScanlinesUpTo(vp037_.scanline());
     totalTicks_ += static_cast<uint64_t>(t);
     sound_.feed(speaker_, t);
+    // Вращение диска. Микросхема 1801ВП1-128 формирует слово за 64 мкс (192 такта
+    // при 3 МГц), и драйвер обязан успевать за этим темпом по флагу TR. Крутим
+    // ПОСЛЕ КАЖДОЙ команды, а не раз в кадр: опросный цикл драйвера — три-четыре
+    // команды, и раз в кадр он не увидел бы ни одного слова.
+    if (diskOn_) {
+        if (totalTicks_ > fddNextTick_ + Fdd::PERIOD_TICKS * 64)
+            fddNextTick_ = totalTicks_;   // большой разрыв (снимок, пауза) — не догоняем
+        while (totalTicks_ >= fddNextTick_) {
+            kngmd_.fdd().periodic();
+            fddNextTick_ += Fdd::PERIOD_TICKS;
+        }
+    }
     // Отложенный сброс флага готовности клавиатуры (см. ioRead REG_KBD_DATA).
     if (kbdReadyClearAt_ && totalTicks_ >= kbdReadyClearAt_) {
         kbdStatus_ &= ~0200;
@@ -238,6 +252,7 @@ void Board::checkWatch(uint16_t addr, bool write, bool isByte) {
 }
 
 bool Board::loadRoms(const std::string& romDir) {
+    romDir_ = romDir;
     bool ok = true;
     ok &= mem_.loadRomFile(ADDR_ROM_MON, (romDir + "/monit10.rom").c_str(), 8192);
     // BASIC is optional for running games but harmless; load if present.
@@ -296,16 +311,95 @@ void Board::reset() {
     trace_.reset();
 }
 
+// На шине МПИ одновременно живёт одно устройство. Контроллер НГМД и СМК-512
+// занимают одни и те же адреса (0177130/0177132 — это вообще один и тот же узел
+// 1801ВП1-128, а окно 0160000 — ПЗУ и того, и другого), поэтому вставленный диск
+// вытесняет СМК: совмещать их можно только с ПЗУ самого СМК, которого у нас нет.
+// ДОЗУ платы подключено по этому адресу? Ячейки «только запись» сюда не входят:
+// читать их всё равно нельзя, чтение по таким адресам идёт мимо платы.
+bool Board::MpiMux::smkRam(uint16_t addr) const {
+    if (!smk) return false;
+    Smk512::Slot s;
+    return smk->decode(addr, s) && (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Ro);
+}
+
+bool Board::MpiMux::mpiRead(uint16_t addr, uint16_t& value) {
+    if (fdc && (addr == Kngmd::REG_CTRL || addr == Kngmd::REG_DATA))
+        return fdc->mpiRead(addr, value);          // регистры микросхемы НГМД
+    if (smkRam(addr)) return smk->mpiRead(addr, value);
+    if (fdc && fdc->mpiRead(addr, value)) return true;   // ПЗУ драйвера 326
+    return smk && smk->mpiRead(addr, value);       // слово версии СМК и прочее
+}
+
+bool Board::MpiMux::mpiPeek(uint16_t addr, uint16_t& value) const {
+    if (fdc && (addr == Kngmd::REG_CTRL || addr == Kngmd::REG_DATA))
+        return fdc->mpiPeek(addr, value);
+    if (smkRam(addr)) return smk->mpiPeek(addr, value);
+    if (fdc && fdc->mpiPeek(addr, value)) return true;
+    return smk && smk->mpiPeek(addr, value);
+}
+
+bool Board::MpiMux::mpiWrite(uint16_t addr, uint16_t value, bool isByte) {
+    // Регистр управления на живой плате ОДИН, поэтому запись достаётся обоим:
+    // СМК защёлкивает режим, дисковод исполняет команду. Признак «поглотил»
+    // складываем: если хоть кто-то ответил, до самой БК запись не доходит.
+    bool taken = false;
+    if (smk) taken |= smk->mpiWrite(addr, value, isByte);
+    if (fdc) taken |= fdc->mpiWrite(addr, value, isByte);
+    return taken;
+}
+
+bool Board::MpiMux::mpiPoke(uint16_t addr, uint16_t value, bool isByte) {
+    if (smk && smk->mpiPoke(addr, value, isByte)) return true;
+    return fdc && fdc->mpiPoke(addr, value, isByte);
+}
+
+void Board::updateMpi() {
+    mux_.smk = smkOn_  ? &smk_   : nullptr;
+    mux_.fdc = diskOn_ ? &kngmd_ : nullptr;
+    mem_.setMpi(mux_.empty() ? nullptr : &mux_);
+}
+
+bool Board::attachDisk(int drive, const std::string& path, bool readOnly, int sides) {
+    if (!kngmd_.romLoaded() && !kngmd_.loadRom(romDir_ + "/disk326.rom")) {
+        std::fprintf(stderr, "КНГМД: нет прошивки %s/disk326.rom — грузиться нечем\n",
+                     romDir_.c_str());
+        return false;
+    }
+    if (!kngmd_.fdd().attach(drive, path, readOnly, sides)) {
+        std::fprintf(stderr, "КНГМД: не удалось открыть образ %s\n", path.c_str());
+        return false;
+    }
+    if (!diskOn_) {
+        diskOn_ = true;
+        fddNextTick_ = totalTicks_ + Fdd::PERIOD_TICKS;
+        updateMpi();
+    }
+    return true;
+}
+
+void Board::detachDisk(int drive) {
+    kngmd_.fdd().detach(drive);
+    for (int d = 0; d < Fdd::DRIVES; ++d) if (kngmd_.fdd().attached(d)) return;
+    diskOn_ = false;                      // приводов не осталось — контроллер с шины
+    updateMpi();
+}
+
+// Автозагрузка: управление на точку входа драйвера. Ровно то же делает человек,
+// набирая в мониторе «160000G». Стек и векторы поднимает сам драйвер.
+bool Board::bootFromDisk() {
+    if (!diskOn_ || !kngmd_.romLoaded()) return false;
+    cpu_.r[7] = Kngmd::BOOT_ENTRY;
+    cpu_.psw = 0;                          // как при запуске программы из монитора:
+                                           // плотный опросный цикл драйвер закрывает сам
+    return true;
+}
+
 void Board::setSmk512(bool on) {
     if (on == smkOn_) return;
     smkOn_ = on;
-    if (on) {
-        smk_.powerOn();
-        mem_.setMpi(&smk_);
-    } else {
-        mem_.setMpi(nullptr);
-        smk_.release();
-    }
+    if (on) smk_.powerOn(); else smk_.release();
+    updateMpi();
 }
 
 // ---- Save / restore state ---------------------------------------------------

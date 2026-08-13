@@ -25,6 +25,8 @@ add_library(bkcore STATIC
     src/core/Speaker.cpp
     src/core/Vp037.cpp
     src/core/Smk.cpp
+    src/core/Fdd.cpp
+    src/core/Kngmd.cpp
     src/core/Board.cpp
 )
 target_include_directories(bkcore PUBLIC src/core)

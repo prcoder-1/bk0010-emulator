@@ -69,6 +69,9 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, QWidget* parent)
     // --- Menus ---
     QMenu* file = menuBar()->addMenu("&Файл");
     file->addAction("&Загрузить .BIN…", this, &MainWindow::openBin, QKeySequence::Open);
+    file->addAction("Вставить образ &диска… (привод A)", this,
+                    [this] { openDisk(0); }, QKeySequence("Ctrl+B"));
+    file->addAction("Вставить образ диска в привод &B…", this, [this] { openDisk(1); });
     file->addSeparator();
     file->addAction("В&ыход", this, &QWidget::close, QKeySequence::Quit);
 
@@ -623,6 +626,33 @@ void MainWindow::keyReleaseEvent(QKeyEvent* e) {
         if (heldKeys_.empty()) board_->setKeyHeld(false);
     }
     QMainWindow::keyReleaseEvent(e);
+}
+
+// Вставить дискету и загрузиться с неё. Контроллер появляется на шине вместе с
+// образом, поэтому машину перезапускаем: на живой БК плату в разъём МПИ ставят
+// при выключенном питании. Дальше поднимаем монитор и отдаём управление
+// автозагрузчику ПЗУ контроллера — то же, что набрать в мониторе «160000G».
+void MainWindow::openDisk(int drive) {
+    const QString path = QFileDialog::getOpenFileName(
+        this, drive ? "Вставить образ диска в привод B" : "Вставить образ диска",
+        lastDisk_.isEmpty() ? lastBin_ : lastDisk_,
+        "Образы дисков БК (*.bkd *.BKD *.bkD *.img *.IMG *.Img);;Все файлы (*)");
+    if (path.isEmpty()) return;
+    // Второй привод не перезапускает машину: дискету в него меняют на ходу.
+    if (drive == 0) { resetMachine(); board_->ensureMonitorBooted(); }
+    if (!board_->attachDisk(drive, path.toStdString(), true)) {
+        status_->setText("Не удалось вставить образ — нет roms/disk326.rom или файл не читается");
+        return;
+    }
+    if (drive == 0) board_->bootFromDisk();
+    lastDisk_ = path;
+    // СМК и дисковод уживаются на шине вместе (это и есть историческая машина с
+    // диском), поэтому плату не снимаем. Части систем без неё просто некуда
+    // грузиться: у голой БК-0010-01 свободно около 16 Кбайт ОЗУ.
+    status_->setText(drive
+        ? QString("Дискета в приводе B: %1").arg(QFileInfo(path).fileName())
+        : QString("Загрузка с диска: %1%2").arg(QFileInfo(path).fileName())
+              .arg(board_->smk512() ? ", ОЗУ платы СМК-512 подключено" : ""));
 }
 
 void MainWindow::openMemVis() {

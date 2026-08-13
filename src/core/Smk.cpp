@@ -107,7 +107,7 @@ void Smk512::store(uint16_t addr, const Slot& s, uint16_t value, bool isByte) {
     }
 }
 
-bool Smk512::mpiRead(uint16_t addr, uint16_t& value) const {
+bool Smk512::mpiPeek(uint16_t addr, uint16_t& value) const {
     addr &= ~1;
     Slot s;
     if (decode(addr, s)) {
