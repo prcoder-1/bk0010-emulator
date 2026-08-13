@@ -74,8 +74,12 @@ void Memory::writeWord(uint16_t addr, uint16_t value) {
     if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiWrite(addr, value, false)) return;
     if (addr >= ADDR_IO_PAGE && io_) {
         if (io_->ioWrite(addr, value, false)) return;
+        // Регистр есть, но запись в него не принимается (0177662 доступен только по
+        // чтению): шина не отвечает, и процессор получает «зависание» по вектору 4.
+        if (busError_) busError_(addr);
+        return;
     }
-    if (isRom(addr)) return; // ROM is read-only
+    if (isRom(addr)) return;     // ПЗУ: запись просто пропадает
     rawWord(addr, value);
 }
 
@@ -84,6 +88,8 @@ void Memory::writeByte(uint16_t addr, uint8_t value) {
     if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiWrite(addr, value, true)) return;
     if (addr >= ADDR_IO_PAGE && io_) {
         if (io_->ioWrite(addr & ~1, value, true)) return;
+        if (busError_) busError_(addr);
+        return;
     }
     if (isRom(addr)) return;
     rawByte(addr, value);
