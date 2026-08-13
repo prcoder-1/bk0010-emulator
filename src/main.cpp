@@ -75,6 +75,7 @@ static int  g_smk = -1;
 static QString g_disk, g_diskB;
 static bool    g_diskRw = false;
 static int     g_diskSides = 0;      // 0 — по размеру образа, 1 или 2 — принудительно
+static QString g_diskRom;            // --disk-rom smk|326|<файл>: прошивка контроллера
 
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
@@ -111,6 +112,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     // Дискета: вставляем после того, как поднялся монитор, и сразу отдаём
     // управление автозагрузчику ПЗУ контроллера — как «160000G» в мониторе.
     if (!g_disk.isEmpty()) {
+        if (!g_diskRom.isEmpty()) board.setDiskRom(g_diskRom.toStdString());
         if (!g_diskB.isEmpty())
             board.attachDisk(1, g_diskB.toStdString(), !g_diskRw, g_diskSides);
         if (!board.attachDisk(0, g_disk.toStdString(), !g_diskRw, g_diskSides)) {
@@ -402,6 +404,10 @@ int main(int argc, char** argv) {
         else if (args[i] == "--disk" && i + 1 < args.size()) g_disk = args[++i];
         else if (args[i] == "--disk-b" && i + 1 < args.size()) g_diskB = args[++i];
         else if (args[i] == "--disk-sides" && i + 1 < args.size()) g_diskSides = args[++i].toInt();
+        else if (args[i] == "--disk-rom" && i + 1 < args.size()) {
+            const QString v = args[++i];
+            g_diskRom = (v == "smk") ? "smk512.rom" : (v == "326") ? "disk326.rom" : v;
+        }
         else if (args[i] == "--disk-rw") g_diskRw = true;
         else if (args[i] == "--smk") g_smk = 1;
         else if (args[i] == "--no-smk") g_smk = 0;

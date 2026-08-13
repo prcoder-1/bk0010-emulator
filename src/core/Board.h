@@ -83,6 +83,12 @@ public:
     // Контроллер и блок СМК-512 работают ВМЕСТЕ: обращения разводит MpiMux (см.
     // ниже). Это не роскошь — системы вроде BKUNIX грузятся только с ОЗУ платы:
     // у голой БК-0010-01 под ядро остаётся около 16 Кбайт.
+    // Какое ПЗУ ставить в контроллер: пусто — драйвер 326 (roms/disk326.rom),
+    // иначе имя файла в каталоге ПЗУ или полный путь. Фирменная прошивка СМК
+    // (roms/smk512.rom) ставится ключом --disk-rom smk: она перехватывает адрес
+    // начального пуска и приносит свой ROM-BIOS, но образов с ней поднимается
+    // меньше (см. docs/floppy.md).
+    void setDiskRom(const std::string& nameOrPath) { diskRom_ = nameOrPath; }
     bool attachDisk(int drive, const std::string& path, bool readOnly = true, int sides = 0);
     void detachDisk(int drive);
     bool diskAttached(int drive = 0) const { return kngmd_.fdd().attached(drive); }
@@ -289,6 +295,7 @@ private:
     Kngmd  kngmd_;                 // контроллер НГМД: ПЗУ драйвера + 1801ВП1-128
     bool   diskOn_ = false;        // контроллер НГМД на шине
     uint64_t fddNextTick_ = 0;     // такт следующего поворота диска (раз в 64 мкс)
+    std::string diskRom_;          // выбранная прошивка контроллера (пусто — авто)
     std::string romDir_;           // откуда грузили ПЗУ — оттуда же берём прошивку НГМД
 
     // На шине МПИ могут быть оба устройства сразу — блок расширения памяти и
@@ -309,7 +316,8 @@ private:
         bool mpiWrite(uint16_t addr, uint16_t value, bool isByte) override;
         bool mpiPoke(uint16_t addr, uint16_t value, bool isByte) override;
     private:
-        bool smkRam(uint16_t addr) const;   // ДОЗУ платы подключено по этому адресу?
+        bool smkRam(uint16_t addr) const;      // ДОЗУ платы подключено по этому адресу?
+        bool smkRomCell(uint16_t addr) const;  // здесь по Табл. 1 видно ПЗУ контроллера
     };
     MpiMux mux_;
     void updateMpi();
@@ -341,6 +349,7 @@ private:
     uint64_t keyIntDeferAt_ = 0;        // такт, с которого IRQ клавиатуры выдавать можно
     bool     irqFramePending_ = false;  // взведённый запрос кадрового прерывания 0100
     bool     stopPending_ = false;      // нажата клавиша «СТОП» (вектор 4, вне приоритета)
+    bool     busErrorPending_ = false;  // обращение, которое шина не подтвердила («зависание»)
     bool     keyHeld_ = false;   // physical key down (0177716 bit 6, active-low)
     uint16_t keyIntVec_ = 060;
     uint8_t  speaker_   = 0;     // уровень пьезодинамика 0..7 (биты 6,5,2 регистра 0177716)

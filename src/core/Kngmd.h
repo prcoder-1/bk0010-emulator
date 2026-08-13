@@ -32,7 +32,25 @@ public:
     static constexpr size_t ROM_BYTES = 010000;   // 4 Кбайт
 
     bool loadRom(const std::string& path);
+    // Слово ПЗУ по любому адресу окна: микросхема получает лишь 11 младших
+    // разрядов адреса, поэтому образ в 4 Кбайт повторяется по всей области, где
+    // Табл. 1 объявила «ПЗУ контроллера» (в режиме SYS это и 0170000, §17.9).
+    bool romMirror(uint16_t addr, uint16_t& value) const {
+        if (!romLoaded()) return false;
+        value = romWord(addr);
+        return true;
+    }
     bool romLoaded() const { return rom_.size() == ROM_BYTES; }
+    // Адрес начального пуска из ПЗУ контроллера. В режиме SYS ПЗУ зеркалится и на
+    // 0170000-0177777, попадая в ячейку 0177716, откуда К1801ВМ1 берёт адрес
+    // пуска, — и машина стартует не со 0100000, а с прошивки контроллера (§17.9).
+    // У прошивки СМК v2.05 там 0166400; у простого драйвера 326 ноль — он старт не
+    // перехватывает, и это отличает одну плату от другой.
+    uint16_t romStart() const {
+        if (!romLoaded()) return 0;
+        const uint16_t v = romWord(0177716);
+        return (v >= ROM_FIRST && v <= ROM_LAST) ? v : 0;
+    }
     void unloadRom() { rom_.clear(); }
 
     Fdd&       fdd()       { return fdd_; }
@@ -47,7 +65,7 @@ public:
 private:
     bool inRom(uint16_t addr) const { return romLoaded() && addr >= ROM_FIRST && addr <= ROM_LAST; }
     uint16_t romWord(uint16_t addr) const {
-        const size_t o = static_cast<size_t>(addr - ROM_FIRST) & (ROM_BYTES - 1);
+        const size_t o = static_cast<size_t>(addr) & (ROM_BYTES - 1);
         return static_cast<uint16_t>(rom_[o] | (rom_[o + 1] << 8));
     }
 

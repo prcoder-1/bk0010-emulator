@@ -149,6 +149,7 @@ Board::Board() {
     cpu_.setResetHook([this]() { resetDevices(); });
     // Feed the access heatmap (no-op unless the trace is enabled) and the
     // data watchpoints (no-op unless any are set).
+    mem_.setBusErrorHook([this](uint16_t) { busErrorPending_ = true; });
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
         trace_.access(a, w, b);
         if (!watchpoints_.empty()) checkWatch(a, w, b);
@@ -208,7 +209,7 @@ int Board::stepCore() {
     }
     // Взведённые запросы разбираются после КАЖДОЙ команды, а не раз в кадр: иначе
     // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
-    if (irqFramePending_ || keyIntPending_ || stopPending_) {
+    if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_) {
         const int it = tryDeliverInterrupts();
         if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; }
     }
@@ -262,9 +263,13 @@ bool Board::loadRoms(const std::string& romDir) {
 
 void Board::reset() {
     mem_.reset();
+    // Адрес начального пуска процессор берёт из ячейки 0177716. Обычно там ПЗУ БК
+    // с адресом 0100000, но контроллер с собственной прошивкой зеркалит своё ПЗУ
+    // на эту ячейку и уводит старт на себя (§17.9) — так грузится машина с СМК.
+    const uint16_t start = (diskOn_ && kngmd_.romStart()) ? kngmd_.romStart() : START_VECTOR;
     // Power-up: priority 7 (all interrupts masked). The monitor lowers the
     // priority itself once it has installed its interrupt vectors.
-    cpu_.reset(START_VECTOR, 0340);
+    cpu_.reset(start, 0340);
     scroll_ = 01330;   // 0330 + бит 9: полный экран (256 строк) по умолчанию
     kbdStatus_ = 0;    // bit 6 (0100) = interrupt MASK (0 => enabled), bit 7 = ready
     kbdData_ = 0;
@@ -272,6 +277,7 @@ void Board::reset() {
     keyIntDeferAt_ = 0;
     irqFramePending_ = false;
     stopPending_ = false;
+    busErrorPending_ = false;
     keyHeld_ = false;
     keyIntVec_ = 060;
     // Timer power-on state: остановлен, счётчик и предел — «все единицы».
@@ -323,11 +329,26 @@ bool Board::MpiMux::smkRam(uint16_t addr) const {
     return smk->decode(addr, s) && (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Ro);
 }
 
+// Где именно видно ПЗУ контроллера, решает Табл. 1 платы: в режимах SYS, Std10 и
+// Std11 это окно 0160000, а в SYS оно ещё и зеркалится на 0170000-0177777 —
+// микросхеме ПЗУ достаются лишь младшие разряды адреса (§17.9). Регистры В-В
+// оставляем самой БК: иначе в режиме SYS пропали бы клавиатура и скролл.
+bool Board::MpiMux::smkRomCell(uint16_t addr) const {
+    if (!smk || !fdc || addr >= ADDR_IO_PAGE) return false;
+    Smk512::Slot s;
+    if (!smk->decode(addr, s) || s.cell != Smk512::Cell::Rom) return false;
+    // Зеркалит своё ПЗУ только плата с собственной прошивкой — та, что и старт
+    // перехватывает. У простого КНГМД (драйвер 326) ПЗУ видно лишь в своём окне
+    // 0160000, и подменять им ещё и 0170000 было бы выдумкой.
+    return fdc->romStart() != 0 || addr <= Kngmd::ROM_LAST;
+}
+
 bool Board::MpiMux::mpiRead(uint16_t addr, uint16_t& value) {
     if (fdc && (addr == Kngmd::REG_CTRL || addr == Kngmd::REG_DATA))
         return fdc->mpiRead(addr, value);          // регистры микросхемы НГМД
     if (smkRam(addr)) return smk->mpiRead(addr, value);
-    if (fdc && fdc->mpiRead(addr, value)) return true;   // ПЗУ драйвера 326
+    if (fdc && smkRomCell(addr) && fdc->romMirror(addr, value)) return true;  // зеркало ПЗУ
+    if (fdc && fdc->mpiRead(addr, value)) return true;   // ПЗУ контроллера в своём окне
     return smk && smk->mpiRead(addr, value);       // слово версии СМК и прочее
 }
 
@@ -335,6 +356,7 @@ bool Board::MpiMux::mpiPeek(uint16_t addr, uint16_t& value) const {
     if (fdc && (addr == Kngmd::REG_CTRL || addr == Kngmd::REG_DATA))
         return fdc->mpiPeek(addr, value);
     if (smkRam(addr)) return smk->mpiPeek(addr, value);
+    if (fdc && smkRomCell(addr) && fdc->romMirror(addr, value)) return true;
     if (fdc && fdc->mpiPeek(addr, value)) return true;
     return smk && smk->mpiPeek(addr, value);
 }
@@ -373,10 +395,24 @@ void Board::updateMpi() {
 }
 
 bool Board::attachDisk(int drive, const std::string& path, bool readOnly, int sides) {
-    if (!kngmd_.romLoaded() && !kngmd_.loadRom(romDir_ + "/disk326.rom")) {
-        std::fprintf(stderr, "КНГМД: нет прошивки %s/disk326.rom — грузиться нечем\n",
-                     romDir_.c_str());
-        return false;
+    // Какое ПЗУ ставить, решает конфигурация машины: у платы СМК-512 своя прошивка
+    // (v2.05 с ROM-BIOS, roms/smk512.rom) — именно её ждут системы для БК-0010 с
+    // расширением памяти; у простого КНГМД — драйвер 326.
+    if (!kngmd_.romLoaded()) {
+        bool ok = false;
+        if (!diskRom_.empty()) {
+            ok = kngmd_.loadRom(diskRom_) || kngmd_.loadRom(romDir_ + "/" + diskRom_);
+        } else {
+            // По умолчанию — драйвер 326: с ним поднимается больше образов, чем с
+            // фирменной прошивкой СМК (та нужна дискам, которые зовут её ROM-BIOS,
+            // и включается ключом --disk-rom smk). См. docs/floppy.md.
+            ok = kngmd_.loadRom(romDir_ + "/disk326.rom");
+        }
+        if (!ok) {
+            std::fprintf(stderr, "КНГМД: нет прошивки в %s (нужен smk512.rom или disk326.rom)\n",
+                         romDir_.c_str());
+            return false;
+        }
     }
     if (!kngmd_.fdd().attach(drive, path, readOnly, sides)) {
         std::fprintf(stderr, "КНГМД: не удалось открыть образ %s\n", path.c_str());
@@ -401,6 +437,13 @@ void Board::detachDisk(int drive) {
 // набирая в мониторе «160000G». Стек и векторы поднимает сам драйвер.
 bool Board::bootFromDisk() {
     if (!diskOn_ || !kngmd_.romLoaded()) return false;
+    // Прошивка СМК перехватывает адрес начального пуска: машина должна стартовать
+    // с неё, а не с монитора, иначе своей инициализации (ROM-BIOS, векторы,
+    // рабочий режим) контроллер не сделает и система с диска не поднимется.
+    if (const uint16_t start = kngmd_.romStart()) {
+        reset();
+        return true;
+    }
     cpu_.r[7] = Kngmd::BOOT_ENTRY;
     cpu_.psw = 0;                          // как при запуске программы из монитора:
                                            // плотный опросный цикл драйвер закрывает сам
@@ -651,8 +694,8 @@ int Board::tryDeliverInterrupts() {
     if (cpu_.halted()) return 0;
     // «СТОП» разбирается ДО проверки маски: это внеприоритетное прерывание, разряды
     // приоритета его не запрещают. Идёт по вектору 4 — тому же, что HALT и зависание.
-    if (stopPending_) {
-        stopPending_ = false;
+    if (stopPending_ || busErrorPending_) {
+        stopPending_ = busErrorPending_ = false;
         if (mem_.peekWord(Cpu::VEC_BUS_ERROR) != 0) {
             const int t = cpu_.interrupt(Cpu::VEC_BUS_ERROR);
             trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
@@ -973,6 +1016,15 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
         portOut_ = value;
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
+    case REG_KBD_DATA:
+        // Регистр данных клавиатуры на БК-0010 доступен ТОЛЬКО по чтению. Запись
+        // не обрабатываем — она проваливается дальше по шине, и если за адресом
+        // нет записываемой памяти (обычно там ПЗУ), выходит «зависание» по вектору
+        // 4. Ровно так прошивка контроллера СМК отличает БК-0010 от БК-0011М, где
+        // по этому адресу лежит регистр управления экраном и запись проходит: без
+        // этого контроллер считает машину одиннадцатой, ставит режим Std11, и ни
+        // одна система с диска не поднимается.
+        return false;
     default:
         if (addr >= ADDR_IO_PAGE) return true; // swallow writes to I/O page
         return false;

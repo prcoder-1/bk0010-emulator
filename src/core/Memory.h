@@ -71,6 +71,11 @@ public:
     void setMpi(MpiDevice* d) { mpi_ = d; }
     MpiDevice* mpi() const { return mpi_; }
     void setAccessHook(AccessHook h) { hook_ = std::move(h); }
+    // «Зависание»: запись, которую никто не подтвердил — ни устройство МПИ, ни
+    // регистры БК, ни ОЗУ (адрес ПЗУ). На живой машине шина не отвечает СИП, и
+    // процессор идёт по вектору 4 (§7.4). Плата превращает это в прерывание.
+    using BusErrorHook = std::function<void(uint16_t addr)>;
+    void setBusErrorHook(BusErrorHook h) { busError_ = std::move(h); }
 
     // Load a ROM image into a byte-address range; region becomes read-only.
     bool loadRom(uint16_t addr, const uint8_t* data, size_t len);
@@ -109,6 +114,7 @@ private:
     IoBus* io_ = nullptr;
     MpiDevice* mpi_ = nullptr;           // контроллер в разъёме МПИ (СМК-512)
     AccessHook hook_;
+    BusErrorHook busError_;
 };
 
 } // namespace bk
