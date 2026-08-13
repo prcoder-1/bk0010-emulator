@@ -173,7 +173,9 @@ Key cross-cutting facts to know before editing the CPU or screen:
   goes to BOTH — mode latch for СМК, command for the drive), СМК RAM wins wherever
   Табл. 1 maps it, and only then the `0160000` window falls to the driver ROM. Many
   systems need that combo — a bare BK-0010-01 leaves ~16 KB of RAM, too little for
-  a kernel; BKUNIX (`disks/bkunix_bk0010.bkd`) boots with `--smk --disk`. Diagnostics:
+  a kernel; BKUNIX (`disks/bkunix_bk0010.bkd`) boots with `--smk --disk`. A
+  positional `.bkd`/`.img` argument (any case) is treated as a disk and boots it,
+  and it turns СМК on for that run unless `--no-smk` says otherwise. Diagnostics:
   field lengths (ID = 4-5 words, data = 258) in the Soft-ICE panel and `bk_io_state`,
   plus a ring log with the CPU PC behind `{"fdd_log": true}`. Details in
   `docs/floppy.md`.

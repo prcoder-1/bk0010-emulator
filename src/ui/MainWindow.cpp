@@ -638,21 +638,28 @@ void MainWindow::openDisk(int drive) {
         lastDisk_.isEmpty() ? lastBin_ : lastDisk_,
         "Образы дисков БК (*.bkd *.BKD *.bkD *.img *.IMG *.Img);;Все файлы (*)");
     if (path.isEmpty()) return;
+    insertDiskAndBoot(path, drive);
+}
+
+bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
     // Второй привод не перезапускает машину: дискету в него меняют на ходу.
     if (drive == 0) { resetMachine(); board_->ensureMonitorBooted(); }
     if (!board_->attachDisk(drive, path.toStdString(), true)) {
         status_->setText("Не удалось вставить образ — нет roms/disk326.rom или файл не читается");
-        return;
+        return false;
     }
     if (drive == 0) board_->bootFromDisk();
     lastDisk_ = path;
     // СМК и дисковод уживаются на шине вместе (это и есть историческая машина с
-    // диском), поэтому плату не снимаем. Части систем без неё просто некуда
-    // грузиться: у голой БК-0010-01 свободно около 16 Кбайт ОЗУ.
+    // диском), поэтому плату не снимаем. Наоборот, без неё большинству систем
+    // некуда грузиться: у голой БК-0010-01 свободно около 16 Кбайт ОЗУ.
     status_->setText(drive
         ? QString("Дискета в приводе B: %1").arg(QFileInfo(path).fileName())
         : QString("Загрузка с диска: %1%2").arg(QFileInfo(path).fileName())
-              .arg(board_->smk512() ? ", ОЗУ платы СМК-512 подключено" : ""));
+              .arg(board_->smk512() ? ", ОЗУ платы СМК-512 подключено"
+                                    : " — ВНИМАНИЕ: плата СМК-512 снята, памяти может не хватить"));
+    updateTitle();
+    return true;
 }
 
 void MainWindow::openMemVis() {

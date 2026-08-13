@@ -35,6 +35,9 @@ public:
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
+    // Вставить образ диска и, для привода A, отдать управление автозагрузчику
+    // ПЗУ контроллера. Тем же путём идут и меню, и образ из командной строки.
+    bool insertDiskAndBoot(const QString& path, int drive = 0);
 
     // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }

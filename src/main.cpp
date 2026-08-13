@@ -21,6 +21,7 @@
 #include "ui/BkKeymap.h"
 #include "mcp/McpServer.h"
 #include "Board.h"
+#include "Fdd.h"
 #include "Disasm.h"
 #include <QKeyEvent>
 #include <QGuiApplication>
@@ -340,6 +341,7 @@ int main(int argc, char** argv) {
                 if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
                 else if (std::string(argv[j]) == "--smk") smk = true;
                 else if (std::string(argv[j]) == "--disk" && j + 1 < argc) disk = argv[j + 1];
+                else if (argv[j][0] != '-' && bk::Fdd::looksLikeImage(argv[j])) disk = argv[j];
                 else if (std::string(argv[j]) == "--disk-rw") diskRw = true;
             }
             McpServer server(romDir.toStdString(), smk, disk, diskRw);
@@ -407,7 +409,23 @@ int main(int argc, char** argv) {
         else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
         else if (args[i] == "--type" && i + 1 < args.size()) { typeStr = args[++i]; headless = true; }
         else if (args[i] == "--keys" && i + 1 < args.size()) { keysList = args[++i]; headless = true; }
-        else if (!args[i].startsWith("--")) binToLoad = args[i];
+        // Позиционный аргумент: .bkd и .img (в любом регистре) — это образ диска,
+        // всё остальное — игра в формате .BIN.
+        else if (!args[i].startsWith("--")) {
+            if (bk::Fdd::looksLikeImage(args[i].toStdString())) g_disk = args[i];
+            else binToLoad = args[i];
+        }
+    }
+
+    // Дискета почти всегда подразумевает и блок расширения памяти: у голой
+    // БК-0010-01 под ядро остаётся около 16 Кбайт ОЗУ, и большинство систем без
+    // платы просто некуда грузить. Поэтому образ включает СМК-512 сам, если ключ
+    // не задан явно; --no-smk по-прежнему сильнее. Сохранённую настройку GUI это
+    // не переписывает — плата включается только на этот запуск.
+    if (!g_disk.isEmpty() && g_smk < 0) {
+        g_smk = 1;
+        std::fprintf(stderr, "Дискета: включён блок расширения памяти СМК-512 "
+                             "(отключить — ключом --no-smk)\n");
     }
 
     if (args.contains("--keytest"))
@@ -420,7 +438,9 @@ int main(int argc, char** argv) {
     MainWindow w(romDir, g_smk);
     w.setArbitration(g_arb037);
     w.show();
-    if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
+    if (!g_disk.isEmpty()) w.insertDiskAndBoot(g_disk, 0);
+    else if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
+    if (!g_diskB.isEmpty()) w.insertDiskAndBoot(g_diskB, 1);
 
     return app.exec();
 }
