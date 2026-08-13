@@ -84,8 +84,9 @@ public:
     struct Slot { Cell cell; uint8_t seg; };
     bool decode(uint16_t addr, Slot& s) const;
 
-    // MpiDevice
-    bool mpiRead(uint16_t addr, uint16_t& value) const override;
+    // MpiDevice. Побочных эффектов у чтения ДОЗУ нет, поэтому оба пути — один код.
+    bool mpiRead(uint16_t addr, uint16_t& value) override { return mpiPeek(addr, value); }
+    bool mpiPeek(uint16_t addr, uint16_t& value) const override;
     bool mpiWrite(uint16_t addr, uint16_t value, bool isByte) override;
     bool mpiPoke(uint16_t addr, uint16_t value, bool isByte) override;
 

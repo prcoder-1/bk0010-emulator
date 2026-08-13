@@ -52,6 +52,7 @@ private slots:
     void openBin();
     void resetMachine();
     void toggleColorMode();
+    void openDisk(int drive = 0);
     void openMemVis();
     void openSmkRam();
     void openHotPath();
@@ -98,6 +99,7 @@ private:
     QLabel* status_ = nullptr;
     QAction* smkAction_ = nullptr;   // галка «СМК-512» — синхронизируется при загрузке снимка
     QString lastBin_;
+    QString lastDisk_;      // последний вставленный образ диска
     BkKeymap keymap_;
     Gamepad gamepad_;           // джойстик на порту 0177714 через SDL2-геймпад
     // Host-side typing buffer: a keypress may translate to more than one BK code

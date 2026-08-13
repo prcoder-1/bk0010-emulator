@@ -462,7 +462,8 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     // заголовка, строка «луч + шапка колонок» и 9 регистров. С установленным
     // блоком СМК-512 там же появляется строка режима — панель растёт на строку,
     // стек ровно на столько же сжимается. ----
-    int sregH = (board_->smk512() ? 12 : 11) * lineH_ + 8;
+    int sregH = (11 + (board_->smk512() ? 1 : 0)
+                    + (board_->diskControllerOn() ? 1 : 0)) * lineH_ + 8;
     QRect stkRect(mx, memRect.bottom() + margin, mw,
                   dTop + dH - sregH - 2 * margin - memRect.bottom());
     stkRect_ = stkRect;   // для попадания мышью при правке
@@ -551,6 +552,26 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
             p.setPen(chg);
             p.drawText(srx + cw * static_cast<int>(s.size()) + cw, gy, QString::fromUtf8("строб"));
         }
+        gy += lineH_;
+    }
+    // Контроллер НГМД: где головка и успевает ли процессор за обменом. Счётчик
+    // потерянных слов — главный признак того, что передача рвётся не «где-то», а
+    // именно по темпу: микросхема отдаёт слово раз в 64 мкс и ждать не умеет.
+    if (board_->diskControllerOn()) {
+        const bk::Fdd& f = board_->kngmd().fdd();
+        const uint16_t st = f.statusView();
+        const long lost = f.stats().shortData;
+        QString s = QString::fromUtf8("НГМД %1 д%2 с%3 сек%4 %5%6%7 %8")
+                        .arg(f.drive()).arg(f.track(), -2).arg(f.side())
+                        .arg(f.sectorUnderHead(), -2)
+                        .arg((st & bk::Fdd::ST_TR)    ? "TR"  : "--")
+                        .arg((st & bk::Fdd::ST_INDEX) ? "И"   : "-")
+                        .arg((st & bk::Fdd::ST_CRCOK) ? "C"   : "-")
+                        .arg(QString::fromUtf8("обрыв%1 поля %2/%3")
+                                 .arg(lost).arg(f.stats().lastLen[(f.stats().lastIdx + 7) & 7])
+                                 .arg(f.stats().lastLen[(f.stats().lastIdx + 6) & 7]));
+        p.setPen(lost ? QColor(255, 140, 140) : fg);
+        p.drawText(srx, gy, fm.elidedText(s, Qt::ElideRight, srw));
         gy += lineH_;
     }
     for (const auto& sr : sregs) {

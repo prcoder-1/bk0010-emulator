@@ -98,7 +98,7 @@ uint16_t Memory::peekWord(uint16_t addr) const {
     addr &= ~1;
     if (mpi_ && addr >= ADDR_RAM_END) {
         uint16_t v = 0;
-        if (mpi_->mpiRead(addr, v)) return v;
+        if (mpi_->mpiPeek(addr, v)) return v;
     }
     return static_cast<uint16_t>(mem_[addr] | (mem_[addr + 1] << 8));
 }
@@ -106,7 +106,7 @@ uint16_t Memory::peekWord(uint16_t addr) const {
 uint8_t Memory::peekByte(uint16_t addr) const {
     if (mpi_ && addr >= ADDR_RAM_END) {
         uint16_t v = 0;
-        if (mpi_->mpiRead(addr & ~1, v)) return (addr & 1) ? (v >> 8) : (v & 0xff);
+        if (mpi_->mpiPeek(addr & ~1, v)) return (addr & 1) ? (v >> 8) : (v & 0xff);
     }
     return mem_[addr];
 }

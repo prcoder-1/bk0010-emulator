@@ -9,6 +9,7 @@
 #include "BkKeys.h"
 #include "ScreenOcr.h"
 #include "Speaker.h"
+#include "Fdd.h"
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
@@ -1234,6 +1235,152 @@ int main() {
             const std::string noBoard = runTest(false);
             CHECK(noBoard.find("ОШИБКА") != std::string::npos,
                   "СМК/SMKTEST: без платы тест сообщает об ошибке");
+        }
+    }
+
+    // ---- Контроллер НГМД: поток дорожки и протокол регистров ----------------
+    // Микросхема 1801ВП1-128 не ищет сектора — она отдаёт СЫРОЙ поток дорожки и
+    // ловит маркер A1. Поэтому проверяем именно то, что видит драйвер: после
+    // поиска маркера должно прийти A1A1, затем признак поля (A1FE или A1FB), а
+    // за полем идентификатора — дорожка, сторона, номер сектора и код длины.
+    {
+        using bk::Fdd;
+        CHECK(Fdd::looksLikeImage("disk.bkd") && Fdd::looksLikeImage("DISK.BKD"),
+              "НГМД: .bkd опознаётся в любом регистре");
+        CHECK(Fdd::looksLikeImage("a.img") && Fdd::looksLikeImage("ANDOS.IMG"),
+              "НГМД: .img опознаётся в любом регистре");
+        CHECK(!Fdd::looksLikeImage("game.bin") && !Fdd::looksLikeImage("noext"),
+              "НГМД: посторонние расширения не опознаются");
+
+        // Синтетический образ: 2 дорожки x 2 стороны x 10 секторов. Первое слово
+        // каждого сектора — его координаты, дальше — счётчик, чтобы поймать сдвиг.
+        const int kTracks = 2;
+        std::vector<uint8_t> img(static_cast<size_t>(kTracks) * 2 * Fdd::TRACK_BYTES, 0);
+        auto put = [&](int t, int side, int sec, int off, uint16_t v) {
+            const size_t o = ((static_cast<size_t>(t) * 2 + side) * Fdd::SECTORS + (sec - 1))
+                           * Fdd::SECTOR_SIZE + off;
+            img[o] = static_cast<uint8_t>(v >> 8);      // старший байт первым — как в потоке
+            img[o + 1] = static_cast<uint8_t>(v & 0xff);
+        };
+        for (int t = 0; t < kTracks; ++t)
+            for (int s = 0; s < 2; ++s)
+                for (int sec = 1; sec <= Fdd::SECTORS; ++sec) {
+                    put(t, s, sec, 0, static_cast<uint16_t>((t << 12) | (s << 8) | sec));
+                    for (int w = 1; w < 8; ++w) put(t, s, sec, w * 2, static_cast<uint16_t>(0100 + w));
+                }
+        const std::string imgPath = (std::filesystem::temp_directory_path()
+                                     / "bk-fdd-test.img").string();
+        { std::FILE* f = std::fopen(imgPath.c_str(), "wb");
+          if (f) { std::fwrite(img.data(), 1, img.size(), f); std::fclose(f); } }
+
+        Fdd fdd;
+        CHECK(fdd.attach(0, imgPath), "НГМД: образ вставлен в привод 0");
+        CHECK(fdd.attached(0) && !fdd.attached(1), "НГМД: занят только привод 0");
+
+        // Крутим диск, пока не появится готовность данных, и забираем слово.
+        auto nextWord = [&](int limit = 8000) -> uint16_t {
+            for (int i = 0; i < limit; ++i) {
+                fdd.periodic();
+                if (fdd.readStatus() & Fdd::ST_TR) return fdd.readData();
+            }
+            return 0177777;   // не дождались
+        };
+        // Выбрать привод 0 и включить двигатель: без него диск не вращается.
+        fdd.writeCtrl(1 | Fdd::CMD_MOTOR);
+        CHECK((fdd.readStatus() & Fdd::ST_TRACK0) != 0, "НГМД: головка на нулевой дорожке");
+        CHECK((fdd.readStatus() & Fdd::ST_RDY) != 0, "НГМД: с включённым двигателем привод готов");
+        CHECK((fdd.readStatus() & Fdd::ST_WPROT) != 0, "НГМД: образ вставлен только на чтение");
+
+        // Поиск маркера — двухтактный: единица в GDR, затем ноль (см. Fdd::writeCtrl).
+        auto search = [&] {
+            fdd.writeCtrl(1 | Fdd::CMD_MOTOR | Fdd::CMD_GDR);
+            fdd.writeCtrl(1 | Fdd::CMD_MOTOR);
+        };
+        // Ищем поле идентификатора: маркер, признак FE, координаты сектора.
+        uint16_t id[4] = {0, 0, 0, 0};
+        bool foundId = false;
+        for (int tries = 0; tries < 30 && !foundId; ++tries) {
+            search();
+            id[0] = nextWord();
+            id[1] = nextWord();
+            if (id[0] == 0xA1A1 && id[1] == 0xA1FE) {
+                id[2] = nextWord(); id[3] = nextWord();
+                foundId = true;
+            }
+        }
+        CHECK(foundId, "НГМД: после поиска приходит маркер A1A1 и признак поля A1FE");
+        CHECK((id[2] >> 8) == 0 && (id[2] & 0xff) == 0,
+              "НГМД: в поле идентификатора дорожка 0, сторона 0");
+        const int sector = id[3] >> 8;
+        CHECK(sector >= 1 && sector <= Fdd::SECTORS && (id[3] & 0xff) == 2,
+              "НГМД: номер сектора в диапазоне 1..10, код длины 2 (512 байт)");
+
+        // Следом идёт поле данных того же сектора: маркер, признак FB и данные.
+        uint16_t d0 = 0, d1 = 0, d2 = 0;
+        bool foundData = false;
+        for (int tries = 0; tries < 30 && !foundData; ++tries) {
+            search();
+            d0 = nextWord();
+            d1 = nextWord();
+            if (d0 == 0xA1A1 && d1 == 0xA1FB) { d2 = nextWord(); foundData = true; }
+        }
+        CHECK(foundData, "НГМД: поле данных начинается маркером A1A1 и признаком A1FB");
+        CHECK((d2 & 0xf000) == 0 && (d2 & 0xff) >= 1 && (d2 & 0xff) <= Fdd::SECTORS,
+              "НГМД: первое слово данных — координаты сектора из образа");
+
+        // Шаг головки: DIR=1 уводит от нулевой дорожки, DIR=0 возвращает.
+        fdd.writeCtrl(1 | Fdd::CMD_MOTOR | Fdd::CMD_DIR | Fdd::CMD_STEP);
+        CHECK(fdd.track() == 1 && !(fdd.readStatus() & Fdd::ST_TRACK0),
+              "НГМД: шаг к центру уводит с нулевой дорожки");
+        fdd.writeCtrl(1 | Fdd::CMD_MOTOR | Fdd::CMD_STEP);
+        CHECK(fdd.track() == 0 && (fdd.readStatus() & Fdd::ST_TRACK0),
+              "НГМД: шаг наружу возвращает на нулевую");
+        // Снятие привода: контроллер молчит, диск не крутится.
+        fdd.writeCtrl(0);
+        CHECK(fdd.readStatus() == 0, "НГМД: без выбранного привода состояние нулевое");
+        std::filesystem::remove(imgPath);
+    }
+
+    // ---- Шина МПИ: блок расширения памяти и дисковод вместе ------------------
+    // На живой машине это одна плата, поэтому регистры 0177130/0177132 общие, а
+    // окно 0160000 отдаётся ПЗУ драйвера только тогда, когда его не занял ДОЗУ.
+    {
+        Board b;
+        if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            std::printf("SKIP: ПЗУ не найдено — тесты шины МПИ пропущены\n");
+        } else {
+            b.setSmk512(true);
+            b.reset();
+            const std::string img = (std::filesystem::temp_directory_path()
+                                     / "bk-mux-test.img").string();
+            { std::vector<uint8_t> z(2 * 2 * bk::Fdd::TRACK_BYTES, 0);
+              std::FILE* f = std::fopen(img.c_str(), "wb");
+              if (f) { std::fwrite(z.data(), 1, z.size(), f); std::fclose(f); } }
+            const bool ok = b.attachDisk(0, img);
+            CHECK(ok, "МПИ: диск вставляется при установленной плате СМК");
+            CHECK(b.smk512() && b.diskControllerOn(),
+                  "МПИ: СМК и контроллер НГМД на шине одновременно");
+
+            // Режим SYS: 0120000 — ДОЗУ платы, 0160000 — ПЗУ драйвера НГМД.
+            b.memory().writeWord(0120000, 01234);
+            CHECK(b.memory().readWord(0120000) == 01234, "МПИ: 0120000 — ОЗУ платы СМК");
+            const uint16_t romWord = b.memory().readWord(0160000);
+            CHECK(romWord == 0410, "МПИ: 0160000 — ПЗУ драйвера НГМД (BR на автозагрузку)");
+
+            // Запись в 0177130 видят ОБА: СМК защёлкивает режим, дисковод — команду.
+            b.memory().writeWord(0177130, bk::Smk512::STROBE);
+            b.memory().writeWord(0177130, bk::Smk512::modeCode(bk::Smk512::RAM10));
+            b.memory().writeWord(0177130, 0);
+            CHECK(b.smk().mode() == bk::Smk512::RAM10, "МПИ: СМК защёлкнул режим через общий регистр");
+            // В режиме ОЗУ10 ДОЗУ накрывает и окно 0160000 — ПЗУ драйвера уходит.
+            b.memory().writeWord(0160000, 07070);
+            CHECK(b.memory().readWord(0160000) == 07070,
+                  "МПИ: в режиме ОЗУ10 по 0160000 уже ОЗУ платы, а не ПЗУ");
+            // Регистры контроллера остаются за микросхемой НГМД в любом режиме.
+            b.memory().writeWord(0177130, 1 | bk::Fdd::CMD_MOTOR);
+            CHECK((b.memory().readWord(0177130) & bk::Fdd::ST_RDY) != 0,
+                  "МПИ: состояние 0177130 отдаёт дисковод, а не ДОЗУ");
+            std::filesystem::remove(img);
         }
     }
 
