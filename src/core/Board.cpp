@@ -341,11 +341,23 @@ bool Board::MpiMux::mpiPeek(uint16_t addr, uint16_t& value) const {
 
 bool Board::MpiMux::mpiWrite(uint16_t addr, uint16_t value, bool isByte) {
     // Регистр управления на живой плате ОДИН, поэтому запись достаётся обоим:
-    // СМК защёлкивает режим, дисковод исполняет команду. Признак «поглотил»
-    // складываем: если хоть кто-то ответил, до самой БК запись не доходит.
+    // СМК защёлкивает режим, дисковод исполняет команду.
+    //
+    // Исключение — три такта протокола переключения памяти. На это время плата
+    // БЛОКИРУЕТ регистры НГМД (§17.5), и не зря: строб «6» в младшей тетраде для
+    // микросхемы 1801ВП1-128 означает «выбрать привод 1», а завершающий «MOV #0»
+    // — «снять выбор и выключить двигатель». Пропусти мы их к дисководу, любое
+    // переключение страниц посреди обмена рвало бы его. Ровно на этом вставала
+    // ANDOS с диска LAND.bkd: она меняет страницы, пока драйвер читает сектор.
+    const uint16_t a = static_cast<uint16_t>(addr & ~1);
+    const bool fddReg = (a == Kngmd::REG_CTRL || a == Kngmd::REG_DATA);
+    const bool inProtocol = smk && fddReg
+        && (smk->fddBlocked() || (!isByte && (value & 017) == Smk512::STROBE));
+
     bool taken = false;
     if (smk) taken |= smk->mpiWrite(addr, value, isByte);
-    if (fdc) taken |= fdc->mpiWrite(addr, value, isByte);
+    if (fdc && !inProtocol) taken |= fdc->mpiWrite(addr, value, isByte);
+    else if (fdc && inProtocol) taken = true;   // запись поглотила плата
     return taken;
 }
 
