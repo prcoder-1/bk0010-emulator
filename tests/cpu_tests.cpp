@@ -230,6 +230,12 @@ int main() {
         uint16_t csr = b.memory().readWord(0177712);
         CHECK(!(csr & 020), "one-shot timer stops (START cleared)");
         CHECK(csr & 0200, "one-shot sets END flag");
+        // Регрессия («зависание» dizzy2021.bin на уровне): по ВМ1 §4.4 однократный
+        // режим при достижении нуля не только останавливает счёт, но и
+        // ПЕРЕЗАГРУЖАЕТ счётчик из регистра предела. Типовая пауза
+        // `CMP @#177706, @#177710 / BNE .-` ждёт именно этого равенства.
+        CHECK(b.memory().readWord(0177710) == 10,
+              "однократный таймер по концу периода перезагружается из предела");
     }
     {
         // Regression (Digger freeze): a long gap between reads — delta spanning
