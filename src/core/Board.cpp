@@ -53,7 +53,13 @@ void Board::timerCheck() {
     // Counter reached / passed zero.
     if (timerCsr_ & TIM_ENBEND) timerCsr_ |= TIM_END;
     if ((timerCsr_ & TIM_ONCE) && !(timerCsr_ & TIM_CONTINUOUS)) {
-        timerCount_ = 0;
+        // Однократный режим (OS=1, CAP=0): «при достижении нуля бит RUN сбрасывается,
+        // таймер ПЕРЕЗАГРУЖАЕТСЯ и останавливается» — TVE_LIMIT → TVE_COUNT
+        // (04-процессор-К1801ВМ1.md, §4.4, разряд 3). Эталонный bk/timer.c оставляет
+        // здесь ноль — это его ошибка: типовая идиома ожидания одновибратора
+        // `CMP @#177706, @#177710 / BNE .-` (dizzy2021.bin, пауза между кадрами
+        // уровня) тогда не дожидается конца периода никогда.
+        timerCount_ = timerLimit_;
         timerCsr_ &= ~TIM_START;   // one-shot: stop
     } else if ((timerCsr_ & TIM_CONTINUOUS) || timerLimit_ == 0) {
         // Free-running: the counter wraps through zero (mod 2^16), no reload.
