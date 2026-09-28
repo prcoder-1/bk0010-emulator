@@ -36,7 +36,7 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 
 Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
-`--no-arb037` (disable КР1801ВП1-037 memory-arbitration wait-states, on by default),
+`--no-arb037` (disable the КР1801ВП1-037 DRAM-window penalty, on by default),
 `--smk` / `--no-smk` (СМК-512 memory-expansion board, off by default),
 `--scanline` (per-scanline rendering — each line drawn with the scroll register value
 that was live when the beam crossed it, driven off the `Vp037` raster; OFF by default,
@@ -89,6 +89,18 @@ Key cross-cutting facts to know before editing the CPU or screen:
   change flag logic, cross-check against `single.c`/`double.c`/`branch.c` there.
 - **Effective address** load/store (`Cpu::loadSrc/loadDst/storeDst2/...`) ports
   `ea.c`; `storeDst2` writes back to the cached `eaAddr_` for modify-in-place ops.
+- **Instruction timing has two layers, and only their SUM is a real machine.**
+  `Cpu::timingFor` is a baseline table; DRAM (i.e. all of a stock BK's memory) costs up
+  to +4 more per instruction, because the 037 opens the CPU's window once per 4 CPU
+  ticks and an access preceded by an internal cycle (`-(R)` address calc, destination
+  register update, the modify of an RMW) misses it. That part is `Cpu::arbReadPenalty` /
+  `arbWritePenalty`, charged by `Board::stepCore` only when the access really hit DRAM.
+  It is NOT raster-dependent. Verified against Manwe's measurements on real hardware:
+  all 45 cells of `45com-lo` and 184/192 of the full MOV/CMP/ADD table (the other 8 are
+  self-contradictory in the source). Don't fold the penalty back into `timingFor`, and
+  don't read `--no-arb037` as "fast memory" — real expansion-board static RAM is faster
+  still and board-specific (`MOV R1,R2`: 12 in DRAM, 8 on СМК-512, 9 on AZ-БК), and we
+  do not model it. See `docs/slow-memory-timing.md`.
 - **T-bit trace trap** (`Cpu::step`): while PSW bit 4 (`020`) is set, EVERY instruction
   traps through vector `014`; only the `RTT` instruction itself suppresses it (so `RTI`
   restoring T=1 traps immediately, `RTT` lets exactly one instruction through). This is

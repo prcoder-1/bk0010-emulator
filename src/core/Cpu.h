@@ -57,6 +57,12 @@ public:
     // profiler views to estimate per-instruction execution time.
     int instrTicks(uint16_t ir) const { return timingFor(ir); }
 
+    // Добавка к timingFor за арбитраж КР1801ВП1-037, когда операнд лежит в ДОЗУ
+    // (у БК-0010 это всё ОЗУ, adr < 0100000). Начисляется по факту обращения —
+    // см. Board::stepCore и комментарий у определения в Cpu.cpp.
+    static int arbReadPenalty(uint16_t ir);
+    static int arbWritePenalty(uint16_t ir);
+
     // Hook for intercepting EMT 36 (tape/disk file I/O). Called when an
     // `EMT 036` instruction executes; if it returns true the call is considered
     // handled and the ROM handler (vector 030) is skipped. See Board::handleEmt36.

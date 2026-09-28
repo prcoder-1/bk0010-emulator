@@ -159,12 +159,10 @@ Board::Board() {
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
         trace_.access(a, w, b);
         if (!watchpoints_.empty()) checkWatch(a, w, b);
-        // Арбитраж 037: обращения в ДОЗУ (A15=0, т.е. addr < 0100000 — оба банка
-        // ОЗУ) во время активной развёртки получают такты ожидания. ПЗУ/В-В (A15=1)
-        // 037 не арбитрирует. Фаза 037 берётся на начало инструкции — все обращения
-        // одной инструкции видят одну фазу (табличный тайминг ЦП не даёт точный
-        // внутриинструкционный график обращений; сама модель 037 потактовая).
-        if (arb037_ && a < 0100000) pendingWaitClkin_ += vp037_.stallForAccess();
+        // Арбитраж 037: штраф за потерю окна начисляется только тем обменам, что
+        // действительно идут в ДОЗУ (A15=0, addr < 0100000 — оба банка ОЗУ). ПЗУ,
+        // В-В и статическое ОЗУ плат расширения (A15=1) 037 не арбитрирует.
+        if (a < 0100000) (w ? dramWrite_ : dramRead_) = true;
         // Журналу НГМД нужен адрес команды, которая лезет в его регистры.
         if (diskOn_ && (a == 0177130 || a == 0177132)) kngmd_.fdd().setContextPc(curInstrPc_);
     });
@@ -181,17 +179,17 @@ int Board::stepCore() {
     curInstrPc_ = pcBefore;
     trace_.exec(pcBefore);
     watchArmed_ = false;
-    pendingWaitClkin_ = 0;
+    uint16_t ir = arb037_ ? mem_.peekWord(pcBefore) : 0;
+    dramRead_ = dramWrite_ = false;
     int t = cpu_.step();
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
     if (arb037_) {
-        // Свести накопленные ожидания ДОЗУ (CLKIN → такты ЦП, ÷2) в стоимость
-        // инструкции и продвинуть фазу 037 в лок-степе (1 такт ЦП = 2 такта CLKIN).
-        t += pendingWaitClkin_ / 2;
-        vp037_.tick(2 * t);
-    } else if (scanlineRender_) {
-        vp037_.tick(2 * t);   // фаза нужна и без арбитража — по ней рисуются строки
+        if (dramRead_)  t += Cpu::arbReadPenalty(ir);
+        if (dramWrite_) t += Cpu::arbWritePenalty(ir);
     }
+    // Фаза 037 идёт в лок-степе с ЦП (1 такт ЦП = 2 такта CLKIN) — по ней рисуются
+    // строки при построчной отрисовке.
+    if (arb037_ || scanlineRender_) vp037_.tick(2 * t);
     // Луч ушёл вперёд — дорисовать пройденные строки текущим значением скролла.
     if (scanlineRender_) renderScanlinesUpTo(vp037_.scanline());
     totalTicks_ += static_cast<uint64_t>(t);
@@ -318,7 +316,7 @@ void Board::reset() {
     screen_.setScroll(scroll_);
     vp037_.reset();
     vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
-    pendingWaitClkin_ = 0;
+    dramRead_ = dramWrite_ = false;
     if (smkOn_) smk_.powerOn();        // включение питания: ДОЗУ чисто, режим SYS
     trace_.reset();
 }
@@ -545,7 +543,7 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
     vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
-    pendingWaitClkin_ = 0;
+    dramRead_ = dramWrite_ = false;
     return true;
 }
 

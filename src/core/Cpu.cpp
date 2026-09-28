@@ -670,11 +670,12 @@ void Cpu::buildTable() {
 // ---------------------------------------------------------------------------
 int Cpu::timingFor(uint16_t ir) const {
     // Timings measured on a real БК-0010.01 (Manwe's "clock cycles meter" + the XOP
-    // timing test suite), FAST (main) memory — this is the no-extra-wait baseline.
-    // The КР1801ВП1-037 memory arbitration adds wait-states on top; those are NOT
-    // address-dependent (the 037 controls ALL dynamic RAM uniformly) but raster-
-    // dependent — asserted only while the beam is in active display. They are modelled
-    // outside the CPU, in Board via the Vp037 device (see src/core/Vp037.h).
+    // timing test suite). This table is a BASELINE, not a machine: only
+    // `timingFor + arbReadPenalty/arbWritePenalty` reproduces a real stock BK (all
+    // memory is DRAM behind the 037), and that sum is verified cell by cell against
+    // Manwe's measurements. Real fast memory (an expansion board's static RAM) is
+    // much faster still and board-specific — `MOV R1,R2` is 12 in DRAM, 8 on a
+    // СМК-512 and 9 on an AZ-БК — and we do not model it; see docs/slow-memory-timing.md.
     //
     // Two-operand: 12 + SRC[sm] + DST[dm], where DST depends on whether the source
     // is a register (sm==0) or memory (sm!=0) and on the op class (read/write/rmw).
@@ -737,6 +738,66 @@ int Cpu::timingFor(uint16_t ir) const {
         return 40;                                          // прочие 0000xx
     }
     return 40;                                              // fallback
+}
+
+// ---------------------------------------------------------------------------
+// Штраф арбитража КР1801ВП1-037
+// ---------------------------------------------------------------------------
+// Окно доступа процессора к ДОЗУ открывается раз в 8 тактов CLKIN = 4 такта ЦП
+// (свободнобегущий счётчик PC[2:0] в 037, см. Vp037.h), поэтому потеря окна стоит
+// ровно +4 — отсюда и кратность четырём всей таблицы таймингов. Окно теряет тот
+// обмен, перед которым ЦП вставил внутренний такт и не успел выставить запрос:
+// декремент адреса до чтения, обновление регистра-приёмника до записи, модификация
+// данных между чтением и записью у команд «чтение-модификация-запись». Если перед
+// внутренним тактом идёт чужая транзакция на шине, он проходит под неё бесплатно —
+// поэтому `MOV (R0)+,@-(R0)` укладывается в базовое время, а `MOV -(R1),@(R1)+`
+// теряет 4 такта. Раскладка проверена по всем 45 ячейкам `45com-lo` (©Manwe) на
+// реальной БК-0010.01 и по его же таблице замеров MOV/CMP/ADD во всех режимах
+// адресации — 184 из 192 ячеек, остальные 8 в самой таблице противоречивы.
+// Подробности — docs/slow-memory-timing.md.
+//
+// Штраф зависит от того, в ДОЗУ ли идёт сам обмен, поэтому чтение и запись
+// разведены: их начисляет Board, когда обращение действительно попало в ДОЗУ.
+
+// Потеря окна на чтении источника: декремент адреса идёт первым делом после
+// выборки команды, прятать его не за что. Если приёмник — регистр, обмен у команды
+// всего один и терять окно нечему (`MOV -(R1),R2` = `MOV (R1)+,R2` = 28). У
+// одноместных команд эта добавка уже сидит в базовой таблице (OP_W/OP_R: режим 4 на
+// 4 такта дороже режима 2).
+int Cpu::arbReadPenalty(uint16_t ir) {
+    int grp = (ir >> 12) & 7;
+    if (grp < 1 || grp > 6) return 0;              // не двухоперандная
+    int sm = (ir & 07000) >> 9;
+    if (sm != 4 && sm != 5) return 0;              // только -(R) и @-(R)
+    return (ir & 070) ? 4 : 0;                     // приёмник-регистр не штрафуется
+}
+
+// Потеря окна на записи приёмника. Режимы, где добавка уже сидит в базовой таблице
+// (все косвенные и индексные у двухоперандных), здесь не штрафуются повторно —
+// раскладка снята с таблицы замеров Manwe, см. docs/slow-memory-timing.md.
+int Cpu::arbWritePenalty(uint16_t ir) {
+    int idx = ir >> 6, dm = (ir & 070) >> 3;
+    if (dm == 0) return 0;                          // приёмник — регистр
+    bool memSrc = (ir & 07000) != 0;
+    int grp = idx >> 6;
+    switch (grp) {
+    case 001: case 011:                             // MOV/MOVB: только запись
+        // При источнике из памяти окно теряет обновление регистра-приёмника
+        // (`(R)+`/`-(R)`); при регистровом источнике — запись по «голому» (R),
+        // а режимы 2 и 4 там уже на 4 такта дороже в самой таблице.
+        return memSrc ? (dm == 2 || dm == 4 ? 4 : 0) : (dm == 1 ? 4 : 0);
+    case 002: case 012: case 003: case 013:         // CMP/BIT: приёмник только читается
+        return 0;
+    case 004: case 005: case 006: case 014: case 015: case 016:
+        // BIC/BIS/ADD/SUB — чтение-модификация-запись: окно теряет запись, какой бы
+        // ни была адресация приёмника.
+        return 4;
+    }
+    if (idx == 003) return 4;                                    // SWAB
+    if (idx >= 0740 && idx <= 0747) return 4;                    // XOR
+    if (idx >= 050 && idx <= 067)   return (idx == 057 || idx == 064) ? 0 : 4;  // кроме TST и MARK
+    if (idx >= 01050 && idx <= 01067) return (idx == 01057 || idx == 01064) ? 0 : 4; // кроме TSTB и MTPS
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
