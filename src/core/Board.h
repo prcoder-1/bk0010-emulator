@@ -322,12 +322,13 @@ private:
     MpiMux mux_;
     void updateMpi();
 
-    bool arb037_ = true;           // моделировать ожидания 037 (по умолчанию ВКЛ)
+    bool arb037_ = true;           // моделировать арбитраж 037 (по умолчанию ВКЛ)
     bool scanlineRender_ = false;  // построчная отрисовка экрана
     int  renderedLine_ = 0;        // следующая строка кадра, ещё не отрисованная
     void renderScanlinesUpTo(int line);   // догнать отрисовку до строки `line`
     void beginFrameRaster();              // верх кадра: доотрисовать и сбросить счётчик
-    int  pendingWaitClkin_ = 0;    // накопленное ожидание ДОЗУ (CLKIN) за инструкцию
+    bool dramRead_ = false;        // текущая инструкция читала/писала ДОЗУ —
+    bool dramWrite_ = false;       // по этому начисляется штраф арбитража 037
 
     int cpuFreqHz_ = 3000000;   // тактовая частота ЦП
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()

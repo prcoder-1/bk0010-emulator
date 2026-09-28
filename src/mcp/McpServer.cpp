@@ -1683,7 +1683,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             .arg(board_.vp037().scanline())
             .arg(board_.vp037().vgate() ? "кадровое гашение"
                  : board_.vp037().hgate() ? "строчное гашение" : "видимая часть")
-            .arg(board_.vp037().inActiveDisplay() ? " (037 занимает шину: такты ожидания ДОЗУ)"
+            .arg(board_.vp037().inActiveDisplay() ? " (037 занимает шину видеовыборкой)"
                                                   : "")
             .arg(board_.smk512()
                  ? QString("\n  СМК-512   режим %1 (код %2), страница %3 (код %4)%5")
