@@ -412,6 +412,56 @@ int main() {
         }
     }
 
+    // ---- Вторая таблица таймингов: ОЗУ СМК-512 («быстрая» память) ----
+    {
+        // Замеры Manwe на реальной БК-0010-01 с СМК-512: тест 45com-hi и полная
+        // таблица MOV/CMP/ADD по всем режимам. Память платы 037 не арбитрирует,
+        // время там не кратно четырём и заметно меньше.
+        auto setup = [](Board& b) {
+            b.setSmk512(true); b.reset();
+            // Трёхтактный протокол: строб, код режима ОЗУ11, снятие строба.
+            b.smk().writeCtrl(6); b.smk().writeCtrl(040); b.smk().writeCtrl(0);
+        };
+        struct Case { uint16_t ir; int fast; const char* name; };
+        static const Case cases[] = {
+            {0010102,  8, "MOV R1,R2"},
+            {0000240,  9, "NOP"},
+            {0000300,  9, "SWAB R0"},
+            {0005011, 20, "CLR (R1)"},
+            {0005021, 21, "CLR (R1)+"},
+            {0005711, 17, "TST (R1)"},
+            {0011112, 28, "MOV (R1),(R2)"},
+            {0021112, 25, "CMP (R1),(R2)"},
+            {0061112, 28, "ADD (R1),(R2)"},
+            {0014131, 34, "MOV -(R1),@(R1)+"},
+        };
+        for (const Case& c : cases) {
+            Board b; setup(b);
+            for (uint16_t a = 0150000; a < 0152000; a += 2) b.memory().pokeWord(a, 0150200);
+            b.memory().pokeWord(0140000, c.ir);
+            b.cpu().reset(0140000, 0340);
+            b.cpu().r[1] = 0150400; b.cpu().r[2] = 0150500;
+            uint64_t before = b.totalTicks();
+            b.stepInstruction();
+            char msg[96];
+            std::snprintf(msg, sizeof msg, "СМК-512: %s — %d тактов в ОЗУ платы", c.name, c.fast);
+            CHECK(static_cast<int>(b.totalTicks() - before) == c.fast, msg);
+        }
+        // Смешанный случай: команда на плате, данные в ДОЗУ. Точных замеров нет,
+        // время делится пропорционально числу обменов — 31 такт между 26 (всё
+        // быстрое) и 36 (всё медленное); у Manwe в такой конфигурации 32.
+        {
+            Board b; setup(b);
+            b.memory().pokeWord(0140000, 0010112);   // MOV R1,(R2), приёмник в ДОЗУ
+            b.cpu().reset(0140000, 0340);
+            b.cpu().r[1] = 0; b.cpu().r[2] = 04000;
+            uint64_t before = b.totalTicks();
+            b.stepInstruction();
+            CHECK(static_cast<int>(b.totalTicks() - before) == 31,
+                  "СМК-512: команда на плате, запись в ДОЗУ — время между таблицами");
+        }
+    }
+
     // ---- Board: арбитраж 037 замедляет исполнение ----
     {
         // Тесный цикл в ОЗУ, активно бьющий в ДОЗУ (INC слова + переход обратно).

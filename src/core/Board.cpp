@@ -159,15 +159,30 @@ Board::Board() {
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
         trace_.access(a, w, b);
         if (!watchpoints_.empty()) checkWatch(a, w, b);
-        // Арбитраж 037: штраф за потерю окна начисляется только тем обменам, что
-        // действительно идут в ДОЗУ (A15=0, addr < 0100000 — оба банка ОЗУ). ПЗУ,
-        // В-В и статическое ОЗУ плат расширения (A15=1) 037 не арбитрирует.
-        if (a < 0100000) (w ? dramWrite_ : dramRead_) = true;
+        // Тайминг: считаем обмены команды и раскладываем их по типу памяти.
+        // ДОЗУ БК (A15=0, оба банка) арбитрируется 037 — там штраф за окно.
+        // ОЗУ СМК-512 — «быстрая» память со своей таблицей таймингов. Остальное
+        // выше 0100000 (ПЗУ, В-В, ПЗУ контроллера НГМД) на реальном железе 037 тоже
+        // не арбитрирует, но замеров для него нет, поэтому оно остаётся на базовой
+        // линии — ни штрафа, ни ускорения.
+        ++memAccess_;
+        if (a < 0100000) { ++dramAccess_; (w ? dramWrite_ : dramRead_) = true; }
+        else if (smkOn_ && smkRamAccess(a, w)) ++fastAccess_;
         // Журналу НГМД нужен адрес команды, которая лезет в его регистры.
         if (diskOn_ && (a == 0177130 || a == 0177132)) kngmd_.fdd().setContextPc(curInstrPc_);
     });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
+}
+
+// Обмен по адресу `addr` обслуживает ДОЗУ СМК-512, а не БК? Для чтения годятся
+// ячейки Табл. 1 «чтение-запись» и «только чтение», для записи — «чтение-запись»
+// и «только запись» (теневое ОЗУ); ПЗУ контроллера и молчащие адреса — нет.
+bool Board::smkRamAccess(uint16_t addr, bool write) const {
+    Smk512::Slot s{};
+    if (!smk_.decode(addr, s)) return false;
+    return write ? (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Wo)
+                 : (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Ro);
 }
 
 // Execute one instruction with sound + trace bookkeeping. Returns ticks.
@@ -181,11 +196,21 @@ int Board::stepCore() {
     watchArmed_ = false;
     uint16_t ir = arb037_ ? mem_.peekWord(pcBefore) : 0;
     dramRead_ = dramWrite_ = false;
+    memAccess_ = dramAccess_ = fastAccess_ = 0;
     int t = cpu_.step();
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
     if (arb037_) {
         if (dramRead_)  t += Cpu::arbReadPenalty(ir);
         if (dramWrite_) t += Cpu::arbWritePenalty(ir);
+        if (fastAccess_ > 0) {
+            // Хотя бы один обмен ушёл в ОЗУ СМК-512 — у него своя таблица. Все
+            // обмены быстрые (код и данные на плате) — берём её целиком; часть —
+            // делим пропорционально числу обменов. Замеров для смешанного случая
+            // нет, но такая прикидка ложится в ±2 такта в колонку Manwe «быстрый
+            // код, медленные данные».
+            int fast = cpu_.instrTicksFast(ir);
+            if (t > fast) t -= ((t - fast) * fastAccess_ + memAccess_ / 2) / memAccess_;
+        }
     }
     // Фаза 037 идёт в лок-степе с ЦП (1 такт ЦП = 2 такта CLKIN) — по ней рисуются
     // строки при построчной отрисовке.

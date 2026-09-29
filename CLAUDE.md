@@ -89,18 +89,20 @@ Key cross-cutting facts to know before editing the CPU or screen:
   change flag logic, cross-check against `single.c`/`double.c`/`branch.c` there.
 - **Effective address** load/store (`Cpu::loadSrc/loadDst/storeDst2/...`) ports
   `ea.c`; `storeDst2` writes back to the cached `eaAddr_` for modify-in-place ops.
-- **Instruction timing has two layers, and only their SUM is a real machine.**
-  `Cpu::timingFor` is a baseline table; DRAM (i.e. all of a stock BK's memory) costs up
-  to +4 more per instruction, because the 037 opens the CPU's window once per 4 CPU
-  ticks and an access preceded by an internal cycle (`-(R)` address calc, destination
-  register update, the modify of an RMW) misses it. That part is `Cpu::arbReadPenalty` /
-  `arbWritePenalty`, charged by `Board::stepCore` only when the access really hit DRAM.
-  It is NOT raster-dependent. Verified against Manwe's measurements on real hardware:
-  all 45 cells of `45com-lo` and 184/192 of the full MOV/CMP/ADD table (the other 8 are
-  self-contradictory in the source). Don't fold the penalty back into `timingFor`, and
-  don't read `--no-arb037` as "fast memory" — real expansion-board static RAM is faster
-  still and board-specific (`MOV R1,R2`: 12 in DRAM, 8 on СМК-512, 9 on AZ-БК), and we
-  do not model it. See `docs/slow-memory-timing.md`.
+- **Instruction timing has TWO tables, and `Cpu::timingFor` alone is neither machine.**
+  A stock BK's memory is all DRAM behind the 037, which opens the CPU's window once per
+  4 CPU ticks: an access preceded by an internal cycle (`-(R)` address calc, destination
+  register update, the modify of an RMW) misses it and costs +4. That is
+  `Cpu::arbReadPenalty`/`arbWritePenalty`, added by `Board::stepCore` when the access
+  really hit DRAM; it is NOT raster-dependent. СМК-512 RAM is not arbitrated and has its
+  own measured table, `Cpu::timingFast` (base 8, not multiples of 4); `Board` uses it for
+  accesses the board's RAM served (`smkRamAccess`) and, when an instruction mixes the two,
+  splits the difference by access count. ROM/IO stay on the baseline — nobody measured
+  them, and speeding up the monitor would change the boot. Verified against Manwe's
+  real-hardware measurements: 45/45 cells of `45com-lo`, 192/192 of the full MOV/CMP/ADD
+  matrix on both lines, 40/45 of `45com-hi` (the rest are mixed-memory cells, ±2).
+  Don't fold the penalty into `timingFor` and don't read `--no-arb037` as "fast memory".
+  See `docs/slow-memory-timing.md`.
 - **T-bit trace trap** (`Cpu::step`): while PSW bit 4 (`020`) is set, EVERY instruction
   traps through vector `014`; only the `RTT` instruction itself suppresses it (so `RTI`
   restoring T=1 traps immediately, `RTT` lets exactly one instruction through). This is
