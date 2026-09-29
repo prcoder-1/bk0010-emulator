@@ -27,6 +27,7 @@
 #include <QLineEdit>
 #include <QStringList>
 #include <QCloseEvent>
+#include <QShowEvent>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -35,7 +36,8 @@
 #include <QSignalBlocker>
 #include <cstdio>
 
-MainWindow::MainWindow(const QString& romDir, int smkOverride, QWidget* parent)
+MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverride,
+                       QWidget* parent)
     : QMainWindow(parent) {
     board_ = std::make_unique<bk::Board>();
     // Блок расширения памяти СМК-512: настройка запоминается между запусками,
@@ -57,6 +59,11 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, QWidget* parent)
     board_->reset();
 
     screen_ = new GlScreen(this);
+    // Пиксель БК не квадратный: настройка запоминается между запусками,
+    // ключ --aspect34/--no-aspect34 перекрывает её на один запуск.
+    const bool aspect34 = aspectOverride >= 0 ? aspectOverride > 0
+                                              : QSettings().value("aspect34", true).toBool();
+    screen_->setPixelAspect34(aspect34);
     setCentralWidget(screen_);
     // Keyboard goes to the main window; the GL widget must not steal focus.
     screen_->setFocusPolicy(Qt::NoFocus);
@@ -78,6 +85,13 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, QWidget* parent)
     QMenu* emu = menuBar()->addMenu("&Эмуляция");
     emu->addAction("&Сброс", this, &MainWindow::resetMachine, QKeySequence("Ctrl+R"));
     emu->addAction("Режим &цвет/ч-б", this, &MainWindow::toggleColorMode, QKeySequence("F10"));
+    // Пиксель БК шире, чем выше: кадр ложится на телевизионное поле 4:3. Включённый
+    // режим рисует пиксель цветного режима блоком 4x3 точек, выключённый — квадратом.
+    aspectAction_ = emu->addAction("Пиксели &3:4 (как на телевизоре)");
+    aspectAction_->setCheckable(true);
+    aspectAction_->setChecked(aspect34);
+    aspectAction_->setShortcut(QKeySequence("F11"));
+    connect(aspectAction_, &QAction::toggled, this, &MainWindow::setPixelAspect34);
     emu->addAction("&Пауза", this, [this]{ setSuspended(!suspended_); }, QKeySequence(Qt::Key_Pause));
     emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_); }, QKeySequence("F12"));
 
@@ -332,6 +346,17 @@ void MainWindow::resizeEvent(QResizeEvent* e) {
     if (overlay_) overlay_->setGeometry(screen_->rect());
 }
 
+// Разница между размером окна и его «начинкой» (меню, строка состояния) заранее
+// неизвестна, поэтому окно подгоняем один раз уже после показа: только так экран
+// получает ровно целый масштаб (1024×768 при пикселях 3:4).
+void MainWindow::showEvent(QShowEvent* e) {
+    QMainWindow::showEvent(e);
+    if (sizeFitted_) return;
+    sizeFitted_ = true;
+    const QSize want = screen_->preferredSize();
+    resize(size() + (want - screen_->size()));
+}
+
 // ---- Interactive-disassembler annotations (symbols + comments) --------------
 static QString octAddr(uint16_t a) { return QString("%1").arg(a, 6, 8, QChar('0')); }
 
@@ -518,6 +543,24 @@ void MainWindow::setSmk512(bool on) {
     resetMachine();
     status_->setText(on ? "СМК-512 подключён, машина перезапущена"
                         : "СМК-512 снят, машина перезапущена");
+}
+
+void MainWindow::setPixelAspect34(bool on) {
+    screen_->setPixelAspect34(on);
+    QSettings().setValue("aspect34", on);
+    if (aspectAction_ && aspectAction_->isChecked() != on) {
+        QSignalBlocker b(aspectAction_);
+        aspectAction_->setChecked(on);
+    }
+    status_->setText(on ? "Пиксели: 3:4, блок 4×3 точки (кадр 1024×768)"
+                        : "Пиксели: квадратные (кадр 512×256)");
+    // Кадру 3:4 нужно больше высоты, чем квадратному: если окно мельче целого кадра,
+    // масштаб перестал бы быть кратным — подрастим окно (сужать при обратном
+    // переключении не будем, место уже отдано пользователю).
+    const QSize want = screen_->preferredSize(), have = screen_->size();
+    if (want.width() > have.width() || want.height() > have.height())
+        resize(size() + QSize(qMax(0, want.width() - have.width()),
+                              qMax(0, want.height() - have.height())));
 }
 
 void MainWindow::toggleColorMode() {

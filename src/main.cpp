@@ -70,6 +70,10 @@ static bool g_scanline = false;   // --scanline: построчная отрис
 // --smk / --no-smk: блок расширения памяти СМК-512. -1 — ключ не задан (в GUI
 // берётся сохранённая настройка, в безголовом режиме и в MCP — выключено).
 static int  g_smk = -1;
+// --aspect34 / --no-aspect34: неквадратный пиксель БК (блок 4x3 точки хоста, кадр
+// 1024x768). -1 — ключ не задан, в GUI берётся сохранённая настройка (по умолчанию
+// ВКЛ). На безголовый режим не влияет: --shot пишет буфер как есть, 512x256.
+static int  g_aspect34 = -1;
 // --disk <образ>: вставить дискету в привод 0 и передать управление автозагрузчику
 // в ПЗУ контроллера. По умолчанию образ открывается ТОЛЬКО НА ЧТЕНИЕ — чужой
 // рабочий образ портить нельзя; --disk-rw разрешает запись обратно в файл.
@@ -412,6 +416,8 @@ int main(int argc, char** argv) {
         else if (args[i] == "--disk-rw") g_diskRw = true;
         else if (args[i] == "--smk") g_smk = 1;
         else if (args[i] == "--no-smk") g_smk = 0;
+        else if (args[i] == "--aspect34") g_aspect34 = 1;
+        else if (args[i] == "--no-aspect34") g_aspect34 = 0;
         else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
         else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
         else if (args[i] == "--type" && i + 1 < args.size()) { typeStr = args[++i]; headless = true; }
@@ -442,7 +448,7 @@ int main(int argc, char** argv) {
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
                            dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList);
 
-    MainWindow w(romDir, g_smk);
+    MainWindow w(romDir, g_smk, g_aspect34);
     w.setArbitration(g_arb037);
     w.show();
     if (!g_disk.isEmpty()) w.insertDiskAndBoot(g_disk, 0);

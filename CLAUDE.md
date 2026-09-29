@@ -41,6 +41,7 @@ Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--scanline` (per-scanline rendering — each line drawn with the scroll register value
 that was live when the beam crossed it, driven off the `Vp037` raster; OFF by default,
 see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
+GUI-only: `--aspect34` / `--no-aspect34` (non-square BK pixels, ON by default).
 Screenshots render from the CPU-side pixel buffer / `QWidget::grab`, so no GL
 context or display is needed.
 This is the primary way to verify visual changes; the GUI itself needs `xvfb-run`.
@@ -143,6 +144,17 @@ Key cross-cutting facts to know before editing the CPU or screen:
 - **Screen mapping** (`Screen::render`) ports `scr.c`: video RAM is 0040000, 256
   lines × 64 bytes. Color mode = 2 bits/pixel (256 wide, doubled to 512); mono = 1
   bit/pixel (512 wide), LSB first. Palette 0 = {black, blue, green, red}.
+- **The BK pixel is not square, and that lives only in `GlScreen`.** The core buffer is
+  always 512×256; by default (`F11` / `--no-aspect34` turn it off) the window draws one
+  colour-mode pixel as a **4×3** block of host pixels (texel = 2×3, frame = 1024×768 —
+  the 4:3 TV field the raster geometry implies). The scale is always an integer multiple
+  (`GlScreen::applyViewport`, recomputed in `paintGL` so the toggle works without a
+  resize; the letterbox remainder stays black); below one full frame it falls back to
+  aspect-preserving stretching. `MainWindow::showEvent` fits the window once so the GL
+  area is exactly `preferredSize()`, and turning 3:4 ON grows the window if it is too
+  short for a whole frame (turning it off never shrinks it back). Screenshots
+  (`--shot`, MCP `bk_screenshot`), OCR, memvis and the tests see the raw 512×256 buffer
+  and are deliberately untouched by the mode.
 - **Screen text / OCR** (`src/core/ScreenOcr.{h,cpp}`): the monitor ROM character
   generator is a flat table of 10-byte glyphs (one byte per scanline, LSB = leftmost
   pixel) at **0112036** = the glyph for code 020, covering codes 020..0177 then

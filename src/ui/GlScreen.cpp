@@ -1,4 +1,5 @@
 #include "GlScreen.h"
+#include <algorithm>
 #include <cstring>
 
 static const char* kVert = R"(#version 330 core
@@ -17,7 +18,8 @@ void main() { fragColor = texture(tex, vUv); }
 
 GlScreen::GlScreen(QWidget* parent) : QOpenGLWidget(parent) {
     std::memset(frame_, 0, sizeof(frame_));
-    setMinimumSize(512, 384);
+    // Минимум одинаков в обоих режимах, иначе переключение пропорций дёргало бы окно.
+    setMinimumSize(W, H);
 }
 
 GlScreen::~GlScreen() {
@@ -34,6 +36,17 @@ void GlScreen::setFrame(const uint32_t* pixels) {
     std::memcpy(frame_, pixels, sizeof(frame_));
     frameDirty_ = true;
     update();
+}
+
+void GlScreen::setPixelAspect34(bool on) {
+    if (aspect34_ == on) return;
+    aspect34_ = on;
+    updateGeometry();
+    update();
+}
+
+QSize GlScreen::preferredSize() const {
+    return aspect34_ ? QSize(BASE_W, BASE_H) : QSize(W * 2, H * 2);
 }
 
 void GlScreen::initializeGL() {
@@ -73,18 +86,28 @@ void GlScreen::initializeGL() {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_BGRA, GL_UNSIGNED_BYTE, frame_);
 }
 
-void GlScreen::resizeGL(int w, int h) {
-    // Keep a 4:3 aspect ratio, letterboxed inside the widget.
-    float dpr = devicePixelRatioF();
-    int pw = int(w * dpr), ph = int(h * dpr);
-    float targetAspect = 4.f / 3.f;
-    int vw = pw, vh = int(pw / targetAspect);
-    if (vh > ph) { vh = ph; vw = int(ph * targetAspect); }
+// Прямоугольник вывода внутри виджета. Считается на каждый paintGL, а не в resizeGL:
+// пропорции пикселей переключаются без изменения размера окна.
+void GlScreen::applyViewport() {
+    const float dpr = devicePixelRatioF();
+    const int pw = int(width() * dpr), ph = int(height() * dpr);
+    const int bw = aspect34_ ? BASE_W : W, bh = aspect34_ ? BASE_H : H;
+    int vw, vh;
+    const int k = std::min(pw / bw, ph / bh);
+    if (k >= 1) {
+        vw = bw * k; vh = bh * k;   // только целые кратности: блок ровно 4x3 (8x6, 12x9…)
+    } else {
+        // Виджет мельче одного кадра: вписываем с сохранением пропорций, кратность теряется.
+        const float a = float(bw) / float(bh);
+        vw = pw; vh = int(pw / a);
+        if (vh > ph) { vh = ph; vw = int(ph * a); }
+    }
     glViewport((pw - vw) / 2, (ph - vh) / 2, vw, vh);
 }
 
 void GlScreen::paintGL() {
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT);   // чистит весь виджет — поля остаются чёрными
+    applyViewport();
     if (frameDirty_) {
         glBindTexture(GL_TEXTURE_2D, texture_);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_BGRA, GL_UNSIGNED_BYTE, frame_);
