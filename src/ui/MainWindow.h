@@ -31,7 +31,9 @@ public:
     // smkOverride: 1 — включить блок СМК-512, 0 — выключить, -1 — взять
     // сохранённую настройку (ключ командной строки перекрывает её, но не
     // перезаписывает: настройка меняется только переключателем в меню).
-    explicit MainWindow(const QString& romDir, int smkOverride = -1, QWidget* parent = nullptr);
+    // aspectOverride — то же для неквадратных пикселей БК (--aspect34/--no-aspect34).
+    explicit MainWindow(const QString& romDir, int smkOverride = -1,
+                        int aspectOverride = -1, QWidget* parent = nullptr);
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
@@ -42,11 +44,13 @@ public:
     // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
     void setSmk512(bool on);            // подключить/снять плату и перезапустить машину
+    void setPixelAspect34(bool on);     // пиксель БК блоком 4x3 точек хоста
 
 protected:
     void keyPressEvent(QKeyEvent* e) override;
     void keyReleaseEvent(QKeyEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
+    void showEvent(QShowEvent* e) override;
     void closeEvent(QCloseEvent* e) override;   // auto-save annotations
 
 private slots:
@@ -101,6 +105,7 @@ private:
     QTimer* timer_ = nullptr;
     QLabel* status_ = nullptr;
     QAction* smkAction_ = nullptr;   // галка «СМК-512» — синхронизируется при загрузке снимка
+    QAction* aspectAction_ = nullptr;   // галка «Пиксели 3:4»
     QString lastBin_;
     QString lastDisk_;      // последний вставленный образ диска
     BkKeymap keymap_;
@@ -113,6 +118,7 @@ private:
     // stays low while any game key is held — polled by games like Digger.
     std::set<int> heldKeys_;
     bool colorMode_ = true;
+    bool sizeFitted_ = false;   // окно уже подогнано под целый масштаб экрана
     bool paused_ = false;       // Soft-ICE debugger overlay active
     bool suspended_ = false;    // emulation frozen via the Pause key
     int  phase_ = 0;            // emulation sub-slice within the current frame
