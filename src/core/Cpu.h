@@ -56,6 +56,9 @@ public:
     // timing by addressing mode, ignoring operand extension words). Used by the
     // profiler views to estimate per-instruction execution time.
     int instrTicks(uint16_t ir) const { return timingFor(ir); }
+    // То же для памяти, которую 037 не арбитрирует (страницы СМК-512, ПЗУ) —
+    // вторая таблица, снятая на реальном железе. См. Cpu::timingFast.
+    int instrTicksFast(uint16_t ir) const { return timingFast(ir); }
 
     // Добавка к timingFor за арбитраж КР1801ВП1-037, когда операнд лежит в ДОЗУ
     // (у БК-0010 это всё ОЗУ, adr < 0100000). Начисляется по факту обращения —
@@ -194,6 +197,7 @@ private:
     int op_reset();   int op_rtt();  int op_emt(); int op_trap();
 
     int timingFor(uint16_t ir) const;
+    int timingFast(uint16_t ir) const;
 };
 
 } // namespace bk

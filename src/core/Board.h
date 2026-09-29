@@ -329,6 +329,10 @@ private:
     void beginFrameRaster();              // верх кадра: доотрисовать и сбросить счётчик
     bool dramRead_ = false;        // текущая инструкция читала/писала ДОЗУ —
     bool dramWrite_ = false;       // по этому начисляется штраф арбитража 037
+    int  memAccess_ = 0;           // обменов у текущей инструкции, всего
+    int  dramAccess_ = 0;          // из них в ДОЗУ БК (арбитраж 037)
+    int  fastAccess_ = 0;          // из них в ОЗУ СМК-512 («быстрая» память)
+    bool smkRamAccess(uint16_t addr, bool write) const;   // обслужила ли обмен ДОЗУ платы
 
     int cpuFreqHz_ = 3000000;   // тактовая частота ЦП
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()
