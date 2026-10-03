@@ -92,16 +92,20 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `ea.c`; `storeDst2` writes back to the cached `eaAddr_` for modify-in-place ops.
 - **Instruction timing has TWO tables, and `Cpu::timingFor` alone is neither machine.**
   A stock BK's memory is all DRAM behind the 037, which opens the CPU's window once per
-  4 CPU ticks: an access preceded by an internal cycle (`-(R)` address calc, destination
-  register update, the modify of an RMW) misses it and costs +4. That is
-  `Cpu::arbReadPenalty`/`arbWritePenalty`, added by `Board::stepCore` when the access
-  really hit DRAM; it is NOT raster-dependent. СМК-512 RAM is not arbitrated and has its
+  4 CPU ticks: a source read right after the `-(R)` decrement misses it and costs +4.
+  That is `Cpu::arbReadPenalty`, added by `Board::stepCore` when a read really hit DRAM;
+  it is NOT raster-dependent. Writes never miss the window — in the phase we emulate:
+  the CPU-clock divider (D8:B) and the 037's `PC[0]` come up in one of TWO relations at
+  power-on (never reset), so a real BK gives one of two timing tables. We reproduce the
+  user's BK-0010-01, XOP2 with `MOV (R0),R1` = 28 (64/64 cells, the matrix is in
+  `cpu_tests`); everything else was checked against the VM1+037 RTL in that phase
+  (1074 cells). Manwe's `45com`/xlsx is a different machine (writes +4) — do not refit
+  to it. СМК-512 RAM is not arbitrated and has its
   own measured table, `Cpu::timingFast` (base 8, not multiples of 4); `Board` uses it for
   accesses the board's RAM served (`smkRamAccess`) and, when an instruction mixes the two,
   splits the difference by access count. ROM/IO stay on the baseline — nobody measured
-  them, and speeding up the monitor would change the boot. Verified against Manwe's
-  real-hardware measurements: 45/45 cells of `45com-lo`, 192/192 of the full MOV/CMP/ADD
-  matrix on both lines, 40/45 of `45com-hi` (the rest are mixed-memory cells, ±2).
+  them, and speeding up the monitor would change the boot. `timingFast` comes from
+  Manwe's СМК-512 measurements (40/45 of `45com-hi`, the rest are mixed-memory, ±2).
   Don't fold the penalty into `timingFor` and don't read `--no-arb037` as "fast memory".
   See `docs/slow-memory-timing.md`.
 - **T-bit trace trap** (`Cpu::step`): while PSW bit 4 (`020`) is set, EVERY instruction
