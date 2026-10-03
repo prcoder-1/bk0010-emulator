@@ -369,68 +369,115 @@ int main() {
         CHECK(!v.inActiveDisplay(), "Vp037: на границе кадра эмулятора луч в гашении");
     }
 
-    // ---- Арбитраж 037: штраф за промах мимо окна доступа к ДОЗУ ----
+    // ---- Модель шины ВМ1 + окно 037 (Vm1Timing.h, Board::busStep) ----
     {
-        // Эталон — тест XOP2 на реальной БК-0010-01 пользователя (MOV R0 -> R1 по всем
-        // режимам; строка — режим источника, столбец — режим приёмника). Фаза такта ЦП
-        // относительно 037 выбирается при включении питания; это та, где
-        // `MOV (R0),R1` = 28. Остальные числа ниже сняты с RTL-модели ВМ1 + 037 в той же
-        // фазе (см. docs/slow-memory-timing.md). Всё в ДОЗУ, как в тесте.
-        static const int XOP2_MOV[8][8] = {
-            {12, 32, 36, 44, 36, 44, 44, 56},
-            {28, 40, 40, 48, 40, 48, 48, 60},
-            {28, 40, 40, 48, 40, 48, 48, 60},
-            {40, 52, 52, 60, 52, 60, 60, 72},
-            {28, 44, 44, 52, 44, 52, 52, 64},
-            {40, 56, 56, 64, 56, 64, 64, 76},
-            {40, 52, 52, 60, 52, 60, 60, 72},
-            {52, 64, 64, 72, 64, 72, 72, 84},
-        };
-        auto ticks = [](uint16_t ir, uint16_t arg) {
-            Board b; b.reset();
-            b.memory().pokeWord(01000, ir);
-            b.memory().pokeWord(01002, arg);
-            b.memory().pokeWord(01004, arg);
-            b.cpu().reset(01000, 0340);
-            b.cpu().r[0] = 04000; b.cpu().r[1] = 04100;
-            uint64_t before = b.totalTicks();
-            b.stepInstruction();
-            return static_cast<int>(b.totalTicks() - before);
-        };
-        int bad = 0;
-        for (int sm = 0; sm < 8; ++sm)
-            for (int dm = 0; dm < 8; ++dm) {
-                uint16_t ir = 0010000 | (sm << 9) | (dm << 3) | 1;
-                int t = ticks(ir, 0);
-                if (t != XOP2_MOV[sm][dm]) {
-                    std::printf("  XOP2: MOV %o0,%o1 = %d, на железе %d\n", sm, dm, t, XOP2_MOV[sm][dm]);
-                    ++bad;
-                }
-                // MOVB на железе — те же числа.
-                if (ticks(ir | 0100000, 0) != XOP2_MOV[sm][dm]) ++bad;
+        // Эталоны — тесты XOP2/XOP2N на реальной БК-0010-01 пользователя (MOV R0 -> R1
+        // по всем режимам; строка — режим источника, столбец — режим приёмника) и
+        // RTL-модель ВМ1 + 037. Время команды зависит от соседей, поэтому меряем, как
+        // сами тесты: 48 копий подряд, средний такт на копию на установившемся участке.
+        // Память 010000..037777 заполнена указателем на 010000, R0 = 024000,
+        // R1 = 034000, R3 = 007000 (там RTS PC), вектор EMT — на RTI по 007100.
+        auto clone = [](std::initializer_list<uint16_t> unit, int phase) {
+            Board b; b.setCpuPhase(phase); b.reset();
+            Memory& m = b.memory();
+            for (uint16_t a = 010000; a < 040000; a += 2) m.pokeWord(a, 010000);
+            m.pokeWord(030, 07100); m.pokeWord(032, 0);
+            m.pokeWord(07000, 0000207); m.pokeWord(07100, 0000002);
+            const uint16_t start = 01000, stride = static_cast<uint16_t>(2 * unit.size());
+            uint16_t a = start;
+            for (int k = 0; k < 48; ++k) for (uint16_t w : unit) { m.pokeWord(a, w); a += 2; }
+            m.pokeWord(a, 0000777);
+            b.cpu().reset(start, 0340);
+            b.cpu().r[0] = 024000; b.cpu().r[1] = 034000; b.cpu().r[3] = 07000; b.cpu().r[6] = 01000;
+            uint64_t t0 = 0;
+            for (int i = 0; i < 20000; ++i) {
+                const uint16_t pc = b.cpu().r[7];
+                if (pc == start + 12 * stride) t0 = b.totalTicks();
+                if (pc == start + 44 * stride) return double(b.totalTicks() - t0) / 32;
+                b.stepInstruction();
             }
-        CHECK(bad == 0, "037: таблица XOP2 (MOV/MOVB, все режимы) совпадает с БК-0010-01");
-
-        struct Case { uint16_t ir, arg; int ticks; const char* name; };
-        static const Case cases[] = {
-            {0005010, 0,       28, "CLR (R0)"},        // запись окна не теряет
-            {0005020, 0,       28, "CLR (R0)+"},
-            {0005030, 0,       40, "CLR @(R0)+"},
-            {0005050, 0,       44, "CLR @-(R0)"},
-            {0005220, 0,       28, "INC (R0)+"},
-            {0005337, 0004000, 40, "DEC @#4000"},
-            {0061011, 0,       40, "ADD (R0),(R1)"},
-            {0064011, 0,       44, "ADD -(R0),(R1)"},  // декремент перед чтением: +4
-            {0024011, 0,       40, "CMP -(R0),(R1)"},
-            {0014001, 0,       28, "MOV -(R0),R1"},    // единственный обмен — терять нечего
-            {0005710, 0,       24, "TST (R0)"},
-            {0005740, 0,       28, "TST -(R0)"},
-            {0005337, 0177716, 40, "DEC @#177716"},    // регистр В-В: A15=1, не ДОЗУ
+            return -1.0;
+        };
+        // Слово MOV R0 -> R1 с режимами sm/dm и словами индекса (0) после него.
+        auto movUnit = [](uint16_t base, int sm, int dm, bool nop) {
+            std::vector<uint16_t> u{static_cast<uint16_t>(base | (sm << 9) | (dm << 3) | 1)};
+            if (sm >= 6) u.push_back(0);
+            if (dm >= 6) u.push_back(0);
+            if (nop) u.push_back(0000240);
+            return u;
+        };
+        auto cloneV = [&](const std::vector<uint16_t>& u, int phase) {
+            switch (u.size()) {
+            case 1: return clone({u[0]}, phase);
+            case 2: return clone({u[0], u[1]}, phase);
+            case 3: return clone({u[0], u[1], u[2]}, phase);
+            default: return clone({u[0], u[1], u[2], u[3]}, phase);
+            }
+        };
+        // XOP2, фаза 0 (по умолчанию) — первое фото; фаза 1 — второе.
+        static const int XOP2_P0[8][8] = {
+            {12, 32, 36, 44, 36, 44, 44, 56}, {28, 40, 40, 48, 40, 48, 48, 60},
+            {28, 40, 40, 48, 40, 48, 48, 60}, {40, 52, 52, 60, 52, 60, 60, 72},
+            {28, 44, 44, 52, 44, 52, 52, 64}, {40, 56, 56, 64, 56, 64, 64, 76},
+            {40, 52, 52, 60, 52, 60, 60, 72}, {52, 64, 64, 72, 64, 72, 72, 84},
+        };
+        static const int XOP2_P1[8][8] = {
+            {12, 32, 36, 44, 36, 44, 44, 52}, {24, 40, 40, 48, 40, 48, 48, 56},
+            {24, 40, 40, 48, 40, 48, 48, 56}, {32, 48, 48, 56, 48, 56, 56, 64},
+            {28, 40, 40, 48, 40, 48, 48, 56}, {36, 48, 48, 56, 48, 56, 56, 64},
+            {32, 48, 48, 56, 48, 56, 56, 64}, {40, 56, 56, 64, 56, 64, 64, 72},
+        };
+        // XOP2N: после каждой копии — NOP (фаза 0, фото).
+        static const int XOP2N_P0[8][8] = {
+            {24, 48, 48, 56, 48, 56, 56, 68}, {40, 56, 56, 64, 56, 64, 64, 76},
+            {40, 56, 56, 64, 56, 64, 64, 76}, {52, 68, 68, 76, 68, 76, 76, 88},
+            {40, 56, 56, 64, 56, 64, 64, 76}, {52, 68, 68, 76, 68, 76, 76, 88},
+            {52, 68, 68, 76, 68, 76, 76, 88}, {64, 80, 80, 88, 80, 88, 88, 100},
+        };
+        struct Table { const int (*t)[8]; uint16_t base; bool nop; int phase; const char* name; };
+        const Table tables[] = {
+            {XOP2_P0,  0010000, false, 0, "037: XOP2 MOV, фаза 0 — первое фото БК-0010-01"},
+            {XOP2_P0,  0110000, false, 0, "037: XOP2 MOVB, фаза 0 — те же числа"},
+            {XOP2_P1,  0010000, false, 1, "037: XOP2 MOV, фаза 1 — второе фото"},
+            {XOP2N_P0, 0010000, true,  0, "037: XOP2N (MOV + NOP), фаза 0 — фото"},
+        };
+        for (const Table& tb : tables) {
+            int bad = 0;
+            for (int sm = 0; sm < 8; ++sm)
+                for (int dm = 0; dm < 8; ++dm) {
+                    const double t = cloneV(movUnit(tb.base, sm, dm, tb.nop), tb.phase);
+                    if (t != tb.t[sm][dm]) {
+                        if (bad < 4) std::printf("  %s: %o0,%o1 = %g, на железе %d\n", tb.name, sm, dm, t, tb.t[sm][dm]);
+                        ++bad;
+                    }
+                }
+            CHECK(bad == 0, tb.name);
+        }
+        // Остальное — по RTL-модели в фазе 0.
+        struct Case { std::initializer_list<uint16_t> unit; double ticks; const char* name; };
+        const Case cases[] = {
+            {{0005011},                 28, "CLR (R1)"},       // запись окно не теряет
+            {{0005221},                 28, "INC (R1)+"},
+            {{0005337, 010000},         40, "DEC @#10000"},
+            {{0005051},                 44, "CLR @-(R1)"},
+            {{0064011},                 44, "ADD -(R0),(R1)"},
+            {{0024011},                 40, "CMP -(R0),(R1)"},
+            {{0014001},                 28, "MOV -(R0),R1"},
+            {{0005711},                 24, "TST (R1)"},
+            {{0005741},                 28, "TST -(R1)"},
+            {{0074011},                 32, "XOR R0,(R1)"},
+            {{0000311},                 28, "SWAB (R1)"},
+            {{0077400 | 000},           20, "SOB R4,.+2"},
+            {{0000400},                 16, "BR .+2"},
+            {{0000240},                 12, "NOP"},
+            {{0004713},                 64, "JSR PC,(R3) + RTS PC"},
+            {{0104000},                104, "EMT + RTI"},
+            {{0005337, 0177716},        40, "DEC @#177716 (В-В, не ДОЗУ — по таблице)"},
         };
         for (const Case& c : cases) {
             char msg[96];
-            std::snprintf(msg, sizeof msg, "037: %s — %d тактов в ДОЗУ", c.name, c.ticks);
-            CHECK(ticks(c.ir, c.arg) == c.ticks, msg);
+            std::snprintf(msg, sizeof msg, "037: %s — %g тактов в ДОЗУ", c.name, c.ticks);
+            CHECK(clone(c.unit, 0) == c.ticks, msg);
         }
     }
 

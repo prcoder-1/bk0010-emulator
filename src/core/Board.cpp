@@ -199,7 +199,17 @@ int Board::stepCore() {
     memAccess_ = dramAccess_ = fastAccess_ = 0;
     int t = cpu_.step();
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
-    if (arb037_) {
+    Vm1Sched sched;
+    const bool known = arb037_ && vm1Schedule(ir, sched);
+    // Потактовая модель шины — когда ВСЕ обмены команды пришлись на ДОЗУ: расписание
+    // ВМ1 сняли на медленной памяти, где ожидание окна прячет внутреннюю работу
+    // микрокода; на быстрой памяти (ПЗУ, СМК) паузы другие, там остаётся таблица.
+    // Лишние обмены сверх расписания — ловушка (T-бит и т.п.), её тоже считает таблица.
+    if (known && memAccess_ > 0 && dramAccess_ == memAccess_ && memAccess_ <= 1 + sched.n
+        && !cpu_.halted() && !cpu_.waiting()) {
+        t = busStep(sched);
+    } else if (arb037_) {
+        prevEarly_ = known && sched.early;
         if (dramRead_) t += Cpu::arbReadPenalty(ir);
         if (fastAccess_ > 0) {
             // Хотя бы один обмен ушёл в ОЗУ СМК-512 — у него своя таблица. Все
@@ -239,7 +249,7 @@ int Board::stepCore() {
     // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
     if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_) {
         const int it = tryDeliverInterrupts();
-        if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; }
+        if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; prevEarly_ = false; }
     }
     if (trace_.enabled()) {
         uint16_t pcNow = cpu_.pc();
@@ -248,6 +258,30 @@ int Board::stepCore() {
         trace_.profileStep(mem_.peekWord(pcBefore), pcNow, cpu_.sp(), t); // flame-graph CCT
     }
     return t;
+}
+
+// Время команды по модели шины ВМ1 + окна 037 (Vm1Timing.h). Единица — четверть
+// такта (83 нс, полупериод CLKIN): окна 037 решаются на полупериодах CLKIN. Запрос
+// получает окно, если пришёл не позже чем за 5 четвертей до решающего фронта (это
+// задержка запроса в кремнии, в RTL её нет); ответ ЦП видит на ближайшем своём такте
+// через 11 четвертей после решения. Решения идут раз в 16 четвертей (4 такта) со
+// смещением 3 или 1 по модулю 4 — это и есть фаза включения питания.
+int Board::busStep(const Vm1Sched& s) {
+    const int64_t base = static_cast<int64_t>(totalTicks_) * 4;
+    const int64_t phi = cpuPhase_ ? 1 : 3;
+    auto done = [&](int64_t q) {
+        int64_t d = q + 5;
+        d += ((phi - d) % 16 + 16) % 16;
+        return (d + 11 + 3) & ~int64_t(3);
+    };
+    int64_t c = done(base + busFrac_);                     // выборка
+    int64_t ref = c + (prevEarly_ ? 8 : 4);                // старт первой микрокоманды
+    for (int i = 0; i < s.n; ++i) ref = done(ref + 2 * s.op[i].gap);
+    const int64_t next = ref + 2 * s.tail;
+    prevEarly_ = s.early;
+    const int64_t t = (next >> 2) - static_cast<int64_t>(totalTicks_);
+    busFrac_ = static_cast<int>(next & 3);
+    return static_cast<int>(t);
 }
 
 // Evaluate a breakpoint's optional condition (unconditional breakpoints allow).
@@ -328,6 +362,7 @@ void Board::reset() {
     timerCount_ = 0177777;
     timerLimit_ = 0177777;
     totalTicks_ = 0;
+    busFrac_ = 0; prevEarly_ = false;
     timerStart_ = 0;
     timerPeriod_ = TIMER_BASE_PERIOD;
     frameTicks_.clear();
@@ -564,6 +599,7 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     if (timerCsr_ & TIM_DIV16) timerPeriod_ *= 16;
     if (timerCsr_ & TIM_DIV4)  timerPeriod_ *= 4;
     timerStart_ = totalTicks_;
+    busFrac_ = 0; prevEarly_ = false;
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
     vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре

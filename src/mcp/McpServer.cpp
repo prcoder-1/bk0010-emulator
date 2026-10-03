@@ -258,7 +258,10 @@ QJsonArray McpServer::toolDefs() const {
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
                 {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
                 {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
-    t.append(tool("bk_reset", "Power-on reset the machine.", schema({})));
+    t.append(tool("bk_reset", "Power-on reset the machine. `cpu_phase` (0/1) picks the CPU-clock phase "
+                  "relative to the 037 DRAM window that a real BK draws at random on power-up: 0 (default) "
+                  "gives MOV (R0),R1 = 28 ticks, 1 gives 24.",
+        schema({{"cpu_phase", P("integer", "CPU clock phase vs the 037 window, 0 or 1 (default: keep)")}})));
     t.append(tool("bk_run", "Run frames (with 50 Hz interrupts) until a breakpoint, HALT, or the frame "
                   "limit. `input` scripts keyboard/joystick over time, so a whole control sequence "
                   "is reproducible in ONE call — e.g. "
@@ -807,9 +810,10 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             .arg(regsText()));
     }
     if (name == "bk_reset") {
+        if (args.contains("cpu_phase")) board_.setCpuPhase(args.value("cpu_phase").toInt());
         board_.reset();
         cyrState_ = false;
-        return textContent("Reset.\n" + regsText());
+        return textContent(QString("Reset (CPU phase %1).\n").arg(board_.cpuPhase()) + regsText());
     }
     if (name == "bk_run") {
         const int maxFrames = args.value("max_frames").toInt(200);

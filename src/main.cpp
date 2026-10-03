@@ -66,6 +66,9 @@ static int runKeyTest() {
 // и команда, промахнувшаяся мимо окна, теряет 4 такта. По умолчанию ВКЛ; ключ
 // --no-arb037 возвращает «идеальную» память (тайминг статического ОЗУ).
 static bool g_arb037 = true;
+// --cpu-phase 0|1: фаза такта ЦП относительно окна 037 — на железе выпадает при
+// включении питания; 0 (по умолчанию) — `MOV (R0),R1` = 28 тактов, 1 — 24.
+static int  g_cpuPhase = 0;
 static bool g_scanline = false;   // --scanline: построчная отрисовка экрана
 // --smk / --no-smk: блок расширения памяти СМК-512. -1 — ключ не задан (в GUI
 // берётся сохранённая настройка, в безголовом режиме и в MCP — выключено).
@@ -99,6 +102,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     }
     bk::Board board;
     board.setArbitration(g_arb037);
+    board.setCpuPhase(g_cpuPhase);
     board.setScanlineRender(g_scanline);
     board.setSmk512(g_smk > 0);
     if (!board.loadRoms(romDir.toStdString())) {
@@ -406,6 +410,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--mono") color = false;
         else if (args[i] == "--scanline") g_scanline = true;
         else if (args[i] == "--no-arb037") g_arb037 = false;
+        else if (args[i] == "--cpu-phase" && i + 1 < args.size()) g_cpuPhase = args[++i].toInt() & 1;
         else if (args[i] == "--disk" && i + 1 < args.size()) g_disk = args[++i];
         else if (args[i] == "--disk-b" && i + 1 < args.size()) g_diskB = args[++i];
         else if (args[i] == "--disk-sides" && i + 1 < args.size()) g_diskSides = args[++i].toInt();
@@ -450,6 +455,7 @@ int main(int argc, char** argv) {
 
     MainWindow w(romDir, g_smk, g_aspect34);
     w.setArbitration(g_arb037);
+    w.setCpuPhase(g_cpuPhase);
     w.show();
     if (!g_disk.isEmpty()) w.insertDiskAndBoot(g_disk, 0);
     else if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);

@@ -28,6 +28,7 @@ add_library(bkcore STATIC
     src/core/Fdd.cpp
     src/core/Kngmd.cpp
     src/core/Board.cpp
+    src/core/Vm1Timing.cpp
 )
 target_include_directories(bkcore PUBLIC src/core)
 

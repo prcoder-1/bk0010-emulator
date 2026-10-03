@@ -43,6 +43,7 @@ public:
 
     // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
+    void setCpuPhase(int p) { if (board_) board_->setCpuPhase(p); }
     void setSmk512(bool on);            // подключить/снять плату и перезапустить машину
     void setPixelAspect34(bool on);     // пиксель БК блоком 4x3 точек хоста
 
