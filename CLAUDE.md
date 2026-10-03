@@ -36,7 +36,8 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 
 Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
-`--no-arb037` (disable the КР1801ВП1-037 DRAM-window penalty, on by default),
+`--no-arb037` (disable the КР1801ВП1-037 DRAM-window model, on by default),
+`--cpu-phase 0|1` (CPU clock phase vs the 037 window, see below),
 `--smk` / `--no-smk` (СМК-512 memory-expansion board, off by default),
 `--scanline` (per-scanline rendering — each line drawn with the scroll register value
 that was live when the beam crossed it, driven off the `Vp037` raster; OFF by default,
@@ -90,24 +91,23 @@ Key cross-cutting facts to know before editing the CPU or screen:
   change flag logic, cross-check against `single.c`/`double.c`/`branch.c` there.
 - **Effective address** load/store (`Cpu::loadSrc/loadDst/storeDst2/...`) ports
   `ea.c`; `storeDst2` writes back to the cached `eaAddr_` for modify-in-place ops.
-- **Instruction timing has TWO tables, and `Cpu::timingFor` alone is neither machine.**
-  A stock BK's memory is all DRAM behind the 037, which opens the CPU's window once per
-  4 CPU ticks: a source read right after the `-(R)` decrement misses it and costs +4.
-  That is `Cpu::arbReadPenalty`, added by `Board::stepCore` when a read really hit DRAM;
-  it is NOT raster-dependent. Writes never miss the window — in the phase we emulate:
-  the CPU-clock divider (D8:B) and the 037's `PC[0]` come up in one of TWO relations at
-  power-on (never reset), so a real BK gives one of two timing tables. We reproduce the
-  user's BK-0010-01, XOP2 with `MOV (R0),R1` = 28 (64/64 cells, the matrix is in
-  `cpu_tests`); everything else was checked against the VM1+037 RTL in that phase
-  (1074 cells). Manwe's `45com`/xlsx is a different machine (writes +4) — do not refit
-  to it. СМК-512 RAM is not arbitrated and has its
-  own measured table, `Cpu::timingFast` (base 8, not multiples of 4); `Board` uses it for
-  accesses the board's RAM served (`smkRamAccess`) and, when an instruction mixes the two,
-  splits the difference by access count. ROM/IO stay on the baseline — nobody measured
-  them, and speeding up the monitor would change the boot. `timingFast` comes from
-  Manwe's СМК-512 measurements (40/45 of `45com-hi`, the rest are mixed-memory, ±2).
-  Don't fold the penalty into `timingFor` and don't read `--no-arb037` as "fast memory".
-  See `docs/slow-memory-timing.md`.
+- **Instruction timing is a bus model, not a table, for DRAM.** When every access of an
+  instruction hits BK DRAM (A15=0), `Board::busStep` times it from the VM1 bus schedule
+  (`src/core/Vm1Timing.cpp`: per-access pauses in half-ticks, measured on the VM1+037 RTL)
+  and the 037 window (a request gets the first 037 decision >= q+2.5 half-ticks; decisions
+  every 4 CPU ticks; the access ends on the next CPU tick >= decision+5.5). Two things
+  carry over between instructions and MUST stay: the fractional bus clock (`busFrac_`) and
+  whether the previous instruction fetched this one by "early prefetch" (`prevEarly_`:
+  NOP/CCC/SCC and every ALU op with a register destination) — the next instruction then
+  starts half a tick later, which is exactly why XOP2N (MOV+NOP) is not XOP2 + 12. The
+  window phase is `setCpuPhase(0|1)` / `--cpu-phase`: a real BK draws it at power-on
+  (D8:B and the 037 `PC[2:0]` are never reset) and gets one of two tables; 0 = the user's
+  machine (`MOV (R0),R1` = 28). Verified: XOP2 both phases, XOP2N, 2000/2001 RTL programs
+  (matrices in `cpu_tests`). The pauses are only valid on slow memory: any access to
+  ROM/IO/СМК RAM, and WAIT/HALT/RESET/MARK/traps, falls back to the old tables —
+  `timingFor` + `arbReadPenalty`, and `timingFast` for СМК-512 (Manwe's measurements,
+  mixed instructions split by access count). Manwe's `45com`/xlsx is a different machine
+  (writes +4) — do not refit to it. See `docs/slow-memory-timing.md`.
 - **T-bit trace trap** (`Cpu::step`): while PSW bit 4 (`020`) is set, EVERY instruction
   traps through vector `014`; only the `RTT` instruction itself suppresses it (so `RTI`
   restoring T=1 traps immediately, `RTT` lets exactly one instruction through). This is

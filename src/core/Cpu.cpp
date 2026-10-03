@@ -671,9 +671,9 @@ void Cpu::buildTable() {
 int Cpu::timingFor(uint16_t ir) const {
     // Timings measured on a real БК-0010.01 (Manwe's "clock cycles meter" + the XOP
     // timing test suite). This table is a BASELINE, not a machine: only
-    // `timingFor + arbReadPenalty` reproduces a real stock BK (all memory is DRAM
-    // behind the 037), and that sum is verified cell by cell against XOP2 on the
-    // user's BK-0010-01 and the VM1+037 RTL model. Real fast memory (an expansion board's static RAM) is
+    // DRAM-only instructions are timed by the bus model (Vm1Timing.h, Board::busStep);
+    // `timingFor + arbReadPenalty` is the fallback for instructions that also touch
+    // ROM/IO/expansion RAM. Real fast memory (an expansion board's static RAM) is
     // much faster still and board-specific — `MOV R1,R2` is 12 in DRAM, 8 on a
     // СМК-512 and 9 on an AZ-БК — and we do not model it; see docs/slow-memory-timing.md.
     //
@@ -815,14 +815,11 @@ int Cpu::timingFast(uint16_t ir) const {
 // (свободнобегущий счётчик PC[2:0] в 037, см. Vp037.h), поэтому потеря окна стоит
 // ровно +4 — отсюда и кратность четырём всей таблицы таймингов.
 //
-// Сколько обменов теряют окно, зависит от фазы такта ЦП относительно PC[0]: делитель
-// D8:B и счётчик 037 ничем не сбрасываются, и при включении питания встают в одно из
-// двух взаимных положений. Мы воспроизводим одно из них — БК-0010-01 пользователя,
-// тест XOP2 (MOV по всем режимам, `MOV (R0),R1` = 28): 64 из 64 ячеек. Остальные
-// команды сверены с RTL-моделью ВМ1 + 037 в той же фазе (1074 ячейки, все сошлись).
-// В этой фазе запись окна не теряет никогда; таблица Manwe (`45com`, xlsx) снята на
-// машине, где записи дороже на 4 такта, — её не воспроизводим.
-// Подробности — docs/slow-memory-timing.md.
+// Команды, все обмены которых идут в ДОЗУ, Board считает по потактовой модели шины
+// (Vm1Timing.h, Board::busStep) — она сверена с тестами XOP2/XOP2N на реальной
+// БК-0010-01 и с RTL-моделью ВМ1 + 037. Эта таблица со штрафом остаётся для команд,
+// часть обменов которых ушла в ПЗУ, В-В или ОЗУ СМК. Подробности —
+// docs/slow-memory-timing.md.
 //
 // Штраф начисляет Board, когда чтение действительно попало в ДОЗУ.
 
