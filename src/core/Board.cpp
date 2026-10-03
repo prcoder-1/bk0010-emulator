@@ -166,7 +166,7 @@ Board::Board() {
         // не арбитрирует, но замеров для него нет, поэтому оно остаётся на базовой
         // линии — ни штрафа, ни ускорения.
         ++memAccess_;
-        if (a < 0100000) { ++dramAccess_; (w ? dramWrite_ : dramRead_) = true; }
+        if (a < 0100000) { ++dramAccess_; if (!w) dramRead_ = true; }
         else if (smkOn_ && smkRamAccess(a, w)) ++fastAccess_;
         // Журналу НГМД нужен адрес команды, которая лезет в его регистры.
         if (diskOn_ && (a == 0177130 || a == 0177132)) kngmd_.fdd().setContextPc(curInstrPc_);
@@ -195,13 +195,12 @@ int Board::stepCore() {
     trace_.exec(pcBefore);
     watchArmed_ = false;
     uint16_t ir = arb037_ ? mem_.peekWord(pcBefore) : 0;
-    dramRead_ = dramWrite_ = false;
+    dramRead_ = false;
     memAccess_ = dramAccess_ = fastAccess_ = 0;
     int t = cpu_.step();
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
     if (arb037_) {
-        if (dramRead_)  t += Cpu::arbReadPenalty(ir);
-        if (dramWrite_) t += Cpu::arbWritePenalty(ir);
+        if (dramRead_) t += Cpu::arbReadPenalty(ir);
         if (fastAccess_ > 0) {
             // Хотя бы один обмен ушёл в ОЗУ СМК-512 — у него своя таблица. Все
             // обмены быстрые (код и данные на плате) — берём её целиком; часть —
@@ -341,7 +340,7 @@ void Board::reset() {
     screen_.setScroll(scroll_);
     vp037_.reset();
     vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
-    dramRead_ = dramWrite_ = false;
+    dramRead_ = false;
     if (smkOn_) smk_.powerOn();        // включение питания: ДОЗУ чисто, режим SYS
     trace_.reset();
 }
@@ -568,7 +567,7 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
     vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
-    dramRead_ = dramWrite_ = false;
+    dramRead_ = false;
     return true;
 }
 
