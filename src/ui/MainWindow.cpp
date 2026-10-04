@@ -34,6 +34,7 @@
 #include <QJsonArray>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QProxyStyle>
 #include <cstdio>
 
 MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverride,
@@ -74,6 +75,16 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     overlay_->hide();
 
     // --- Menus ---
+    // Alt — это АР2 БК. Одиночное нажатие Alt не должно уводить фокус в меню.
+    struct NoAltNavStyle : QProxyStyle {
+        int styleHint(StyleHint h, const QStyleOption* o, const QWidget* w,
+                      QStyleHintReturn* r) const override {
+            return h == SH_MenuBar_AltKeyNavigation ? 0 : QProxyStyle::styleHint(h, o, w, r);
+        }
+    };
+    auto* menuStyle = new NoAltNavStyle;
+    menuStyle->setParent(menuBar());
+    menuBar()->setStyle(menuStyle);
     QMenu* file = menuBar()->addMenu("&Файл");
     file->addAction("&Загрузить .BIN…", this, &MainWindow::openBin, QKeySequence::Open);
     file->addAction("Вставить образ &диска… (привод A)", this,
@@ -568,6 +579,16 @@ void MainWindow::toggleColorMode() {
     status_->setText(colorMode_ ? "Режим: 256×256 цвет" : "Режим: 512×256 ч/б");
 }
 
+// Alt+клавиша при работающей БК — это АР2, а не мнемоника меню («&Файл»):
+// приняв ShortcutOverride, отдаём нажатие в keyPressEvent.
+bool MainWindow::event(QEvent* e) {
+    if (e->type() == QEvent::ShortcutOverride && !paused_ && !suspended_) {
+        auto* k = static_cast<QKeyEvent*>(e);
+        if (k->modifiers() & Qt::AltModifier) { k->accept(); return true; }
+    }
+    return QMainWindow::event(e);
+}
+
 void MainWindow::keyPressEvent(QKeyEvent* e) {
     // F12 toggles the debugger regardless of state.
     if (e->key() == Qt::Key_F12) { setPaused(!paused_); e->accept(); return; }
@@ -580,7 +601,8 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
 
     // Track the physical key-down state (ignoring auto-repeat) so 0177716 bit 6
     // stays low while a key is held — games poll it to detect input.
-    if (!paused_ && !e->isAutoRepeat()) {
+    // АР2 (Alt) вне матрицы, сама по себе нажатия не даёт.
+    if (!paused_ && !e->isAutoRepeat() && e->key() != Qt::Key_Alt) {
         heldKeys_.insert(e->key());
         board_->setKeyHeld(true);
     }

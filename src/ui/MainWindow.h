@@ -48,6 +48,7 @@ public:
     void setPixelAspect34(bool on);     // пиксель БК блоком 4x3 точек хоста
 
 protected:
+    bool event(QEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
     void keyReleaseEvent(QKeyEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;

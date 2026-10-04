@@ -303,6 +303,9 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_key", "Press a BK-0010 key. Prefer `key` with a NAME (enter, space, left, right, "
                   "up, down, backspace, delete, f1..f6, рус, лат) or a single character — including "
                   "Cyrillic, for which the РУС/ЛАТ switch is inserted automatically. "
+                  "АР2 combos: \"ар2+X\" (or ar2+/alt+), e.g. \"ар2+;\" toggles 32/64 columns, "
+                  "\"ар2+!\" red, \"ар2+\\\"\" green (АР2/●/1, АР2/●/2) — the key code with bit 0200, "
+                  "delivered via vector 0274. "
                   "Games that poll the physical key-held bit (0177716, e.g. Digger's movement) only "
                   "register input WHILE HELD: use frames=N (press, run N frames, release) to drive "
                   "them in one call, or hold=true plus a separate bk_run.",
@@ -648,7 +651,15 @@ bool McpServer::resolveKey(const QJsonObject& args, std::vector<uint16_t>& codes
     if (args.contains("key")) {
         const QString ks = args.value("key").toString();
         if (ks.isEmpty()) { err = "пустое имя клавиши"; return false; }
-        const uint16_t c = bk::bkKeyByName(ks.toStdString());
+        const std::string kstd = ks.toStdString();
+        uint16_t c = bk::bkKeyByName(kstd);
+        if (c == bk::BK_KEY_NONE) c = bk::bkAr2Key(kstd);
+        const std::string kn = bk::normName(kstd);
+        if (kn == "ар2" || kn == "ar2" || kn == "ap2" || kn == "alt") {
+            err = "АР2 — модификатор без своего кода: передайте её вместе с клавишей, "
+                  "например \"ар2+;\" (32/64 символа)";
+            return false;
+        }
         if (c != bk::BK_KEY_NONE) {
             codes.push_back(c);
         } else if (ks.size() == 1) {
@@ -658,7 +669,7 @@ bool McpServer::resolveKey(const QJsonObject& args, std::vector<uint16_t>& codes
         } else {
             err = "неизвестная клавиша '" + ks + "' (имя из списка: enter, space, left, right, "
                   "up, down, backspace, delete, home, tab, f1..f6, повт, кт, рус, лат — "
-                  "либо ОДИН символ; для строки используйте bk_type)";
+                  "либо ОДИН символ, с АР2 — \"ар2+клавиша\"; для строки используйте bk_type)";
             return false;
         }
         present = true;
