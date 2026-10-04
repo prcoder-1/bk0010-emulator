@@ -1704,6 +1704,59 @@ int main() {
         }
     }
 
+    // ---- Закрытие регистров: зеркало ПЗУ СМК в режиме SYS --------------------
+    // Плата выставляет ПЗУ и на страницу регистров, регистры БК тоже отвечают —
+    // читается монтажное ИЛИ. Кроме «дыры» 0177660..0177664 и периферийного блока
+    // ВМ1 0177700..0177712, который процессор читает изнутри.
+    {
+        Board b;
+        if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            std::printf("SKIP: ПЗУ не найдено — тесты закрытия регистров пропущены\n");
+        } else {
+            b.setSmk512(true);
+            b.setDiskRom("smk512.rom");
+            const std::string img = (std::filesystem::temp_directory_path()
+                                     / "bk-sysreg-test.img").string();
+            { std::vector<uint8_t> z(2 * 2 * bk::Fdd::TRACK_BYTES, 0);
+              std::FILE* f = std::fopen(img.c_str(), "wb");
+              if (f) { std::fwrite(z.data(), 1, z.size(), f); std::fclose(f); } }
+            CHECK(b.attachDisk(0, img), "SYS: диск с прошивкой СМК вставляется");
+            b.reset();
+            CHECK(b.smk().mode() == bk::Smk512::SYS && b.kngmd().romStart() != 0,
+                  "SYS: плата в режиме SYS, прошивка перехватывает старт");
+            auto rom = [&](uint16_t a) { uint16_t v = 0; b.kngmd().romMirror(a, v); return v; };
+
+            uint16_t expect = rom(0177716) | b.peekReg(0177716);
+            CHECK(rom(0177716) != 0 && b.memory().readWord(0177716) == expect,
+                  "SYS: 0177716 = ПЗУ | системный регистр");
+            expect = rom(0177714) | b.peekReg(0177714);
+            CHECK(b.memory().readByte(0177715) == (expect >> 8)
+                  && b.memory().readByte(0177714) == (expect & 0377),
+                  "SYS: 0177714 побайтно = ПЗУ | порт");
+            CHECK(b.memory().readWord(0177660) == b.peekReg(0177660)
+                  && b.memory().readWord(0177662) == b.peekReg(0177662)
+                  && b.memory().readWord(0177664) == b.peekReg(0177664),
+                  "SYS: «дыра» 0177660..0177664 — только регистры БК");
+            b.memory().writeWord(0177706, 0);
+            CHECK(rom(0177706) != 0 && b.memory().readWord(0177706) == 0,
+                  "SYS: 0177706 (внутри ВМ1) зеркалом не закрыт");
+            b.memory().writeWord(0177664, 01230);
+            CHECK(b.peekReg(0177664) == 01230, "SYS: запись в регистр доходит до БК");
+
+            // То же в режиме All: на странице регистров сегмент 3 «только чтение».
+            b.memory().writeWord(0177130, bk::Smk512::STROBE);
+            b.memory().writeWord(0177130, bk::Smk512::modeCode(bk::Smk512::ALL));
+            b.memory().writeWord(0177130, 0);
+            CHECK(b.smk().mode() == bk::Smk512::ALL, "All: режим защёлкнут");
+            b.smk().ram()[3 * bk::Smk512::SEG_BYTES + 07715] = 0200;   // старший байт 0177714
+            b.smk().ram()[3 * bk::Smk512::SEG_BYTES + 07706] = 0123;
+            CHECK(b.memory().readWord(0177714) == (0100000 | b.peekReg(0177714)),
+                  "All: 0177714 = ОЗУ | порт");
+            CHECK(b.memory().readWord(0177706) == 0, "All: 0177706 (внутри ВМ1) ОЗУ не закрыт");
+            std::filesystem::remove(img);
+        }
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;
 }
