@@ -40,32 +40,40 @@ bool Memory::loadRomFile(uint16_t addr, const char* path, size_t expectedLen) {
 // Порядок опроса везде один: контроллер МПИ (если он занял этот адрес) — потом
 // внутренние регистры БК — потом собственная память. Контроллер спрашивается
 // только при A15 = 1: его дешифратор ниже 0100000 не включается вовсе.
-
-uint16_t Memory::readWord(uint16_t addr) {
-    addr &= ~1; // word access ignores the low address bit
-    if (hook_) hook_(addr, false, false);
-    if (mpi_ && addr >= ADDR_RAM_END) {
+//
+// На странице регистров плата регистры БК не отключает: отвечают оба, и при
+// конфликте «читается 1» (БК-docs §17.2) — монтажное ИЛИ. Так плата «закрывает»
+// регистры в режиме SYS (зеркало ПЗУ) и в All (сегмент 3). Исключение —
+// периферийный блок ВМ1 0177700..0177712: его процессор читает изнутри, мимо
+// выводов AD (ad_rd = 0 в vm1_qbus.v), так что плата там ни на что не влияет.
+uint16_t Memory::busRead(uint16_t addr) {
+    const bool io = addr >= ADDR_IO_PAGE && io_;
+    if (mpi_ && addr >= ADDR_RAM_END && !(addr >= 0177700 && addr <= 0177712)) {
         uint16_t v = 0;
-        if (mpi_->mpiRead(addr, v)) return v;
+        if (mpi_->mpiRead(addr, v)) {
+            uint16_t r = 0;
+            if (io && io_->ioRead(addr, r)) v |= r;
+            return v;
+        }
     }
-    if (addr >= ADDR_IO_PAGE && io_) {
+    if (io) {
         uint16_t v = 0;
         if (io_->ioRead(addr, v)) return v;
     }
     return static_cast<uint16_t>(mem_[addr] | (mem_[addr + 1] << 8));
 }
 
+uint16_t Memory::readWord(uint16_t addr) {
+    addr &= ~1; // word access ignores the low address bit
+    if (hook_) hook_(addr, false, false);
+    return busRead(addr);
+}
+
 uint8_t Memory::readByte(uint16_t addr) {
     if (hook_) hook_(addr, false, true);
-    if (mpi_ && addr >= ADDR_RAM_END) {
-        uint16_t v = 0;
-        if (mpi_->mpiRead(addr & ~1, v)) return (addr & 1) ? (v >> 8) : (v & 0xff);
-    }
-    if (addr >= ADDR_IO_PAGE && io_) {
-        uint16_t v = 0;
-        if (io_->ioRead(addr & ~1, v)) return (addr & 1) ? (v >> 8) : (v & 0xff);
-    }
-    return mem_[addr];
+    if (addr < ADDR_RAM_END) return mem_[addr];
+    const uint16_t v = busRead(addr & ~1);
+    return (addr & 1) ? (v >> 8) : (v & 0xff);
 }
 
 void Memory::writeWord(uint16_t addr, uint16_t value) {

@@ -174,7 +174,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `read/write/peek/poke` — and only for `addr >= 0100000`, because the real decoder
   is gated on `A15 = 1`. A write returns "did the controller swallow it": for the
   `W` cells of Табл. 1 the write must ALSO reach the BK's own register, which is
-  what makes HALT-mode shadow RAM work. `Board` owns the `Smk512` and allocates its
+  what makes HALT-mode shadow RAM work. On the register page (`>= 0177600`) the board
+  does NOT replace the BK registers: `Memory::busRead` ORs both answers (wired-OR —
+  "closing" the registers in SYS/All), except the VM1-internal `0177700–0177712` and the
+  `0177660–0177664` read hole (`Smk512::readHole`). `Board` owns the `Smk512` and allocates its
   512 KB only while the board is enabled (`setSmk512`). Its mode register is reset by
   power-on and by the «СТОП» key (МПИ pin А1 = ОСТ, hence `Board::pressStop`), but
   NOT by the `RESET` instruction — that is bus INIT on pin Б19, a separate signal in

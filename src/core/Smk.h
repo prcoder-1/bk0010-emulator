@@ -88,6 +88,13 @@ public:
     };
     struct Slot { Cell cell; uint8_t seg; };
     bool decode(uint16_t addr, Slot& s) const;
+    // «Дыра» по чтению 0177660..0177665 (прошивка ПЛИС 1.3): сигнал чтения платы
+    // гасится в ЛЮБОМ режиме, будь там ДОЗУ или зеркало ПЗУ, — клавиатуру и скролл
+    // отдаёт только сама БК. На запись не влияет.
+    static bool readHole(uint16_t addr) {
+        addr &= ~1;
+        return addr == 0177660 || addr == 0177662 || addr == 0177664;
+    }
 
     // MpiDevice. Побочных эффектов у чтения ДОЗУ нет, поэтому оба пути — один код.
     bool mpiRead(uint16_t addr, uint16_t& value) override { return mpiPeek(addr, value); }
