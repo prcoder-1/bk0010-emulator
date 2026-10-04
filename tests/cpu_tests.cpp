@@ -1405,6 +1405,52 @@ int main() {
         }
     }
 
+    // ---- 45com-lo (©Manwe) на БК-0010-01 пользователя, фаза 1 ------------
+    // tests/data/45com-lo.bin — «CLOCK CYCLES METER 0.1 slow memory»: 45 команд, каждая
+    // повторена 1280 раз подряд в ДОЗУ, время меряет таймер 0177710. Результат каждой
+    // ячейки (в десятых такта) возвращается в R0 из `CALL @#CODMEM`. Эталон — фото с
+    // реальной БК-0010-01 после такого включения питания, что выпала фаза 1
+    // (docs/slow-memory-timing.md): 45 из 45.
+    {
+        const std::string binPath = std::string(BK_TEST_DATA_DIR) + "/45com-lo.bin";
+        Board brd;
+        brd.setCpuPhase(1);
+        if (!brd.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            std::printf("SKIP: ПЗУ не найдено в %s — 45com-lo пропущен\n", BK_DEFAULT_ROM_DIR);
+        } else {
+            brd.reset();
+            for (int i = 0; i < 25; ++i) brd.runFrame();
+            if (!brd.loadBin(binPath, true)) {
+                std::printf("SKIP: нет %s — 45com-lo пропущен\n", binPath.c_str());
+            } else {
+                // Порядок — как на экране: три столбца сверху вниз.
+                static const int expect[45] = {
+                    12, 28, 12, 24, 24, 24, 24, 24, 24, 12, 12, 28, 28, 36, 36,   // COM R0 .. CLR @-(R2)
+                    12, 24, 36, 40, 40, 40, 40, 28, 28, 12, 48, 48, 16, 16, 12,   // MOV R1,R2 .. NOP
+                    56, 48, 32, 36, 44, 40, 32, 24, 28, 16, 48, 48, 48, 48, 28,   // (R1),@0(R1) .. JMP @#fm
+                };
+                // Адрес возврата из CALL @#CODMEM (004737 025400).
+                uint16_t ret = 0;
+                for (uint16_t a = 01000; a < 040000 && !ret; a += 2)
+                    if (brd.memory().peekWord(a) == 0004737 && brd.memory().peekWord(a + 2) == 025400) ret = a + 4;
+                std::vector<int> got;
+                for (long i = 0; i < 20000000L && got.size() < 45 && ret; ++i) {
+                    brd.stepInstruction();
+                    if (brd.cpu().r[7] == ret) got.push_back(brd.cpu().r[0]);
+                }
+                int bad = 0;
+                for (size_t k = 0; k < got.size(); ++k)
+                    if (got[k] != 10 * expect[k]) {
+                        if (bad < 6) std::printf("  45com-lo: ячейка %zu = %d.%d, на железе %d\n",
+                                                 k + 1, got[k] / 10, got[k] % 10, expect[k]);
+                        ++bad;
+                    }
+                CHECK(ret && got.size() == 45, "45com-lo: все 45 замеров выполнены");
+                CHECK(bad == 0, "45com-lo: фаза 1 совпадает с фото БК-0010-01 (45 из 45)");
+            }
+        }
+    }
+
     // ---- Контроллер НГМД: поток дорожки и протокол регистров ----------------
     // Микросхема 1801ВП1-128 не ищет сектора — она отдаёт СЫРОЙ поток дорожки и
     // ловит маркер A1. Поэтому проверяем именно то, что видит драйвер: после

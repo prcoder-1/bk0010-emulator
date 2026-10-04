@@ -102,8 +102,8 @@ Key cross-cutting facts to know before editing the CPU or screen:
   starts half a tick later, which is exactly why XOP2N (MOV+NOP) is not XOP2 + 12. The
   window phase is `setCpuPhase(0|1)` / `--cpu-phase`: a real BK draws it at power-on
   (D8:B and the 037 `PC[2:0]` are never reset) and gets one of two tables; 0 = the user's
-  machine (`MOV (R0),R1` = 28). Verified: XOP2 both phases, XOP2N, 2000/2001 RTL programs
-  (matrices in `cpu_tests`). The pauses are only valid on slow memory: any access to
+  machine (`MOV (R0),R1` = 28). Verified: XOP2 both phases, XOP2N, 2000/2001 RTL programs,
+  and `45com-lo` 45/45 in phase 1 from the same machine (all in `cpu_tests`). The pauses are only valid on slow memory: any access to
   ROM/IO/СМК RAM, and WAIT/HALT/RESET/MARK/traps, falls back to the old tables —
   `timingFor` + `arbReadPenalty`, and `timingFast` for СМК-512 (Manwe's measurements,
   mixed instructions split by access count). Manwe's `45com`/xlsx is a different machine
