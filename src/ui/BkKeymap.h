@@ -9,6 +9,7 @@ class QKeyEvent;
 //  - Latin letters / digits / punctuation via the event's produced character,
 //  - Cyrillic letters mapped to the KOI-7 H1 range (0140..0177),
 //  - Ctrl (СУ) -> control codes,
+//  - Alt (АР2) -> the same key's code with bit 0200 (vector 0274),
 //  - automatic РУС/ЛАТ switch (0016/0017) emitted once when the input language
 //    changes, mirroring pressing the РУС/ЛАТ key on the real machine.
 // Special/function codes carry bit 0200 so the Board routes them through the
@@ -23,5 +24,6 @@ public:
     void reset() { cyrillic_ = false; }
 
 private:
+    std::vector<uint16_t> translateAr2(QKeyEvent* e);
     bool cyrillic_ = false; // current register we believe the BK is in
 };

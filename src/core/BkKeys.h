@@ -24,6 +24,7 @@ enum : uint16_t {
     BK_CODE_RUS = 016,   // переключение на кириллицу
     BK_CODE_LAT = 017,   // переключение на латиницу
     BK_KEY_NONE = 0177777,
+    BK_AR2      = 0200,  // признак АР2: вектор 0274 вместо 060
 };
 
 struct BkKeyName { const char* name; uint16_t code; };
@@ -102,6 +103,35 @@ inline std::vector<uint16_t> bkEncodeText(std::string_view utf8, bool& cyrillicS
         }
     }
     return out;
+}
+
+// «АР2+клавиша» -> код | 0200. АР2 — модификатор вне матрицы (своя возвратная
+// линия RET_AP2), своего кода не даёт. ВП1-014 кладёт в 0177662 обычный 7-битный
+// код и выбирает вектор 0274; в «нижний регистр» (АР2/; -> 0233 и т.п.) код
+// переводит уже обработчик монитора 0101362. Префикс «ар2+», «ar2+», «ap2+», «alt+»,
+// дальше — имя клавиши или один символ (регистр букв сохраняется). BK_KEY_NONE,
+// если префикса нет или клавиша не распознана.
+inline uint16_t bkAr2Key(std::string_view spec) {
+    const size_t plus = spec.find('+');
+    if (plus == std::string_view::npos) return BK_KEY_NONE;
+    const std::string pfx = normName(spec.substr(0, plus));
+    if (pfx != "ар2" && pfx != "ar2" && pfx != "ap2" && pfx != "alt") return BK_KEY_NONE;
+    std::string_view rest = spec.substr(plus + 1);
+    if (rest.size() > 1) {                     // пробелы по краям, но не сам « »
+        while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+        while (!rest.empty() && rest.back() == ' ') rest.remove_suffix(1);
+        if (rest.empty()) rest = " ";
+    }
+    uint16_t c = bkKeyByName(rest);
+    if (c == BK_KEY_NONE) {
+        size_t i = 0;
+        if (rest.empty() || (utf8Next(rest, i), i != rest.size())) return BK_KEY_NONE;
+        bool cyr = false;
+        const std::vector<uint16_t> codes = bkEncodeText(rest, cyr);
+        if (codes.empty()) return BK_KEY_NONE;
+        c = codes.back();                      // без префикса РУС/ЛАТ: это одна клавиша
+    }
+    return static_cast<uint16_t>(c | BK_AR2);
 }
 
 } // namespace bk

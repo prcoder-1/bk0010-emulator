@@ -10,29 +10,56 @@ static const QString kCyrH1 = QString::fromUtf8(bk::kKoi7H1Utf8);
 // Control codes for switching the register (as sent by the РУС/ЛАТ keys).
 enum : uint16_t { CODE_LAT = bk::BK_CODE_LAT, CODE_RUS = bk::BK_CODE_RUS };
 
-std::vector<uint16_t> BkKeymap::translate(QKeyEvent* e) {
-    // ---- Special keys (authoritative BK codes; bit 0200 => vector 0274) ----
-    switch (e->key()) {
-    case Qt::Key_Down:      return {0033};
-    case Qt::Key_Up:        return {0032};
-    case Qt::Key_Left:      return {0010};
-    case Qt::Key_Right:     return {0031};
+// Special keys (authoritative BK codes; bit 0200 => vector 0274).
+static uint16_t specialCode(int key) {
+    switch (key) {
+    case Qt::Key_Down:      return 0033;
+    case Qt::Key_Up:        return 0032;
+    case Qt::Key_Left:      return 0010;
+    case Qt::Key_Right:     return 0031;
     case Qt::Key_Return:
-    case Qt::Key_Enter:     return {0012};   // ВВОД
-    case Qt::Key_Tab:       return {0015};
-    case Qt::Key_Space:     return {0040};
-    case Qt::Key_Backspace: return {0030};   // ЗАБ
-    case Qt::Key_Home:      return {0023};   // ВС
-    case Qt::Key_Delete:    return {0014};   // СБР
-    case Qt::Key_F1:        return {0201};   // ПОВТ
-    case Qt::Key_F2:        return {0003};   // КТ
-    case Qt::Key_F3:        return {0231};   // =|=>
-    case Qt::Key_F4:        return {0026};   // |<==
-    case Qt::Key_F5:        return {0027};   // |==>
-    case Qt::Key_F6:        return {0202};   // ИНД СУ
+    case Qt::Key_Enter:     return 0012;   // ВВОД
+    case Qt::Key_Tab:       return 0015;
+    case Qt::Key_Space:     return 0040;
+    case Qt::Key_Backspace: return 0030;   // ЗАБ
+    case Qt::Key_Home:      return 0023;   // ВС
+    case Qt::Key_Delete:    return 0014;   // СБР
+    case Qt::Key_F1:        return 0201;   // ПОВТ
+    case Qt::Key_F2:        return 0003;   // КТ
+    case Qt::Key_F3:        return 0231;   // =|=>
+    case Qt::Key_F4:        return 0026;   // |<==
+    case Qt::Key_F5:        return 0027;   // |==>
+    case Qt::Key_F6:        return 0202;   // ИНД СУ
     // F7/F8/F10/F12 are reserved by the debugger / screen-mode UI.
-    default: break;
+    default:                return bk::BK_KEY_NONE;
     }
+}
+
+// Alt = АР2. Код клавиши тот же, что без АР2, плюс бит 0200 (вектор 0274); в
+// «нижний регистр» его переводит монитор. Это одна физическая клавиша, поэтому
+// ни префикса РУС/ЛАТ, ни смены регистра: Shift под Alt — это АР2+РУС/ЛАТ.
+// Под Alt текст может оказаться пустым — тогда берём код Qt-клавиши.
+std::vector<uint16_t> BkKeymap::translateAr2(QKeyEvent* e) {
+    uint16_t c = specialCode(e->key());
+    if (c == bk::BK_KEY_NONE && e->key() == Qt::Key_Shift)
+        c = (e->nativeVirtualKey() == 0xffe2) ? CODE_LAT : CODE_RUS;
+    if (c == bk::BK_KEY_NONE) {
+        const QString t = e->text();
+        const ushort u = t.isEmpty() ? 0 : t[0].unicode();
+        int idx = u ? kCyrH1.indexOf(t[0].toUpper()) : -1;
+        if (idx < 0 && (u == 0x0401 || u == 0x0451)) idx = kCyrH1.indexOf(QChar(0x0415)); // Ё -> Е
+        if (u >= 0x20 && u < 0x7f)            c = u;
+        else if (idx >= 0)                    c = static_cast<uint16_t>(0140 + idx);
+        else if (e->key() >= 0x20 && e->key() < 0x7f) c = static_cast<uint16_t>(e->key());
+    }
+    if (c == bk::BK_KEY_NONE) return {};
+    return {static_cast<uint16_t>(c | bk::BK_AR2)};
+}
+
+std::vector<uint16_t> BkKeymap::translate(QKeyEvent* e) {
+    if (e->modifiers() & Qt::AltModifier) return translateAr2(e);
+
+    if (const uint16_t c = specialCode(e->key()); c != bk::BK_KEY_NONE) return {c};
 
     // ---- РУС / ЛАТ register keys, mapped to the two Shift keys ----
     // Besides switching the BK letter register, games use them as fire-left /

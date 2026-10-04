@@ -82,6 +82,8 @@ Two layers, deliberately decoupled:
   for `bk::JoyStandard`) and `src/core/BkKeys.h` (KOI-7 key names, KOI-7 H1 table,
   UTF-8 text → key codes with automatic РУС/ЛАТ). `src/ui/BkKeymap.cpp` stays the
   authority for *Qt key* → code; `BkKeys.h` is the authority for *name/text* → code.
+  АР2 (GUI: Alt; MCP: `"ар2+X"`) is the key's own code `| 0200` → vector `0274` with the
+  7-bit code in `0177662`; the monitor's `0101362` maps it to the "lower register".
 
 Key cross-cutting facts to know before editing the CPU or screen:
 
