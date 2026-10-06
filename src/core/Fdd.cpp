@@ -177,6 +177,18 @@ bool Fdd::save(int drive) {
     return true;
 }
 
+bool Fdd::saveAs(int drive, const std::string& path) {
+    if (drive < 0 || drive >= DRIVES) return false;
+    flushTrack();
+    const Drive& d = drives_[drive];
+    if (!d.attached()) return false;
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const size_t wrote = std::fwrite(d.image.data(), 1, d.image.size(), f);
+    std::fclose(f);
+    return wrote == d.image.size();
+}
+
 void Fdd::reset() {
     flushTrack();
     drive_ = -1;
@@ -302,6 +314,7 @@ uint16_t Fdd::readData() {
 }
 
 void Fdd::writeData(uint16_t v) {
+    note(LogEntry::Kind::Write, v);
     writing_ = true;
     searchSync_ = false;
     if (!writeFlag_ && !shiftFlag_) {            // оба регистра пусты
@@ -318,6 +331,8 @@ void Fdd::writeData(uint16_t v) {
         writeReg_ = v;
         status_ &= ~ST_TR;
     } else {
+        note(LogEntry::Kind::Lost, writeReg_);
+        ++stats_.lost;
         writeReg_ = v;                           // оба заняты — теряем предыдущее
     }
 }
@@ -371,9 +386,14 @@ void Fdd::periodic() {
             status_ |= ST_TR;
         }
     } else {                                     // запись
-        if (!shiftFlag_) return;
-        d->raw[d->dataPtr]     = static_cast<uint8_t>(shiftReg_ >> 8);
-        d->raw[d->dataPtr + 1] = static_cast<uint8_t>(shiftReg_ & 0xff);
+        if (!shiftFlag_) { ++stats_.underruns; return; }
+        ++stats_.written;
+        // Порядок байтов — как у слова, которое драйвер прочитал бы с этого места:
+        // при чтении он получает swab(raw[p], raw[p+1]) и сам переставляет байты,
+        // при записи отдаёт слово в той же раскладке (младший байт уходит первым).
+        // Иначе метка A1FB ложилась как FB A1 и сектор сдвигался на байт.
+        d->raw[d->dataPtr]     = static_cast<uint8_t>(shiftReg_ & 0xff);
+        d->raw[d->dataPtr + 1] = static_cast<uint8_t>(shiftReg_ >> 8);
         shiftFlag_ = false;
         d->trackChanged = true;
         d->marker[d->dataPtr / 2] = shiftMarker_ ? 1 : 0;

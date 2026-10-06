@@ -96,6 +96,7 @@ public:
     int  tracks(int drive) const;
     bool dirty(int drive) const;
     bool save(int drive);                 // записать изменённый образ обратно в файл
+    bool saveAs(int drive, const std::string& path);   // образ из памяти — в другой файл
 
     void reset();
 
@@ -121,6 +122,9 @@ public:
         long markers = 0;      // найдено маркеров
         long searches = 0;     // запусков поиска маркера
         long steps = 0;        // шагов головки
+        long written = 0;      // записано слов на диск
+        long underruns = 0;    // тактов записи без слова (процессор не успел)
+        long lost = 0;         // слов, затёртых следующим (процессор поспешил)
         uint16_t lastCmd = 0;  // последняя команда в 0177130
         int  lastLen[8] = {0}; // длины последних восьми полей, в словах
         int  lastIdx = 0;
@@ -131,7 +135,7 @@ public:
     // Кольцевой журнал обращений: по нему видно точную последовательность
     // «команда — поиск — маркер — слова», без которой обрыв передачи не поймать.
     struct LogEntry {
-        enum class Kind : uint8_t { Cmd, Status, Data, Marker } kind;
+        enum class Kind : uint8_t { Cmd, Status, Data, Marker, Write, Lost } kind;
         uint16_t value;    // записанная команда / прочитанное слово
         uint16_t head;     // положение головки в сырой дорожке
         uint16_t pc;       // адрес команды процессора, сделавшей обращение

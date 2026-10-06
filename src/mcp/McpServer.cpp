@@ -116,7 +116,9 @@ QString McpServer::fddLog(int limit) const {
         const auto& e = lg[(start + j) % n];
         const char* k = e.kind == bk::Fdd::LogEntry::Kind::Cmd    ? "КОМАНДА"
                       : e.kind == bk::Fdd::LogEntry::Kind::Marker ? "МАРКЕР "
-                      : e.kind == bk::Fdd::LogEntry::Kind::Data   ? "слово  " : "сост.  ";
+                      : e.kind == bk::Fdd::LogEntry::Kind::Data   ? "слово  "
+                      : e.kind == bk::Fdd::LogEntry::Kind::Write  ? "ЗАПИСЬ "
+                      : e.kind == bk::Fdd::LogEntry::Kind::Lost   ? "ПОТЕРЯ " : "сост.  ";
         out += QString("\n  %1 %2  дор %3 ст %4 гол %5  из %6")
                    .arg(k).arg(oct6(e.value)).arg(e.track).arg(e.side).arg(e.head).arg(oct6(e.pc));
     }
@@ -141,7 +143,8 @@ QString McpServer::fddState() const {
     return QString("\n  НГМД      привод %1, дорожка %2, сторона %3, сектор под головкой %4"
                    "\n            состояние %5 [%6%7%8%9], последняя команда %10"
                    "\n            слов %11, полей %12 (оборвано данных: %13), маркеров %14, шагов %15"
-                   "\n            длины последних полей:%16%17")
+                   "\n            длины последних полей:%16%17"
+                   "\n            запись: слов %18, опустошений %19, потерь %20")
         .arg(f.drive()).arg(f.track()).arg(f.side()).arg(f.sectorUnderHead())
         .arg(oct6(sv))
         .arg((sv & bk::Fdd::ST_TR)     ? "TR "   : "")
@@ -151,7 +154,8 @@ QString McpServer::fddState() const {
         .arg(oct6(st.lastCmd))
         .arg(st.words).arg(st.fields).arg(st.shortData).arg(st.markers).arg(st.steps)
         .arg(lens.isEmpty() ? QString(" —") : lens)
-        .arg(disks);
+        .arg(disks)
+        .arg(st.written).arg(st.underruns).arg(st.lost);
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +262,11 @@ QJsonArray McpServer::toolDefs() const {
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
                 {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
                 {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
+    t.append(tool("bk_disk_save", "Write the floppy image as it is in memory (with everything the BK wrote to "
+                  "it) to a file. Writes by the BK change only the in-memory copy; this persists them. "
+                  "`path` defaults to the image's own file.",
+                  QJsonObject{{"path", P("string", "Output image path (default: the attached file itself)")},
+                              {"drive", P("integer", "Drive 0..3 (default 0)")}}));
     t.append(tool("bk_reset", "Power-on reset the machine. `cpu_phase` (0/1) picks the CPU-clock phase "
                   "relative to the 037 DRAM window that a real BK draws at random on power-up: 0 (default) "
                   "gives MOV (R0),R1 = 28 ticks, 1 gives 24. `smk` installs/removes the СМК-512 board "
@@ -825,6 +834,18 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             .arg(lastBin_).arg(oct6(a)).arg(oct6(l)).arg(entry)
             .arg(frames > 0 ? "\n" + runText(r) : QString())
             .arg(regsText()));
+    }
+    if (name == "bk_disk_save") {
+        const int drive = args.value("drive").toInt(0);
+        auto& fdd = board_.kngmd().fdd();
+        if (!fdd.attached(drive)) return fail("no disk in drive " + QString::number(drive));
+        const bool dirty = fdd.dirty(drive);
+        const QString path = args.value("path").toString();
+        const bool ok = path.isEmpty() ? fdd.save(drive) : fdd.saveAs(drive, path.toStdString());
+        if (!ok) return fail("cannot write image");
+        return textContent(QString("Disk %1 written to %2 (%3).").arg(drive)
+            .arg(path.isEmpty() ? QString::fromStdString(fdd.path(drive)) : path)
+            .arg(dirty ? "had changes" : "no changes since attach"));
     }
     if (name == "bk_reset") {
         if (args.contains("cpu_phase")) board_.setCpuPhase(args.value("cpu_phase").toInt());
