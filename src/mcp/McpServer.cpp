@@ -260,8 +260,14 @@ QJsonArray McpServer::toolDefs() const {
                 {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
     t.append(tool("bk_reset", "Power-on reset the machine. `cpu_phase` (0/1) picks the CPU-clock phase "
                   "relative to the 037 DRAM window that a real BK draws at random on power-up: 0 (default) "
-                  "gives MOV (R0),R1 = 28 ticks, 1 gives 24.",
-        schema({{"cpu_phase", P("integer", "CPU clock phase vs the 037 window, 0 or 1 (default: keep)")}})));
+                  "gives MOV (R0),R1 = 28 ticks, 1 gives 24. `smk` installs/removes the СМК-512 board "
+                  "(its 512 KB are cleared, as at power-on). `disk` inserts a floppy image (re-read from the "
+                  "host file, so a rebuilt image is picked up) and boots from it; an empty string ejects it.",
+        schema({{"cpu_phase", P("integer", "CPU clock phase vs the 037 window, 0 or 1 (default: keep)")},
+                {"smk", P("boolean", "СМК-512 memory board on/off (default: keep)")},
+                {"disk", P("string", "Floppy image (.bkd/.img) to insert into drive 0 and boot; \"\" = eject (default: keep)")},
+                {"disk_rw", P("boolean", "Insert the image writable (default false = read-only)")},
+                {"frames", P("integer", "Run this many frames after reset/boot (default 0)")}})));
     t.append(tool("bk_run", "Run frames (with 50 Hz interrupts) until a breakpoint, HALT, or the frame "
                   "limit. `input` scripts keyboard/joystick over time, so a whole control sequence "
                   "is reproducible in ONE call — e.g. "
@@ -822,9 +828,34 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
     }
     if (name == "bk_reset") {
         if (args.contains("cpu_phase")) board_.setCpuPhase(args.value("cpu_phase").toInt());
+        if (args.contains("smk")) {
+            // Повторное включение — как установка платы в выключенную машину: ДОЗУ с нуля
+            board_.setSmk512(false);
+            board_.setSmk512(args.value("smk").toBool());
+        }
         board_.reset();
         cyrState_ = false;
-        return textContent(QString("Reset (CPU phase %1).\n").arg(board_.cpuPhase()) + regsText());
+        QString extra;
+        if (args.contains("disk")) {
+            const QString path = args.value("disk").toString();
+            board_.detachDisk(0);
+            if (!path.isEmpty()) {
+                board_.ensureMonitorBooted();
+                if (!board_.attachDisk(0, path.toStdString(), !args.value("disk_rw").toBool(false)))
+                    return fail("cannot attach disk " + path);
+                board_.kngmd().fdd().setLog(true);
+                board_.bootFromDisk();
+                extra = QString(" Disk %1, booting.").arg(path);
+            } else {
+                extra = " Disk ejected.";
+            }
+        }
+        if (board_.smk512()) extra += " СМК-512 on.";
+        RunOutcome r;
+        const int frames = args.value("frames").toInt(0);
+        if (frames > 0) r = runFrames(frames);
+        return textContent(QString("Reset (CPU phase %1).%2\n").arg(board_.cpuPhase()).arg(extra)
+                           + (frames > 0 ? runText(r) + "\n" : QString()) + regsText());
     }
     if (name == "bk_run") {
         const int maxFrames = args.value("max_frames").toInt(200);
