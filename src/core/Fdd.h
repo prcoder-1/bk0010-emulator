@@ -125,6 +125,8 @@ public:
         long written = 0;      // записано слов на диск
         long underruns = 0;    // тактов записи без слова (процессор не успел)
         long lost = 0;         // слов, затёртых следующим (процессор поспешил)
+        long wcalls = 0;       // записей процессора в регистр данных
+        long wdropped = 0;     // из них сброшено чтением регистра данных или прочим
         uint16_t lastCmd = 0;  // последняя команда в 0177130
         int  lastLen[8] = {0}; // длины последних восьми полей, в словах
         int  lastIdx = 0;
@@ -147,6 +149,10 @@ public:
     void setLog(bool on) { logOn_ = on; if (!on) log_.clear(); }
     bool logOn() const { return logOn_; }
     const std::vector<LogEntry>& log() const { return log_; }
+    // Журнал записи отдельно от общего (тот забивают чтения): слова, ушедшие на
+    // диск, с положением головки — разбирать, что легло на дорожку.
+    const std::vector<LogEntry>& writeLog() const { return wlog_; }
+    void clearWriteLog() { wlog_.clear(); }
     size_t logPos() const { return logPos_; }   // начало кольца, когда оно заполнено
     void clearLog() { log_.clear(); }
     // Номер сектора, который сейчас под головкой (1..10), 0 — межсекторный промежуток.
@@ -185,6 +191,7 @@ private:
     static constexpr size_t LOG_CAP = 4096;
     void note(LogEntry::Kind k, uint16_t v);
     std::vector<LogEntry> log_;
+    std::vector<LogEntry> wlog_;
     bool logOn_ = false;
     uint16_t ctxPc_ = 0;
     size_t logPos_ = 0;          // куда писать, когда кольцо заполнено
