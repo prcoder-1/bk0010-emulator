@@ -144,7 +144,7 @@ QString McpServer::fddState() const {
                    "\n            состояние %5 [%6%7%8%9], последняя команда %10"
                    "\n            слов %11, полей %12 (оборвано данных: %13), маркеров %14, шагов %15"
                    "\n            длины последних полей:%16%17"
-                   "\n            запись: слов %18, опустошений %19, потерь %20")
+                   "\n            запись: слов %18, опустошений %19, потерь %20; вызовов записи %21, сброшено чтением регистра %22")
         .arg(f.drive()).arg(f.track()).arg(f.side()).arg(f.sectorUnderHead())
         .arg(oct6(sv))
         .arg((sv & bk::Fdd::ST_TR)     ? "TR "   : "")
@@ -155,7 +155,7 @@ QString McpServer::fddState() const {
         .arg(st.words).arg(st.fields).arg(st.shortData).arg(st.markers).arg(st.steps)
         .arg(lens.isEmpty() ? QString(" —") : lens)
         .arg(disks)
-        .arg(st.written).arg(st.underruns).arg(st.lost);
+        .arg(st.written).arg(st.underruns).arg(st.lost).arg(st.wcalls).arg(st.wdropped);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +262,10 @@ QJsonArray McpServer::toolDefs() const {
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
                 {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
                 {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
+    t.append(tool("bk_fdd_wlog", "Dump the floppy write log (every word the controller put on the disk: "
+                  "M/W marker flag, value, track, side, head byte position, CPU PC) to a text file.",
+                  QJsonObject{{"path", P("string", "Output text file")},
+                              {"clear", P("boolean", "Clear the log after dumping")}}));
     t.append(tool("bk_disk_save", "Write the floppy image as it is in memory (with everything the BK wrote to "
                   "it) to a file. Writes by the BK change only the in-memory copy; this persists them. "
                   "`path` defaults to the image's own file.",
@@ -834,6 +838,21 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             .arg(lastBin_).arg(oct6(a)).arg(oct6(l)).arg(entry)
             .arg(frames > 0 ? "\n" + runText(r) : QString())
             .arg(regsText()));
+    }
+    if (name == "bk_fdd_wlog") {
+        auto& fdd = board_.kngmd().fdd();
+        const QString path = args.value("path").toString();
+        if (path.isEmpty()) return fail("path required");
+        FILE* f = std::fopen(path.toStdString().c_str(), "w");
+        if (!f) return fail("cannot open " + path);
+        for (const auto& e : fdd.writeLog())
+            std::fprintf(f, "%c %06o %u %u %u %06o\n", e.kind == bk::Fdd::LogEntry::Kind::Marker ? 'M'
+                         : 'W',
+                         e.value, e.track, e.side, e.head, e.pc);
+        std::fclose(f);
+        const size_t n = fdd.writeLog().size();
+        if (args.value("clear").toBool()) fdd.clearWriteLog();
+        return textContent(QString("%1 written words dumped to %2").arg(n).arg(path));
     }
     if (name == "bk_disk_save") {
         const int drive = args.value("drive").toInt(0);

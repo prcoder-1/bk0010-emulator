@@ -300,6 +300,7 @@ uint16_t Fdd::readStatus() {
 // ---- Регистр 0177132 -------------------------------------------------------
 
 uint16_t Fdd::readData() {
+    if (writing_) stats_.wdropped += (writeFlag_ ? 1 : 0) + (shiftFlag_ ? 1 : 0);
     // Любое обращение к регистру данных снимает TR — так устроена микросхема.
     status_ &= ~ST_TR;
     writing_ = searchSync_ = false;
@@ -315,6 +316,8 @@ uint16_t Fdd::readData() {
 
 void Fdd::writeData(uint16_t v) {
     note(LogEntry::Kind::Write, v);
+    ++stats_.wcalls;
+
     writing_ = true;
     searchSync_ = false;
     if (!writeFlag_ && !shiftFlag_) {            // оба регистра пусты
@@ -388,6 +391,10 @@ void Fdd::periodic() {
     } else {                                     // запись
         if (!shiftFlag_) { ++stats_.underruns; return; }
         ++stats_.written;
+        if (wlog_.size() < 200000)
+            wlog_.push_back(LogEntry{shiftMarker_ ? LogEntry::Kind::Marker : LogEntry::Kind::Write, shiftReg_,
+                                     static_cast<uint16_t>(d->dataPtr), ctxPc_,
+                                     static_cast<uint8_t>(track_), static_cast<uint8_t>(side_)});
         // Порядок байтов — как у слова, которое драйвер прочитал бы с этого места:
         // при чтении он получает swab(raw[p], raw[p+1]) и сам переставляет байты,
         // при записи отдаёт слово в той же раскладке (младший байт уходит первым).
