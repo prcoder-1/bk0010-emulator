@@ -670,12 +670,11 @@ void Cpu::buildTable() {
 // ---------------------------------------------------------------------------
 int Cpu::timingFor(uint16_t ir) const {
     // Timings measured on a real БК-0010.01 (Manwe's "clock cycles meter" + the XOP
-    // timing test suite). This table is a BASELINE, not a machine: only
-    // DRAM-only instructions are timed by the bus model (Vm1Timing.h, Board::busStep);
-    // `timingFor + arbReadPenalty` is the fallback for instructions that also touch
-    // ROM/IO/expansion RAM. Real fast memory (an expansion board's static RAM) is
-    // much faster still and board-specific — `MOV R1,R2` is 12 in DRAM, 8 on a
-    // СМК-512 and 9 on an AZ-БК — and we do not model it; see docs/slow-memory-timing.md.
+    // timing test suite). This table is a BASELINE, not a machine: with the 037 model
+    // on, instructions are timed by the bus model (Vm1Timing.h, Board::busStep) for
+    // any mix of DRAM and fast memory; `timingFor + arbReadPenalty` is only the
+    // fallback for forms without a schedule (HALT, WAIT, RESET, MARK, illegal codes)
+    // and for `--no-arb037`. See docs/slow-memory-timing.md.
     //
     // Two-operand: 12 + SRC[sm] + DST[dm], where DST depends on whether the source
     // is a register (sm==0) or memory (sm!=0) and on the op class (read/write/rmw).
@@ -744,7 +743,8 @@ int Cpu::timingFor(uint16_t ir) const {
 // Тайминг в быстрой памяти (статическое ОЗУ платы расширения)
 // ---------------------------------------------------------------------------
 // Вторая таблица — для памяти, которую 037 не арбитрирует: страницы СМК-512 и вообще
-// всё выше 0100000 (A15=1). Снята на реальной БК-0010-01 с СМК-512 тем же счётчиком
+// всё выше 0100000 (A15=1). Теперь это лишь запасной путь для команд без расписания
+// шины, целиком исполненных в быстрой памяти: остальное считает Board::busStep. Снята на реальной БК-0010-01 с СМК-512 тем же счётчиком
 // тактов Manwe: `45com-hi` (45 ячеек) и полная таблица MOV/CMP/ADD во всех режимах
 // (по 64 ячейки на команду, колонка «код и данные — быстрые»).
 //
@@ -815,11 +815,10 @@ int Cpu::timingFast(uint16_t ir) const {
 // (свободнобегущий счётчик PC[2:0] в 037, см. Vp037.h), поэтому потеря окна стоит
 // ровно +4 — отсюда и кратность четырём всей таблицы таймингов.
 //
-// Команды, все обмены которых идут в ДОЗУ, Board считает по потактовой модели шины
-// (Vm1Timing.h, Board::busStep) — она сверена с тестами XOP2/XOP2N на реальной
-// БК-0010-01 и с RTL-моделью ВМ1 + 037. Эта таблица со штрафом остаётся для команд,
-// часть обменов которых ушла в ПЗУ, В-В или ОЗУ СМК. Подробности —
-// docs/slow-memory-timing.md.
+// Команды с расписанием Board считает по потактовой модели шины (Vm1Timing.h,
+// Board::busStep) — она сверена с тестами XOP2/XOP2N на реальной БК-0010-01 и с
+// RTL-моделью ВМ1 + 037. Эта таблица со штрафом остаётся запасным путём для команд
+// без расписания. Подробности — docs/slow-memory-timing.md.
 //
 // Штраф начисляет Board, когда чтение действительно попало в ДОЗУ.
 
@@ -840,6 +839,7 @@ int Cpu::arbReadPenalty(uint16_t ir) {
 // Single-step
 // ---------------------------------------------------------------------------
 int Cpu::step() {
+    traceTrap_ = false;
     if (halted_) return 4;
     // Промежуточный регистр флагов перезагружается из PSW перед каждой командой —
     // кроме случая, когда предыдущая команда была MOVB/MFPS с приёмником-регистром:
@@ -890,7 +890,12 @@ int Cpu::step() {
     // не будет ни звука, ни замедления, и игра летит на полной скорости ЦП.
     // В режиме ожидания ловушка не срабатывает: WAIT «исполняется» повторно, и иначе
     // обработчик 014 вызывался бы бесконечно, пока ЦП простаивает (GID: devemu/CPU.cpp:558).
-    if ((psw & CC_T) && res != R_RTT && res != R_WAIT) service(VEC_TBIT);
+    traceTrap_ = (psw & CC_T) && res != R_RTT && res != R_WAIT;
+    if (traceTrap_) {
+        tracePc_ = r[7];
+        service(VEC_TBIT);
+        ticks += INT_ENTRY_TICKS;   // вход в ловушку тоже стоит тактов (по шине — Board)
+    }
     return ticks;
 }
 
