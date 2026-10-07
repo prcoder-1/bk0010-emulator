@@ -336,8 +336,11 @@ private:
     void renderScanlinesUpTo(int line);   // догнать отрисовку до строки `line`
     void beginFrameRaster();              // верх кадра: доотрисовать и сбросить счётчик
     // Журнал обменов текущей инструкции (и ловушки за ней) — для модели шины:
-    // адрес, запись ли, и быстрая ли память (всё, что не ДОЗУ БК: ПЗУ, В-В, ОЗУ плат).
-    struct BusAccess { uint16_t addr; bool write; bool fast; };
+    // адрес, запись ли, и кто ответил (BusDram / BusFast / BusRom).
+    enum : uint8_t { BusDram = 0, BusFast = 1, BusRom = 2 };
+    struct BusAccess { uint16_t addr; bool write; uint8_t cls; };
+    uint8_t busClass(uint16_t addr, bool write) const;
+    bool smkRamAccess(uint16_t addr, bool write) const;   // обслужила ли обмен ДОЗУ платы
     static constexpr int kMaxAcc = 16;
     BusAccess acc_[kMaxAcc];
     int  nAcc_ = 0;                // обменов всего (может быть больше kMaxAcc)
@@ -345,6 +348,10 @@ private:
     // 4·(totalTicks_ + busSkew_) — дробная часть момента запроса выборки следующей
     // команды и хвост предыдущей команды после её предвыборки (из ДОЗУ / из быстрой
     // памяти). busSkew_ восстанавливает фазу окна 037 из снимка.
+    // Задержка ответа ПЗУ на чтение, в четвертях такта: 1 такт. Петля `SOB R0,.`
+    // целиком в ПЗУ (tests/hw/ROMSOB.BIN) на реальной БК-0010-01 — 18,00 тактов вместо
+    // 17 у памяти, отвечающей сразу; ROMIO.BIN допускает 1..14.
+    static constexpr int kRomReadExtra = 4;
     int  busFrac_ = 0;
     int  prevTeDram_ = 0;
     int  prevTeFast_ = 0;
@@ -353,9 +360,9 @@ private:
     // Классы обменов acc_[from..] по шагам расписания `s` (cls[0] — выборка, её
     // задаёт вызывающий). false — обмены не легли на расписание (тогда таблица).
     int  busTicks(uint16_t ir, int tableTicks);   // время команды (модель шины или таблица)
-    bool mapAccesses(const Vm1Sched& s, int& from, bool* cls) const;
+    bool mapAccesses(const Vm1Sched& s, int& from, uint8_t* cls) const;
     // Время по модели шины от момента `ticks` (в тактах ЦП, без busSkew_).
-    int  busStep(const Vm1Sched& s, const bool* cls, uint64_t ticks);
+    int  busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks);
     // Вход в прерывание по обменам acc_[from..]; `pc` — адрес отброшенной предвыборки.
     int  enterInterrupt(uint16_t vector, bool iako);
     int  interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks);

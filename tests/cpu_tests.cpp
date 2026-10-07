@@ -399,8 +399,8 @@ int main() {
         // сами тесты: 48 копий подряд, средний такт на копию на установившемся участке.
         // Память 010000..037777 заполнена указателем на 010000, R0 = 024000,
         // R1 = 034000, R3 = 007000 (там RTS PC), вектор EMT — на RTI по 007100.
-        auto clone = [](std::initializer_list<uint16_t> unit, int phase) {
-            Board b; b.setCpuPhase(phase); b.reset();
+        auto clone = [](std::initializer_list<uint16_t> unit, int phase, uint16_t r1 = 034000) {
+            Board b; b.setCpuPhase(phase); b.loadRoms(BK_DEFAULT_ROM_DIR); b.reset();
             Memory& m = b.memory();
             for (uint16_t a = 010000; a < 040000; a += 2) m.pokeWord(a, 010000);
             m.pokeWord(030, 07100); m.pokeWord(032, 0);
@@ -410,7 +410,7 @@ int main() {
             for (int k = 0; k < 48; ++k) for (uint16_t w : unit) { m.pokeWord(a, w); a += 2; }
             m.pokeWord(a, 0000777);
             b.cpu().reset(start, 0340);
-            b.cpu().r[0] = 024000; b.cpu().r[1] = 034000; b.cpu().r[3] = 07000; b.cpu().r[6] = 01000;
+            b.cpu().r[0] = 024000; b.cpu().r[1] = r1; b.cpu().r[3] = 07000; b.cpu().r[6] = 01000;
             uint64_t t0 = 0;
             for (int i = 0; i < 20000; ++i) {
                 const uint16_t pc = b.cpu().r[7];
@@ -494,20 +494,69 @@ int main() {
             {{0000240},                 12, "NOP"},
             {{0004713},                 64, "JSR PC,(R3) + RTS PC"},
             {{0104000},                104, "EMT + RTI"},
-            // Выше 0100000 037 не обслуживает: ПЗУ и В-В отвечают сразу (eCat3).
+            // Выше 0100000 037 не обслуживает: В-В отвечает сразу (eCat3).
             {{0005337, 0177716},        32, "DEC @#177716 (В-В)"},
-            {{0005737, 0100000},        32, "TST @#100000 (ПЗУ)"},
-            {{0005737, 0177716},        32, "TST @#177716 (В-В)"},
-            {{0010037, 0177714},        40, "MOV R0,@#177714 (В-В)"},
-            {{0005037, 0177714},        32, "CLR @#177714 (В-В)"},
         };
         for (const Case& c : cases) {
             char msg[96];
             std::snprintf(msg, sizeof msg, "037: %s — %g тактов, код в ДОЗУ", c.name, c.ticks);
             const double t = clone(c.unit, 0);
             if (t != c.ticks) std::printf("  %s = %g\n", c.name, t);
-            CHECK(t == c.ticks, msg);
+                        CHECK(t == c.ticks, msg);
         }
+        // tests/hw/ROMIO.BIN на реальной БК-0010-01 пользователя, по два включения
+        // питания в каждой фазе (2026-10-07): В-В отвечает сразу, ПЗУ — с задержкой,
+        // которая видна только в фазе 1.
+        struct Hw { std::initializer_list<uint16_t> unit; uint16_t r1; int p0, p1; const char* name; };
+        const Hw hw[] = {
+            {{0005737, 001000},  034000, 36, 32, "TST @#1000"},
+            {{0005737, 0100000}, 034000, 32, 32, "TST @#100000 (ПЗУ)"},
+            {{0005737, 0177716}, 034000, 32, 28, "TST @#177716 (В-В)"},
+            {{0013701, 0100000}, 034000, 36, 32, "MOV @#100000,R1 (ПЗУ)"},
+            {{0010037, 0177714}, 034000, 40, 40, "MOV R0,@#177714 (В-В)"},
+            {{0005037, 0177714}, 034000, 32, 32, "CLR @#177714 (В-В)"},
+            {{0030037, 0177716}, 034000, 40, 36, "BIT R0,@#177716 (В-В)"},
+            {{0111100},          0100000, 24, 24, "MOVB (R1),R0, R1 в ПЗУ"},
+            {{0111100},          001000, 28, 24, "MOVB (R1),R0, R1 в ДОЗУ"},
+            {{0004737, 0100256}, 034000, 68, 68, "JSR PC,@#100256 (RTS PC в ПЗУ)"},
+        };
+        for (const Hw& c : hw)
+            for (int ph = 0; ph < 2; ++ph) {
+                char msg[112];
+                const int want = ph ? c.p1 : c.p0;
+                std::snprintf(msg, sizeof msg, "ROMIO, фаза %d: %s — %d тактов, как на железе", ph, c.name, want);
+                const double t = clone(c.unit, ph, c.r1);
+                if (t != want) std::printf("  %s, фаза %d = %g\n", c.name, ph, t);
+                CHECK(t == want, msg);
+            }
+        // tests/hw/ROMSOB.BIN: петля `SOB R0,.` подпрограммы монитора 102102, целиком
+        // в ПЗУ, и её копия в ДОЗУ. На железе — 18,00 и 20,00 в обеих фазах: ответ ПЗУ
+        // на такт позже памяти, отвечающей сразу (17).
+        for (int ph = 0; ph < 2; ++ph)
+            for (int inRom = 0; inRom < 2; ++inRom) {
+                auto loop = [&](uint16_t n) {
+                    Board b; b.setCpuPhase(ph); b.loadRoms(BK_DEFAULT_ROM_DIR); b.reset();
+                    Memory& m = b.memory();
+                    uint16_t sub = 0102102;
+                    if (!inRom) {
+                        sub = 03000;
+                        for (int k = 0; k < 9; ++k) m.pokeWord(03000 + 2 * k, m.peekWord(0102102 + 2 * k));
+                    }
+                    m.pokeWord(01000, 0004737); m.pokeWord(01002, sub);   // JSR PC,@#sub
+                    m.pokeWord(01004, 0000777);
+                    b.cpu().reset(01000, 0340);
+                    b.cpu().r[2] = 1; b.cpu().r[3] = n; b.cpu().r[6] = 01000;
+                    const uint64_t t0 = b.totalTicks();
+                    for (int i = 0; i < 100000 && b.cpu().pc() != 01004; ++i) b.stepInstruction();
+                    return double(b.totalTicks() - t0);
+                };
+                const double per = (loop(13800) - loop(1000)) / 12800;
+                const double want = inRom ? 18 : 20;
+                char msg[96];
+                std::snprintf(msg, sizeof msg, "ROMSOB, фаза %d: SOB R0,. в %s — %g такта", ph, inRom ? "ПЗУ" : "ДОЗУ", want);
+                if (per != want) std::printf("  SOB в %s, фаза %d = %g\n", inRom ? "ПЗУ" : "ДОЗУ", ph, per);
+                CHECK(per == want, msg);
+            }
     }
 
     // ---- Быстрая память в модели шины: ОЗУ СМК-512 -------------------------
