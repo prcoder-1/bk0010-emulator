@@ -159,16 +159,36 @@ Board::Board() {
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
         trace_.access(a, w, b);
         if (!watchpoints_.empty()) checkWatch(a, w, b);
-        // Тайминг: журнал обменов команды для модели шины. ДОЗУ БК (A15=0, оба
-        // банка) обслуживает 037 через своё окно; всё выше 0100000 (ПЗУ, В-В, ОЗУ
-        // СМК-512, ПЗУ контроллера НГМД) 037 не касается и отвечает сразу.
-        if (nAcc_ < kMaxAcc) acc_[nAcc_] = {a, w, a >= 0100000};
+        // Тайминг: журнал обменов команды для модели шины (см. busClass).
+        if (nAcc_ < kMaxAcc) acc_[nAcc_] = {a, w, busClass(a, w)};
         ++nAcc_;
         // Журналу НГМД нужен адрес команды, которая лезет в его регистры.
         if (diskOn_ && (a == 0177130 || a == 0177132)) kngmd_.fdd().setContextPc(curInstrPc_);
     });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
+}
+
+// Кто отвечает на обмен. ДОЗУ БК (A15=0, оба банка) обслуживает 037 через своё
+// окно. Регистры В-В (от 0177600) и ОЗУ СМК-512 отвечают сразу. ПЗУ (К1801РЕ2 БК, а
+// заодно ПЗУ контроллеров, замеров для них нет) отвечает с задержкой: тест
+// tests/hw/ROMIO.BIN на реальной БК-0010-01 в фазе 1 показал, что чтение из ПЗУ
+// на окно 037 медленнее чтения из В-В (docs/slow-memory-timing.md).
+uint8_t Board::busClass(uint16_t addr, bool write) const {
+    if (addr < 0100000) return BusDram;
+    if (addr >= 0177600) return BusFast;
+    if (smkOn_ && smkRamAccess(addr, write)) return BusFast;
+    return BusRom;
+}
+
+// Обмен по адресу `addr` обслуживает ДОЗУ СМК-512, а не БК? Для чтения годятся
+// ячейки Табл. 1 «чтение-запись» и «только чтение», для записи — «чтение-запись»
+// и «только запись» (теневое ОЗУ); ПЗУ контроллера и молчащие адреса — нет.
+bool Board::smkRamAccess(uint16_t addr, bool write) const {
+    Smk512::Slot s{};
+    if (!smk_.decode(addr, s)) return false;
+    return write ? (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Wo)
+                 : (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Ro);
 }
 
 // Execute one instruction with sound + trace bookkeeping. Returns ticks.
@@ -230,12 +250,12 @@ int Board::stepCore() {
 // 037 за чтение ДОЗУ, а целиком в быстрой памяти — `timingFast`.
 int Board::busTicks(uint16_t ir, int tableTicks) {
     Vm1Sched sched;
-    bool cls[1 + 7];
+    uint8_t cls[1 + 7];
     int from = 1;
     const bool trap = cpu_.traceTrapped();
     if (nAcc_ > 0 && nAcc_ <= kMaxAcc && !acc_[0].write && !cpu_.halted() && !cpu_.waiting()
         && vm1Schedule(ir, sched)) {
-        cls[0] = acc_[0].fast;
+        cls[0] = acc_[0].cls;
         if (mapAccesses(sched, from, cls) && (trap ? nAcc_ - from == 4 : from == nAcc_)) {
             const int t = busStep(sched, cls, totalTicks_);
             if (!trap) return t;
@@ -246,8 +266,8 @@ int Board::busTicks(uint16_t ir, int tableTicks) {
     prevTeDram_ = prevTeFast_ = 0;
     bool dramRead = false, allFast = nAcc_ > 0;
     for (int i = 0; i < nAcc_ && i < kMaxAcc; ++i) {
-        if (!acc_[i].fast && !acc_[i].write) dramRead = true;
-        if (!acc_[i].fast) allFast = false;
+        if (acc_[i].cls == BusDram && !acc_[i].write) dramRead = true;
+        if (acc_[i].cls == BusDram) allFast = false;
     }
     if (allFast) {
         return cpu_.instrTicksFast(ir) + (trap ? Cpu::INT_ENTRY_TICKS : 0);
@@ -258,19 +278,19 @@ int Board::busTicks(uint16_t ir, int tableTicks) {
 // Сопоставляет обмены с шагами по порядку. Команды «чтение-модификация-запись»,
 // которые в эмуляторе только пишут (CLR, SXT, MFPS в память), чтения не делают —
 // тогда чтение берёт класс следующей за ним записи.
-bool Board::mapAccesses(const Vm1Sched& s, int& from, bool* cls) const {
+bool Board::mapAccesses(const Vm1Sched& s, int& from, uint8_t* cls) const {
     int i = from;
     for (int k = 0; k < s.n; ++k) {
         const char kind = s.op[k].kind;
-        if (kind == 'I') { cls[1 + k] = true; continue; }
+        if (kind == 'I') { cls[1 + k] = BusFast; continue; }
         if (i >= nAcc_ || i >= kMaxAcc) return false;
         const BusAccess& a = acc_[i];
         if (kind == 'R' && a.write) {
-            if (k + 1 < s.n && s.op[k + 1].kind == 'M') { cls[1 + k] = a.fast; continue; }
+            if (k + 1 < s.n && s.op[k + 1].kind == 'M') { cls[1 + k] = a.cls; continue; }
             return false;
         }
         if (kind != 'R' && !a.write) return false;
-        cls[1 + k] = a.fast;
+        cls[1 + k] = a.cls;
         ++i;
     }
     from = i;
@@ -284,23 +304,26 @@ bool Board::mapAccesses(const Vm1Sched& s, int& from, bool* cls) const {
 // идут раз в 16 четвертей (4 такта) со смещением 3 или 1 по модулю 4 — это и есть
 // фаза включения питания. Быстрая память отвечает сразу: строб через 6 четвертей
 // после запроса, RPLY через полутакт на чтение и такт на запись (ещё такт — у записи
-// в чтении-модификации-записи). Так считает eCat3, и это даёт таблицу СМК-512.
-int Board::busStep(const Vm1Sched& s, const bool* cls, uint64_t ticks) {
+// в чтении-модификации-записи). Так считает eCat3, и это даёт таблицу СМК-512. ПЗУ
+// на чтении отвечает на kRomReadExtra четвертей позже, ЦП видит RPLY на фронте своего
+// такта (полутакт).
+int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks) {
     const int64_t base = static_cast<int64_t>(ticks + static_cast<uint64_t>(busSkew_)) * 4;
     const int64_t phi = cpuPhase_ ? 1 : 3;
-    auto done = [&](int64_t q, char kind, bool fast) {
-        if (fast) return q + (kind == 'W' ? 10 : kind == 'M' ? 14 : 8);
+    auto done = [&](int64_t q, char kind, uint8_t c) {
+        if (c == BusRom && kind == 'R') return (q + 8 + kRomReadExtra + 1) & ~int64_t(1);
+        if (c != BusDram) return q + (kind == 'W' ? 10 : kind == 'M' ? 14 : 8);
         int64_t d = q + 5;
         d += ((phi - d) % 16 + 16) % 16;
         return (d + 11 + 3) & ~int64_t(3);
     };
     int64_t c = done(base + busFrac_, 'R', cls[0]);        // выборка
-    int64_t ref = c + 4 + 2 * (cls[0] ? prevTeFast_ : prevTeDram_);   // старт микрокода
-    bool fast = cls[0];
+    int64_t ref = c + 4 + 2 * (cls[0] != BusDram ? prevTeFast_ : prevTeDram_);  // старт микрокода
+    bool fast = cls[0] != BusDram;
     for (int i = 0; i < s.n; ++i) {
         const int gap = s.op[i].gap + (fast ? s.op[i].xf : 0);
         ref = done(ref + 2 * gap, s.op[i].kind, cls[1 + i]);
-        fast = cls[1 + i];
+        fast = cls[1 + i] != BusDram;
     }
     const int64_t next = ref + 2 * (s.tail + (fast ? s.pfXf : 0));
     prevTeDram_ = s.early ? 2 : 0;
@@ -314,8 +337,8 @@ int Board::busStep(const Vm1Sched& s, const bool* cls, uint64_t ticks) {
 int Board::interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks) {
     Vm1Sched s;
     vm1InterruptSchedule(iako, s);
-    bool cls[1 + 7];
-    cls[0] = pc >= 0100000;
+    uint8_t cls[1 + 7];
+    cls[0] = busClass(pc, false);
     if (!mapAccesses(s, from, cls) || from != nAcc_) return tableTicks;
     return busStep(s, cls, ticks);
 }

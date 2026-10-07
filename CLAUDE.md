@@ -106,8 +106,12 @@ Key cross-cutting facts to know before editing the CPU or screen:
   (D8:B and the 037 `PC[2:0]` are never reset) and gets one of two tables; 0 = the user's
   machine (`MOV (R0),R1` = 28). Verified: XOP2 both phases, XOP2N, 2000/2001 RTL programs,
   and `45com-lo` 45/45 in phase 1 from the same machine (all in `cpu_tests`).
-  Memory above 0100000 (ROM, IO, СМК RAM) is NOT behind the 037 and answers at once (end = request + 4 / 5 / 7 half-ticks for read /
-  write / RMW write — eCat3's model, which reproduces Manwe's СМК table 192/192); the
+  Memory above 0100000 is NOT behind the 037. IO and СМК RAM answer at once (end = request
+  + 4 / 5 / 7 half-ticks for read / write / RMW write — eCat3's model, which reproduces
+  Manwe's СМК table 192/192). ROM (К1801РЕ2) is slower on reads by `Board::kRomReadExtra`
+  quarter-ticks: measured with `tests/hw/ROMIO.BIN` on the user's BK, where all ROM reads
+  lose a 037 window in phase 1 (fit: 1..14), and `tests/hw/ROMSOB.BIN` (SOB loop running
+  entirely in ROM = 17 + delay) gave 18.00 in both phases, so the delay is 4 (one tick). The
   board keeps a per-instruction access log (`acc_`) and times any mix of DRAM and fast
   memory. Some microcode work is visible only after a FAST exchange (`xf`/`pfXf`/`teFast`
   in `Vm1Sched`): after a DRAM wait it is hidden — do not apply it to DRAM, that breaks
