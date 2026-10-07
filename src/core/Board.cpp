@@ -159,30 +159,16 @@ Board::Board() {
     mem_.setAccessHook([this](uint16_t a, bool w, bool b) {
         trace_.access(a, w, b);
         if (!watchpoints_.empty()) checkWatch(a, w, b);
-        // Тайминг: считаем обмены команды и раскладываем их по типу памяти.
-        // ДОЗУ БК (A15=0, оба банка) арбитрируется 037 — там штраф за окно.
-        // ОЗУ СМК-512 — «быстрая» память со своей таблицей таймингов. Остальное
-        // выше 0100000 (ПЗУ, В-В, ПЗУ контроллера НГМД) на реальном железе 037 тоже
-        // не арбитрирует, но замеров для него нет, поэтому оно остаётся на базовой
-        // линии — ни штрафа, ни ускорения.
-        ++memAccess_;
-        if (a < 0100000) { ++dramAccess_; if (!w) dramRead_ = true; }
-        else if (smkOn_ && smkRamAccess(a, w)) ++fastAccess_;
+        // Тайминг: журнал обменов команды для модели шины. ДОЗУ БК (A15=0, оба
+        // банка) обслуживает 037 через своё окно; всё выше 0100000 (ПЗУ, В-В, ОЗУ
+        // СМК-512, ПЗУ контроллера НГМД) 037 не касается и отвечает сразу.
+        if (nAcc_ < kMaxAcc) acc_[nAcc_] = {a, w, a >= 0100000};
+        ++nAcc_;
         // Журналу НГМД нужен адрес команды, которая лезет в его регистры.
         if (diskOn_ && (a == 0177130 || a == 0177132)) kngmd_.fdd().setContextPc(curInstrPc_);
     });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
-}
-
-// Обмен по адресу `addr` обслуживает ДОЗУ СМК-512, а не БК? Для чтения годятся
-// ячейки Табл. 1 «чтение-запись» и «только чтение», для записи — «чтение-запись»
-// и «только запись» (теневое ОЗУ); ПЗУ контроллера и молчащие адреса — нет.
-bool Board::smkRamAccess(uint16_t addr, bool write) const {
-    Smk512::Slot s{};
-    if (!smk_.decode(addr, s)) return false;
-    return write ? (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Wo)
-                 : (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Ro);
 }
 
 // Execute one instruction with sound + trace bookkeeping. Returns ticks.
@@ -195,32 +181,10 @@ int Board::stepCore() {
     trace_.exec(pcBefore);
     watchArmed_ = false;
     uint16_t ir = arb037_ ? mem_.peekWord(pcBefore) : 0;
-    dramRead_ = false;
-    memAccess_ = dramAccess_ = fastAccess_ = 0;
+    nAcc_ = 0;
     int t = cpu_.step();
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
-    Vm1Sched sched;
-    const bool known = arb037_ && vm1Schedule(ir, sched);
-    // Потактовая модель шины — когда ВСЕ обмены команды пришлись на ДОЗУ: расписание
-    // ВМ1 сняли на медленной памяти, где ожидание окна прячет внутреннюю работу
-    // микрокода; на быстрой памяти (ПЗУ, СМК) паузы другие, там остаётся таблица.
-    // Лишние обмены сверх расписания — ловушка (T-бит и т.п.), её тоже считает таблица.
-    if (known && memAccess_ > 0 && dramAccess_ == memAccess_ && memAccess_ <= 1 + sched.n
-        && !cpu_.halted() && !cpu_.waiting()) {
-        t = busStep(sched);
-    } else if (arb037_) {
-        prevEarly_ = known && sched.early;
-        if (dramRead_) t += Cpu::arbReadPenalty(ir);
-        if (fastAccess_ > 0) {
-            // Хотя бы один обмен ушёл в ОЗУ СМК-512 — у него своя таблица. Все
-            // обмены быстрые (код и данные на плате) — берём её целиком; часть —
-            // делим пропорционально числу обменов. Замеров для смешанного случая
-            // нет, но такая прикидка ложится в ±2 такта в колонку Manwe «быстрый
-            // код, медленные данные».
-            int fast = cpu_.instrTicksFast(ir);
-            if (t > fast) t -= ((t - fast) * fastAccess_ + memAccess_ / 2) / memAccess_;
-        }
-    }
+    if (arb037_) t = busTicks(ir, t);
     // Фаза 037 идёт в лок-степе с ЦП (1 такт ЦП = 2 такта CLKIN) — по ней рисуются
     // строки при построчной отрисовке.
     if (arb037_ || scanlineRender_) vp037_.tick(2 * t);
@@ -249,7 +213,7 @@ int Board::stepCore() {
     // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
     if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_) {
         const int it = tryDeliverInterrupts();
-        if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; prevEarly_ = false; }
+        if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; }
     }
     if (trace_.enabled()) {
         uint16_t pcNow = cpu_.pc();
@@ -260,28 +224,100 @@ int Board::stepCore() {
     return t;
 }
 
-// Время команды по модели шины ВМ1 + окна 037 (Vm1Timing.h). Единица — четверть
-// такта (83 нс, полупериод CLKIN): окна 037 решаются на полупериодах CLKIN. Запрос
-// получает окно, если пришёл не позже чем за 5 четвертей до решающего фронта (это
-// задержка запроса в кремнии, в RTL её нет); ответ ЦП видит на ближайшем своём такте
-// через 11 четвертей после решения. Решения идут раз в 16 четвертей (4 такта) со
-// смещением 3 или 1 по модулю 4 — это и есть фаза включения питания.
-int Board::busStep(const Vm1Sched& s) {
-    const int64_t base = static_cast<int64_t>(totalTicks_) * 4;
+// Время команды по модели шины ВМ1 (Vm1Timing.h) по журналу её обменов. Команды,
+// для которых расписания нет или обмены на него не легли (HALT, WAIT, RESET, MARK,
+// недопустимые коды, EMT 36 с перехватом), идут по таблице: `timingFor` + штраф
+// 037 за чтение ДОЗУ, а целиком в быстрой памяти — `timingFast`.
+int Board::busTicks(uint16_t ir, int tableTicks) {
+    Vm1Sched sched;
+    bool cls[1 + 7];
+    int from = 1;
+    const bool trap = cpu_.traceTrapped();
+    if (nAcc_ > 0 && nAcc_ <= kMaxAcc && !acc_[0].write && !cpu_.halted() && !cpu_.waiting()
+        && vm1Schedule(ir, sched)) {
+        cls[0] = acc_[0].fast;
+        if (mapAccesses(sched, from, cls) && (trap ? nAcc_ - from == 4 : from == nAcc_)) {
+            const int t = busStep(sched, cls, totalTicks_);
+            if (!trap) return t;
+            const int it = interruptTicks(false, cpu_.tracePc(), from, totalTicks_ + t, -1);
+            if (it >= 0) return t + it;
+        }
+    }
+    prevTeDram_ = prevTeFast_ = 0;
+    bool dramRead = false, allFast = nAcc_ > 0;
+    for (int i = 0; i < nAcc_ && i < kMaxAcc; ++i) {
+        if (!acc_[i].fast && !acc_[i].write) dramRead = true;
+        if (!acc_[i].fast) allFast = false;
+    }
+    if (allFast) {
+        return cpu_.instrTicksFast(ir) + (trap ? Cpu::INT_ENTRY_TICKS : 0);
+    }
+    return tableTicks + (dramRead ? Cpu::arbReadPenalty(ir) : 0);
+}
+
+// Сопоставляет обмены с шагами по порядку. Команды «чтение-модификация-запись»,
+// которые в эмуляторе только пишут (CLR, SXT, MFPS в память), чтения не делают —
+// тогда чтение берёт класс следующей за ним записи.
+bool Board::mapAccesses(const Vm1Sched& s, int& from, bool* cls) const {
+    int i = from;
+    for (int k = 0; k < s.n; ++k) {
+        const char kind = s.op[k].kind;
+        if (kind == 'I') { cls[1 + k] = true; continue; }
+        if (i >= nAcc_ || i >= kMaxAcc) return false;
+        const BusAccess& a = acc_[i];
+        if (kind == 'R' && a.write) {
+            if (k + 1 < s.n && s.op[k + 1].kind == 'M') { cls[1 + k] = a.fast; continue; }
+            return false;
+        }
+        if (kind != 'R' && !a.write) return false;
+        cls[1 + k] = a.fast;
+        ++i;
+    }
+    from = i;
+    return true;
+}
+
+// Единица — четверть такта (83 нс, полупериод CLKIN): окна 037 решаются на
+// полупериодах CLKIN. Запрос в ДОЗУ получает окно, если пришёл не позже чем за 5
+// четвертей до решающего фронта (это задержка запроса в кремнии, в RTL её нет);
+// ответ ЦП видит на ближайшем своём такте через 11 четвертей после решения. Решения
+// идут раз в 16 четвертей (4 такта) со смещением 3 или 1 по модулю 4 — это и есть
+// фаза включения питания. Быстрая память отвечает сразу: строб через 6 четвертей
+// после запроса, RPLY через полутакт на чтение и такт на запись (ещё такт — у записи
+// в чтении-модификации-записи). Так считает eCat3, и это даёт таблицу СМК-512.
+int Board::busStep(const Vm1Sched& s, const bool* cls, uint64_t ticks) {
+    const int64_t base = static_cast<int64_t>(ticks + static_cast<uint64_t>(busSkew_)) * 4;
     const int64_t phi = cpuPhase_ ? 1 : 3;
-    auto done = [&](int64_t q) {
+    auto done = [&](int64_t q, char kind, bool fast) {
+        if (fast) return q + (kind == 'W' ? 10 : kind == 'M' ? 14 : 8);
         int64_t d = q + 5;
         d += ((phi - d) % 16 + 16) % 16;
         return (d + 11 + 3) & ~int64_t(3);
     };
-    int64_t c = done(base + busFrac_);                     // выборка
-    int64_t ref = c + (prevEarly_ ? 8 : 4);                // старт первой микрокоманды
-    for (int i = 0; i < s.n; ++i) ref = done(ref + 2 * s.op[i].gap);
-    const int64_t next = ref + 2 * s.tail;
-    prevEarly_ = s.early;
-    const int64_t t = (next >> 2) - static_cast<int64_t>(totalTicks_);
+    int64_t c = done(base + busFrac_, 'R', cls[0]);        // выборка
+    int64_t ref = c + 4 + 2 * (cls[0] ? prevTeFast_ : prevTeDram_);   // старт микрокода
+    bool fast = cls[0];
+    for (int i = 0; i < s.n; ++i) {
+        const int gap = s.op[i].gap + (fast ? s.op[i].xf : 0);
+        ref = done(ref + 2 * gap, s.op[i].kind, cls[1 + i]);
+        fast = cls[1 + i];
+    }
+    const int64_t next = ref + 2 * (s.tail + (fast ? s.pfXf : 0));
+    prevTeDram_ = s.early ? 2 : 0;
+    prevTeFast_ = s.teFast;
     busFrac_ = static_cast<int>(next & 3);
-    return static_cast<int>(t);
+    return static_cast<int>((next >> 2) - (base >> 2));
+}
+
+// Вход в прерывание по шине. Обмены — от acc_[from]; если их нет или они не те
+// (вектор не установлен и т.п.), остаётся `tableTicks` (-1 — сообщить вызывающему).
+int Board::interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks) {
+    Vm1Sched s;
+    vm1InterruptSchedule(iako, s);
+    bool cls[1 + 7];
+    cls[0] = pc >= 0100000;
+    if (!mapAccesses(s, from, cls) || from != nAcc_) return tableTicks;
+    return busStep(s, cls, ticks);
 }
 
 // Evaluate a breakpoint's optional condition (unconditional breakpoints allow).
@@ -362,7 +398,7 @@ void Board::reset() {
     timerCount_ = 0177777;
     timerLimit_ = 0177777;
     totalTicks_ = 0;
-    busFrac_ = 0; prevEarly_ = false;
+    busFrac_ = 0; prevTeDram_ = prevTeFast_ = 0; busSkew_ = 0;
     timerStart_ = 0;
     timerPeriod_ = TIMER_BASE_PERIOD;
     frameTicks_.clear();
@@ -375,7 +411,6 @@ void Board::reset() {
     screen_.setScroll(scroll_);
     vp037_.reset();
     vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
-    dramRead_ = false;
     if (smkOn_) smk_.powerOn();        // включение питания: ДОЗУ чисто, режим SYS
     trace_.reset();
 }
@@ -563,6 +598,13 @@ void Board::saveStateMem(std::vector<uint8_t>& out) const {
                              static_cast<uint16_t>(smk_.armed() ? 1 : 0)};
     put(smk, sizeof smk);
     if (smkOn_) put(smk_.ram().data(), Smk512::RAM_BYTES);
+    // Фаза цепочки шины: где стоит окно 037 относительно счёта тактов и хвост
+    // предыдущей команды — иначе прогоны из одного снимка расходятся по тактам.
+    const uint16_t bus[4] = {static_cast<uint16_t>((totalTicks_ + busSkew_) & 3),
+                             static_cast<uint16_t>(busFrac_),
+                             static_cast<uint16_t>(prevTeDram_),
+                             static_cast<uint16_t>(prevTeFast_)};
+    put(bus, sizeof bus);
 }
 
 bool Board::loadStateMem(const std::vector<uint8_t>& in) {
@@ -589,6 +631,9 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
             if (in.size() >= kStateSmkRam) get(smk_.ram().data(), Smk512::RAM_BYTES);
         }
     }
+    uint16_t bus[4] = {0, 0, 0, 0};
+    const bool hasBus = in.size() >= off + sizeof bus;
+    if (hasBus) get(bus, sizeof bus);
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
     keyIntPending_ = false; keyIntDeferAt_ = 0;
     timerLimit_ = dev[3]; timerCount_ = dev[4];
@@ -601,11 +646,11 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     if (timerCsr_ & TIM_DIV16) timerPeriod_ *= 16;
     if (timerCsr_ & TIM_DIV4)  timerPeriod_ *= 4;
     timerStart_ = totalTicks_;
-    busFrac_ = 0; prevEarly_ = false;
+    busFrac_ = bus[1] & 3; prevTeDram_ = bus[2]; prevTeFast_ = bus[3];
+    busSkew_ = hasBus ? static_cast<int>((bus[0] - totalTicks_) & 3) : 0;
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
     vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
-    dramRead_ = false;
     return true;
 }
 
@@ -755,6 +800,15 @@ void Board::deliverFrameInterrupts() {
     if (t) { totalTicks_ += static_cast<uint64_t>(t); sound_.feed(speaker_, t); }
 }
 
+// Вход в прерывание: IRQ2 и СТОП — по фиксированному вектору, клавиатура — векторное
+// с циклом IAKO. С моделью шины время считается по шаблону входа (Vm1Timing.h).
+int Board::enterInterrupt(uint16_t vector, bool iako) {
+    const uint16_t pc = static_cast<uint16_t>(cpu_.pc() + (cpu_.waiting() ? 2 : 0));
+    nAcc_ = 0;
+    const int t = cpu_.interrupt(vector);
+    return arb037_ ? interruptTicks(iako, pc, 0, totalTicks_, t) : t;
+}
+
 // Возвращает стоимость входа в прерывание в тактах (0, если ничего не выдано).
 int Board::tryDeliverInterrupts() {
     if (cpu_.halted()) return 0;
@@ -763,7 +817,7 @@ int Board::tryDeliverInterrupts() {
     if (stopPending_ || busErrorPending_) {
         stopPending_ = busErrorPending_ = false;
         if (mem_.peekWord(Cpu::VEC_BUS_ERROR) != 0) {
-            const int t = cpu_.interrupt(Cpu::VEC_BUS_ERROR);
+            const int t = enterInterrupt(Cpu::VEC_BUS_ERROR, false);
             trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
             return t;
         }
@@ -788,7 +842,7 @@ int Board::tryDeliverInterrupts() {
         } else if (totalTicks_ >= keyIntDeferAt_) {
             keyIntPending_ = false;
             if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
-                const int t = cpu_.interrupt(keyIntVec_);
+                const int t = enterInterrupt(keyIntVec_, true);
                 trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
                 return t;
             }
@@ -797,7 +851,7 @@ int Board::tryDeliverInterrupts() {
 
     if (irqFramePending_ && mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
         irqFramePending_ = false;
-        const int t = cpu_.interrupt(Cpu::VEC_IRQ2);   // 0100 (50 Hz)
+        const int t = enterInterrupt(Cpu::VEC_IRQ2, false);   // 0100 (50 Hz)
         trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
         return t;
     }
@@ -854,6 +908,11 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
                 start = w;                        // автозапуск через затирание стека
         }
         cpu_.r[7] = start; // точка входа
+        // Стек — как у пускового монитора (100260: MOV #1000,SP), откуда программу и
+        // запускают. Иначе SP остаётся от того, где стоял монитор или Бейсик в момент
+        // загрузки (Бейсик в ожидании держит SP=01762), и программа, не ставящая стек
+        // сама, затирает свой код (45com-lo).
+        cpu_.r[6] = 01000;
     }
     return true;
 }

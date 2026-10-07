@@ -45,6 +45,10 @@ public:
 
     bool halted() const { return halted_; }
     bool waiting() const { return waiting_; }
+    // Последняя step() ушла в ловушку по T-биту; tracePc() — адрес следующей команды
+    // (её предвыборку ловушка отбросила).
+    bool traceTrapped() const { return traceTrap_; }
+    uint16_t tracePc() const { return tracePc_; }
     void clearHalt() { halted_ = false; }
     void clearWait() { waiting_ = false; }
 
@@ -57,7 +61,7 @@ public:
     // profiler views to estimate per-instruction execution time.
     int instrTicks(uint16_t ir) const { return timingFor(ir); }
     // То же для памяти, которую 037 не арбитрирует (страницы СМК-512, ПЗУ) —
-    // вторая таблица, снятая на реальном железе. См. Cpu::timingFast.
+    // вторая таблица, снятая на реальном железе; запасной путь, см. Cpu::timingFast.
     int instrTicksFast(uint16_t ir) const { return timingFast(ir); }
 
     // Добавка к timingFor за арбитраж КР1801ВП1-037, когда команда читает ДОЗУ
@@ -89,6 +93,8 @@ private:
     uint16_t lastBranch_ = 0;  // PC of the last control-flow instruction
     bool halted_ = false;
     bool waiting_ = false;
+    bool traceTrap_ = false;
+    uint16_t tracePc_ = 0;
     std::function<bool()> emt36Hook_;  // EMT 36 intercept (true = handled, skip ROM)
     std::function<void()> resetHook_;  // RESET: сброс периферии
     bool emulateCBug_ = true;

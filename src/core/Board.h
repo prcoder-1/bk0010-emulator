@@ -335,19 +335,30 @@ private:
     int  renderedLine_ = 0;        // следующая строка кадра, ещё не отрисованная
     void renderScanlinesUpTo(int line);   // догнать отрисовку до строки `line`
     void beginFrameRaster();              // верх кадра: доотрисовать и сбросить счётчик
-    bool dramRead_ = false;        // текущая инструкция читала ДОЗУ — по этому
-                                   // начисляется штраф арбитража 037
-    int  memAccess_ = 0;           // обменов у текущей инструкции, всего
-    int  dramAccess_ = 0;          // из них в ДОЗУ БК (арбитраж 037)
-    int  fastAccess_ = 0;          // из них в ОЗУ СМК-512 («быстрая» память)
+    // Журнал обменов текущей инструкции (и ловушки за ней) — для модели шины:
+    // адрес, запись ли, и быстрая ли память (всё, что не ДОЗУ БК: ПЗУ, В-В, ОЗУ плат).
+    struct BusAccess { uint16_t addr; bool write; bool fast; };
+    static constexpr int kMaxAcc = 16;
+    BusAccess acc_[kMaxAcc];
+    int  nAcc_ = 0;                // обменов всего (может быть больше kMaxAcc)
     // Часы шины ВМ1 (см. Vm1Timing.h): время в четвертях такта, отсчитанное от
-    // 4·totalTicks_ — дробная часть момента запроса выборки следующей команды,
-    // и вид этой выборки (ранняя предвыборка или обычная).
+    // 4·(totalTicks_ + busSkew_) — дробная часть момента запроса выборки следующей
+    // команды и хвост предыдущей команды после её предвыборки (из ДОЗУ / из быстрой
+    // памяти). busSkew_ восстанавливает фазу окна 037 из снимка.
     int  busFrac_ = 0;
-    bool prevEarly_ = false;
+    int  prevTeDram_ = 0;
+    int  prevTeFast_ = 0;
+    int  busSkew_ = 0;
     int  cpuPhase_ = 0;
-    int  busStep(const Vm1Sched& s);
-    bool smkRamAccess(uint16_t addr, bool write) const;   // обслужила ли обмен ДОЗУ платы
+    // Классы обменов acc_[from..] по шагам расписания `s` (cls[0] — выборка, её
+    // задаёт вызывающий). false — обмены не легли на расписание (тогда таблица).
+    int  busTicks(uint16_t ir, int tableTicks);   // время команды (модель шины или таблица)
+    bool mapAccesses(const Vm1Sched& s, int& from, bool* cls) const;
+    // Время по модели шины от момента `ticks` (в тактах ЦП, без busSkew_).
+    int  busStep(const Vm1Sched& s, const bool* cls, uint64_t ticks);
+    // Вход в прерывание по обменам acc_[from..]; `pc` — адрес отброшенной предвыборки.
+    int  enterInterrupt(uint16_t vector, bool iako);
+    int  interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks);
 
     int cpuFreqHz_ = 3000000;   // тактовая частота ЦП
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()

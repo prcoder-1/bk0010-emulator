@@ -494,62 +494,158 @@ int main() {
             {{0000240},                 12, "NOP"},
             {{0004713},                 64, "JSR PC,(R3) + RTS PC"},
             {{0104000},                104, "EMT + RTI"},
-            {{0005337, 0177716},        40, "DEC @#177716 (В-В, не ДОЗУ — по таблице)"},
+            // Выше 0100000 037 не обслуживает: ПЗУ и В-В отвечают сразу (eCat3).
+            {{0005337, 0177716},        32, "DEC @#177716 (В-В)"},
+            {{0005737, 0100000},        32, "TST @#100000 (ПЗУ)"},
+            {{0005737, 0177716},        32, "TST @#177716 (В-В)"},
+            {{0010037, 0177714},        40, "MOV R0,@#177714 (В-В)"},
+            {{0005037, 0177714},        32, "CLR @#177714 (В-В)"},
         };
         for (const Case& c : cases) {
             char msg[96];
-            std::snprintf(msg, sizeof msg, "037: %s — %g тактов в ДОЗУ", c.name, c.ticks);
-            CHECK(clone(c.unit, 0) == c.ticks, msg);
+            std::snprintf(msg, sizeof msg, "037: %s — %g тактов, код в ДОЗУ", c.name, c.ticks);
+            const double t = clone(c.unit, 0);
+            if (t != c.ticks) std::printf("  %s = %g\n", c.name, t);
+            CHECK(t == c.ticks, msg);
         }
     }
 
-    // ---- Вторая таблица таймингов: ОЗУ СМК-512 («быстрая» память) ----
+    // ---- Быстрая память в модели шины: ОЗУ СМК-512 -------------------------
     {
         // Замеры Manwe на реальной БК-0010-01 с СМК-512: тест 45com-hi и полная
-        // таблица MOV/CMP/ADD по всем режимам. Память платы 037 не арбитрирует,
-        // время там не кратно четырём и заметно меньше.
-        auto setup = [](Board& b) {
-            b.setSmk512(true); b.reset();
+        // таблица MOV/CMP/ADD (колонки «всё быстрое» и «быстрый код, данные в ДОЗУ»).
+        // Память платы 037 не обслуживает: она отвечает сразу, и та же цепочка обменов
+        // ВМ1 с мгновенным ответом даёт эти числа (Board::busStep). Меряем, как сами
+        // тесты: 48 копий подряд на плате, средний такт на установившемся участке.
+        // Ячейки плате — указатели на 0150200, ячейки ДОЗУ 010000..013777 — на 010200.
+        auto smkClone = [](std::initializer_list<uint16_t> unit, uint16_t r1, uint16_t r2) {
+            Board b; b.setSmk512(true); b.reset();
             // Трёхтактный протокол: строб, код режима ОЗУ11, снятие строба.
             b.smk().writeCtrl(6); b.smk().writeCtrl(040); b.smk().writeCtrl(0);
+            Memory& m = b.memory();
+            for (uint16_t a = 0150000; a < 0154000; a += 2) m.pokeWord(a, 0150200);
+            for (uint16_t a = 010000; a < 014000; a += 2) m.pokeWord(a, 010200);
+            const uint16_t start = 0140000, stride = static_cast<uint16_t>(2 * unit.size());
+            uint16_t a = start;
+            for (int k = 0; k < 48; ++k) for (uint16_t w : unit) { m.pokeWord(a, w); a += 2; }
+            m.pokeWord(a, 0000777);
+            b.cpu().reset(start, 0340);
+            b.cpu().r[1] = r1; b.cpu().r[2] = r2;
+            uint64_t t0 = 0;
+            for (int i = 0; i < 20000; ++i) {
+                const uint16_t pc = b.cpu().r[7];
+                if (pc == start + 12 * stride) t0 = b.totalTicks();
+                if (pc == start + 44 * stride) return double(b.totalTicks() - t0) / 32;
+                b.stepInstruction();
+            }
+            return -1.0;
         };
-        struct Case { uint16_t ir; int fast; const char* name; };
-        static const Case cases[] = {
-            {0010102,  8, "MOV R1,R2"},
-            {0000240,  9, "NOP"},
-            {0000300,  9, "SWAB R0"},
-            {0005011, 20, "CLR (R1)"},
-            {0005021, 21, "CLR (R1)+"},
-            {0005711, 17, "TST (R1)"},
-            {0011112, 28, "MOV (R1),(R2)"},
-            {0021112, 25, "CMP (R1),(R2)"},
-            {0061112, 28, "ADD (R1),(R2)"},
-            {0014131, 34, "MOV -(R1),@(R1)+"},
+        struct Case { std::initializer_list<uint16_t> unit; uint16_t r1, r2; double ticks; const char* name; };
+        const Case cases[] = {
+            // Всё на плате.
+            {{0010102},  0150400, 0150500,  8, "MOV R1,R2"},
+            {{0000240},  0150400, 0150500,  9, "NOP"},
+            {{0000300},  0150400, 0150500,  9, "SWAB R0"},
+            {{0005011},  0150400, 0150500, 20, "CLR (R1)"},
+            {{0005021},  0150400, 0150500, 21, "CLR (R1)+"},
+            {{0005711},  0150400, 0150500, 17, "TST (R1)"},
+            {{0011112},  0150400, 0150500, 28, "MOV (R1),(R2)"},
+            {{0021112},  0150400, 0150500, 25, "CMP (R1),(R2)"},
+            {{0021122},  0150400, 0150500, 26, "CMP (R1),(R2)+"},
+            {{0061112},  0150400, 0150500, 28, "ADD (R1),(R2)"},
+            {{0061122},  0150400, 0150500, 29, "ADD (R1),(R2)+"},
+            {{0014131},  0150400, 0150500, 34, "MOV -(R1),@(R1)+"},
+            // Код на плате, данные в ДОЗУ. MOV R1,(R2) у Manwe 32 — на его машине запись
+            // в ДОЗУ на 4 такта дороже (docs/slow-memory-timing.md), у нас 28.
+            {{0021122},       010000, 010400, 32, "CMP (R1),(R2)+, данные в ДОЗУ"},
+            {{0027102, 0},    010000, 010400, 40, "CMP @0(R1),R2, данные в ДОЗУ"},
+            {{0020152},       010000, 013000, 40, "CMP R1,@-(R2), данные в ДОЗУ"},
+            {{0010112},       010000, 010400, 28, "MOV R1,(R2), данные в ДОЗУ"},
         };
         for (const Case& c : cases) {
-            Board b; setup(b);
-            for (uint16_t a = 0150000; a < 0152000; a += 2) b.memory().pokeWord(a, 0150200);
-            b.memory().pokeWord(0140000, c.ir);
-            b.cpu().reset(0140000, 0340);
-            b.cpu().r[1] = 0150400; b.cpu().r[2] = 0150500;
-            uint64_t before = b.totalTicks();
-            b.stepInstruction();
             char msg[96];
-            std::snprintf(msg, sizeof msg, "СМК-512: %s — %d тактов в ОЗУ платы", c.name, c.fast);
-            CHECK(static_cast<int>(b.totalTicks() - before) == c.fast, msg);
+            std::snprintf(msg, sizeof msg, "СМК-512: %s — %g тактов, код на плате", c.name, c.ticks);
+            const double t = smkClone(c.unit, c.r1, c.r2);
+            if (t != c.ticks) std::printf("  %s = %g\n", c.name, t);
+            CHECK(t == c.ticks, msg);
         }
-        // Смешанный случай: команда на плате, данные в ДОЗУ. Точных замеров нет,
-        // время делится пропорционально числу обменов — 29 тактов между 26 (всё
-        // быстрое) и 32 (всё медленное); у Manwe в такой конфигурации 32.
+    }
+
+    // ---- Вход в прерывание и ловушка T-бита по шине; фаза шины в снимке ----
+    {
+        // Шаблоны входа — из симуляции кристалла (eCat3): PSW и PC в стек, вектор,
+        // у клавиатуры ещё цикл IAKO. Раньше вход стоил константу 40 тактов, а ловушка
+        // T-бита не стоила ничего.
+        auto setup = [](Board& b) {
+            b.reset();
+            Memory& m = b.memory();
+            m.pokeWord(01000, 0000777);                  // BR .
+            m.pokeWord(02000, 0000002);                  // RTI
+            m.pokeWord(0100, 02000); m.pokeWord(0102, 0);
+            m.pokeWord(060, 02000);  m.pokeWord(062, 0);
+            b.cpu().reset(01000, 0);
+            b.cpu().r[6] = 01000;
+            for (int i = 0; i < 8; ++i) b.stepInstruction();
+        };
         {
             Board b; setup(b);
-            b.memory().pokeWord(0140000, 0010112);   // MOV R1,(R2), приёмник в ДОЗУ
-            b.cpu().reset(0140000, 0340);
-            b.cpu().r[1] = 0; b.cpu().r[2] = 04000;
-            uint64_t before = b.totalTicks();
-            b.stepInstruction();
-            CHECK(static_cast<int>(b.totalTicks() - before) == 29,
-                  "СМК-512: команда на плате, запись в ДОЗУ — время между таблицами");
+            const uint64_t t0 = b.totalTicks();
+            b.runUntil(01000, 1);                       // IRQ2 на входе, затем RTI
+            const int t = static_cast<int>(b.totalTicks() - t0);
+            if (t != 105) std::printf("  IRQ2 + RTI = %d\n", t);
+            CHECK(t == 105, "прерывание: вход в IRQ2 + RTI по шине");
+        }
+        {
+            Board b; setup(b);
+            b.pressKey(040);
+            int t = 0;
+            for (int i = 0; i < 100000 && b.cpu().pc() != 02000; ++i) t = b.stepInstruction();
+            if (t != 85) std::printf("  BR + вход по клавиатуре = %d\n", t);
+            CHECK(t == 85, "прерывание: BR + вход по клавиатуре (IAKO) по шине");
+        }
+        {
+            // NOP с T=1: каждая копия — NOP, ловушка через 014 и RTT обработчика.
+            Board b; b.reset();
+            Memory& m = b.memory();
+            m.pokeWord(07200, 0000006);                 // RTT
+            m.pokeWord(014, 07200); m.pokeWord(016, 0340);
+            for (int k = 0; k < 48; ++k) m.pokeWord(01000 + 2 * k, 0000240);
+            m.pokeWord(01000 + 96, 0000777);
+            b.cpu().reset(01000, 0360);
+            b.cpu().r[6] = 01000;
+            uint64_t t0 = 0; double t = -1;
+            for (int i = 0; i < 2000; ++i) {
+                const uint16_t pc = b.cpu().r[7];
+                if (pc == 01000 + 2 * 12) t0 = b.totalTicks();
+                if (pc == 01000 + 2 * 44) { t = double(b.totalTicks() - t0) / 32; break; }
+                b.stepInstruction();
+            }
+            if (t != 116) std::printf("  NOP + ловушка T + RTT = %g\n", t);
+            CHECK(t == 116, "ловушка T-бита стоит тактов (NOP + вход + RTT)");
+        }
+        {
+            // Два прогона из одного снимка дают одно и то же время, как бы ни стоял
+            // счётчик тактов у платы, в которую снимок загружают.
+            Board a; a.reset();
+            Memory& m = a.memory();
+            for (int k = 0; k < 64; ++k) m.pokeWord(01000 + 2 * k, k & 1 ? 0011102 : 0005711);
+            m.pokeWord(01000 + 128, 0000167); m.pokeWord(01000 + 130, static_cast<uint16_t>(-134));
+            a.cpu().reset(01000, 0340);
+            a.cpu().r[1] = 010000; a.cpu().r[2] = 0;
+            for (int i = 0; i < 37; ++i) a.stepInstruction();
+            std::vector<uint8_t> snap;
+            a.saveStateMem(snap);
+            auto run = [&](Board& b) {
+                const uint64_t t0 = b.totalTicks();
+                for (int i = 0; i < 500; ++i) b.stepInstruction();
+                return b.totalTicks() - t0;
+            };
+            Board b, c;
+            b.reset(); c.reset();
+            b.runTicks(12345); c.runTicks(7778);
+            b.loadStateMem(snap); c.loadStateMem(snap);
+            const uint64_t ta = run(a), tb = run(b), tc = run(c);
+            CHECK(ta == tb && tb == tc, "снимок хранит фазу шины: прогоны из него совпадают по тактам");
         }
     }
 

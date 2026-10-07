@@ -99,17 +99,24 @@ Key cross-cutting facts to know before editing the CPU or screen:
   and the 037 window (a request gets the first 037 decision >= q+2.5 half-ticks; decisions
   every 4 CPU ticks; the access ends on the next CPU tick >= decision+5.5). Two things
   carry over between instructions and MUST stay: the fractional bus clock (`busFrac_`) and
-  whether the previous instruction fetched this one by "early prefetch" (`prevEarly_`:
+  whether the previous instruction fetched this one by "early prefetch" (`prevTeDram_`:
   NOP/CCC/SCC and every ALU op with a register destination) — the next instruction then
   starts half a tick later, which is exactly why XOP2N (MOV+NOP) is not XOP2 + 12. The
   window phase is `setCpuPhase(0|1)` / `--cpu-phase`: a real BK draws it at power-on
   (D8:B and the 037 `PC[2:0]` are never reset) and gets one of two tables; 0 = the user's
   machine (`MOV (R0),R1` = 28). Verified: XOP2 both phases, XOP2N, 2000/2001 RTL programs,
-  and `45com-lo` 45/45 in phase 1 from the same machine (all in `cpu_tests`). The pauses are only valid on slow memory: any access to
-  ROM/IO/СМК RAM, and WAIT/HALT/RESET/MARK/traps, falls back to the old tables —
-  `timingFor` + `arbReadPenalty`, and `timingFast` for СМК-512 (Manwe's measurements,
-  mixed instructions split by access count). Manwe's `45com`/xlsx is a different machine
-  (writes +4) — do not refit to it. See `docs/slow-memory-timing.md`.
+  and `45com-lo` 45/45 in phase 1 from the same machine (all in `cpu_tests`).
+  Memory above 0100000 (ROM, IO, СМК RAM) is NOT behind the 037 and answers at once (end = request + 4 / 5 / 7 half-ticks for read /
+  write / RMW write — eCat3's model, which reproduces Manwe's СМК table 192/192); the
+  board keeps a per-instruction access log (`acc_`) and times any mix of DRAM and fast
+  memory. Some microcode work is visible only after a FAST exchange (`xf`/`pfXf`/`teFast`
+  in `Vm1Sched`): after a DRAM wait it is hidden — do not apply it to DRAM, that breaks
+  the XOP2 MOVB / XOP2N photos. Interrupt entry (IRQ2, СТОП, keyboard with IAKO) and the
+  T-bit trap go through the same model (the T-trap used to cost 0 ticks). The chain phase
+  (`busSkew_`, `busFrac_`, tails) is saved in snapshots. Only forms without a schedule
+  (WAIT/HALT/RESET/MARK/illegal) fall back to `timingFor` + `arbReadPenalty` /
+  `timingFast`. eCat3's 037 parameters are fitted to Manwe's machine — do not import them.
+  See `docs/slow-memory-timing.md`.
 - **T-bit trace trap** (`Cpu::step`): while PSW bit 4 (`020`) is set, EVERY instruction
   traps through vector `014`; only the `RTT` instruction itself suppresses it (so `RTI`
   restoring T=1 traps immediately, `RTT` lets exactly one instruction through). This is
@@ -147,6 +154,8 @@ Key cross-cutting facts to know before editing the CPU or screen:
   deliver if the vector word is 0.
 - **Running a game** requires the monitor ROM to boot first. The GUI does this via
   the continuous timer; headless mode explicitly runs ~25 frames before `loadBin`.
+  `loadBin(run)` sets SP=01000, as the start monitor does (BASIC idles with SP=01762, and a
+  program that never sets its own stack would overwrite its own code — 45com-lo).
 - **Screen mapping** (`Screen::render`) ports `scr.c`: video RAM is 0040000, 256
   lines × 64 bytes. Color mode = 2 bits/pixel (256 wide, doubled to 512); mono = 1
   bit/pixel (512 wide), LSB first. Palette 0 = {black, blue, green, red}.

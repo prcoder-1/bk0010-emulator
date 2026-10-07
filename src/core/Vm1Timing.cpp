@@ -6,7 +6,13 @@ namespace {
 
 struct Builder {
     Vm1Sched& s;
-    void add(char k, int gap) { s.op[s.n++] = {k, static_cast<uint8_t>(gap)}; }
+    void add(char k, int gap) { s.op[s.n++] = {k, static_cast<uint8_t>(gap), 0}; }
+    // Приёмник (R)+, который читается: инкремент регистра виден только после быстрого
+    // обмена — следующий шаг на 2 позже.
+    void autoinc() {
+        if (s.n && s.op[s.n - 1].kind == 'M') s.op[s.n - 1].xf = 2;
+        else s.pfXf = 2;
+    }
 };
 
 // Чтения адреса/указателя до самого операнда у режима m (0..7) — после первого обмена.
@@ -37,6 +43,7 @@ bool vm1Schedule(uint16_t ir, Vm1Sched& s) {
         if (dm == 0) {
             s.tail = sm ? 12 : 8;
             s.early = true;
+            s.teFast = op == 1 && (ir & 0100000) ? 8 : 2;      // MOVB в регистр
             return true;
         }
         // Первый обмен приёмника: от конца чтения источника, а при регистровом
@@ -53,7 +60,8 @@ bool vm1Schedule(uint16_t ir, Vm1Sched& s) {
         } else {
             operand(b, dm, first, true);
             if (cmp) s.tail = 12;
-            else { b.add('W', 5); s.tail = 6; }
+            else { b.add('M', 5); s.tail = 6; }
+            if (dm == 2) b.autoinc();
         }
         return true;
     }
@@ -61,9 +69,10 @@ bool vm1Schedule(uint16_t ir, Vm1Sched& s) {
 
     // --- XOR ---
     if ((ir & 0177000) == 0074000) {
-        if (dm == 0) { s.tail = 8; s.early = true; return true; }
+        if (dm == 0) { s.tail = 8; s.early = true; s.teFast = 2; return true; }
         operand(b, dm, (dm == 4 || dm == 5) ? 20 : 18, true);
-        b.add('W', 5); s.tail = 6;
+        b.add('M', 5); s.tail = 6;
+        if (dm == 2) b.autoinc();
         return true;
     }
     // --- SOB ---
@@ -99,11 +108,19 @@ bool vm1Schedule(uint16_t ir, Vm1Sched& s) {
     if (single) {
         const bool tst = idx == 057 || idx == 01057;
         const bool mtps = idx == 01064;
-        if (dm == 0) { s.tail = mtps ? 6 : 8; s.early = true; return true; }
+        const bool swab = idx == 003, mfps = idx == 01067;
+        if (dm == 0) {
+            s.tail = mtps ? 6 : 8; s.early = true;
+            s.teFast = mtps ? 10 : mfps ? 8 : swab ? 4 : 2;
+            if (mtps) s.pfXf = 2;
+            return true;
+        }
         operand(b, dm, (dm == 4 || dm == 5) ? 14 : 12, true);
         if (tst) s.tail = 12;
         else if (mtps) s.tail = 24;
-        else { b.add('W', 5); s.tail = 6; }
+        else { b.add('M', 5); s.tail = 6; }
+        if (dm == 2) b.autoinc();
+        if (swab) s.pfXf = 2;                           // SWAB: хвост после записи
         return true;
     }
     // --- 0000xx ---
@@ -117,8 +134,21 @@ bool vm1Schedule(uint16_t ir, Vm1Sched& s) {
         return true;
     }
     if ((ir & 0177770) == 0000200) { b.add('R', 24); s.tail = 12; return true; }   // RTS
-    if (ir >= 0000240 && ir <= 0000277) { s.tail = 8; s.early = true; return true; } // CCC/SCC/NOP
+    if (ir >= 0000240 && ir <= 0000277) {                                           // CCC/SCC/NOP
+        s.tail = 8; s.early = true; s.teFast = 4;
+        return true;
+    }
     return false;
+}
+
+void vm1InterruptSchedule(bool iako, Vm1Sched& s) {
+    s = Vm1Sched{};
+    Builder b{s};
+    b.add('W', 11); b.add('W', 9);                      // PSW, PC в стек
+    if (iako) { b.add('I', 6); b.add('R', 8); }         // вектор от устройства
+    else b.add('R', 14);
+    b.add('R', 14);                                     // новые PC и PSW
+    s.tail = 22;
 }
 
 } // namespace bk
