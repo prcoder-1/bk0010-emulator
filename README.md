@@ -67,8 +67,51 @@
 
 ## Сборка
 
-Требуется CMake ≥ 3.16, компилятор C++17, Qt6 (Core, Gui, Widgets, OpenGLWidgets).
-Опционально Qt6 Multimedia для звука (`qt6-qtmultimedia-devel`).
+### Зависимости
+
+Обязательно: CMake ≥ 3.16, компилятор C++17, Qt 6 (Core, Gui, Widgets,
+OpenGLWidgets) с заголовками (dev-пакеты), OpenGL.
+Опционально: Qt 6 Multimedia — без него эмулятор собирается, но без звука.
+
+Fedora / RHEL:
+```sh
+sudo dnf install cmake gcc-c++ qt6-qtbase-devel qt6-qtmultimedia-devel mesa-libGL-devel
+```
+
+Debian / Ubuntu (22.04+):
+```sh
+sudo apt install cmake g++ qt6-base-dev libgl1-mesa-dev qt6-multimedia-dev
+```
+Если CMake не находит `Qt6OpenGLWidgets`, доустановите `libqt6opengl6-dev`.
+
+Arch / Manjaro:
+```sh
+sudo pacman -S cmake base-devel qt6-base qt6-multimedia
+```
+
+openSUSE:
+```sh
+sudo zypper install cmake gcc-c++ qt6-base-devel qt6-opengl-devel qt6-multimedia-devel
+```
+
+macOS (Homebrew):
+```sh
+brew install cmake qt@6
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+```
+
+Windows (или Qt из официального онлайн-установщика) — укажите путь к комплекту Qt:
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:/Qt/6.x.y/msvc2022_64
+```
+
+Ошибка `Could not find a package configuration file provided by "Qt6"`
+(`Qt6Config.cmake`) означает, что dev-пакеты Qt 6 не установлены или CMake не
+знает, где они лежат. Установите пакеты из списка выше или передайте
+`-DCMAKE_PREFIX_PATH=<каталог Qt>`, затем удалите старый каталог `build/`
+(в его кэше остаётся `Qt6_DIR-NOTFOUND`) и запустите `cmake` заново.
+
+### Команды сборки
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
