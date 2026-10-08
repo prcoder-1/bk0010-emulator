@@ -264,13 +264,13 @@ QJsonArray McpServer::toolDefs() const {
                 {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
     t.append(tool("bk_fdd_wlog", "Dump the floppy write log (every word the controller put on the disk: "
                   "M/W marker flag, value, track, side, head byte position, CPU PC) to a text file.",
-                  QJsonObject{{"path", P("string", "Output text file")},
-                              {"clear", P("boolean", "Clear the log after dumping")}}));
+        schema({{"path", P("string", "Output text file")},
+                {"clear", P("boolean", "Clear the log after dumping")}})));
     t.append(tool("bk_disk_save", "Write the floppy image as it is in memory (with everything the BK wrote to "
                   "it) to a file. Writes by the BK change only the in-memory copy; this persists them. "
                   "`path` defaults to the image's own file.",
-                  QJsonObject{{"path", P("string", "Output image path (default: the attached file itself)")},
-                              {"drive", P("integer", "Drive 0..3 (default 0)")}}));
+        schema({{"path", P("string", "Output image path (default: the attached file itself)")},
+                {"drive", P("integer", "Drive 0..3 (default 0)")}})));
     t.append(tool("bk_reset", "Power-on reset the machine. `cpu_phase` (0/1) picks the CPU-clock phase "
                   "relative to the 037 DRAM window that a real BK draws at random on power-up: 0 (default) "
                   "gives MOV (R0),R1 = 28 ticks, 1 gives 24. `smk` installs/removes the СМК-512 board "
