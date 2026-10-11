@@ -86,6 +86,14 @@ public:
     // on, so the flame *graph* (which needs the CCT but not spans) pays nothing.
     void setSpansEnabled(bool e) { spansOn_ = e; }
     void flameClear() { flameReset(); }
+    // Обнулить такты, сохранив дерево и активный стек: после сброса возвраты из
+    // уже открытых кадров разбираются верно (flameClear терял бы их контекст).
+    void flameZero() {
+        for (auto& n : flame_) n.self = 0;
+        spans_.clear();
+        for (auto& s : fstack_) s.start = flameTick_;
+    }
+    void execClear() { execCount_.fill(0); execMax_ = 0; }
     const std::vector<FlameNode>& flame() const { return flame_; }
     // Time-ordered spans + the running flame-tick clock (ticks charged while the
     // profiler was on). Currently-open frames are appended (end = now) by openFrames.

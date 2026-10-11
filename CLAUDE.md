@@ -61,10 +61,11 @@ Two layers, deliberately decoupled:
   REAL time (`QElapsedTimer`), not by timer ticks: a frame is 20.48 ms, which is not
   an integral number of milliseconds.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
-  as ~42 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
+  as ~46 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
   run/step/step-over/step-out, regs/mem, break (optionally conditional) / watch
   (data watchpoints), backtrace, xrefs, search/diff memory, type, callers/callees,
-  frames, coverage, profile (speedscope folded stacks), vram (ASCII-art screen),
+  frames, coverage, profile (speedscope folded stacks) / calltree (text CCT) / profile-reset
+  (`frames: N` = profile only the next N frames), vram (ASCII-art screen),
   io-state / io-log, emt-log (EMT 36 file I/O), hotspots, screenshot (inline PNG) /
   audio, state save/load, plus the game-debugging set: `bk_joystick` / `bk_joy_probe`
   (parallel port 0177714), timed input on `bk_key` / `bk_run` (`input` timeline),
