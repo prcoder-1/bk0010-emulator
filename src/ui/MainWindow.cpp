@@ -506,6 +506,7 @@ void MainWindow::loadAnnotations(const QString& path) {
 
 void MainWindow::closeEvent(QCloseEvent* e) {
     saveAnnotations(annotationsPath());   // persist symbols/comments next to the .bin
+    saveDisks();
     QMainWindow::closeEvent(e);
 }
 
@@ -706,10 +707,17 @@ void MainWindow::openDisk(int drive) {
     insertDiskAndBoot(path, drive);
 }
 
+void MainWindow::saveDisks() {
+    bk::Fdd& f = board_->kngmd().fdd();
+    for (int d = 0; d < bk::Fdd::DRIVES; ++d)
+        if (f.attached(d) && !f.readOnly(d)) f.save(d);   // save() дописывает и текущую дорожку
+}
+
 bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
+    saveDisks();
     // Второй привод не перезапускает машину: дискету в него меняют на ходу.
     if (drive == 0) { resetMachine(); board_->ensureMonitorBooted(); }
-    if (!board_->attachDisk(drive, path.toStdString(), true)) {
+    if (!board_->attachDisk(drive, path.toStdString(), !diskRw_)) {
         status_->setText("Не удалось вставить образ — нет roms/disk326.rom или файл не читается");
         return false;
     }

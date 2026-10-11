@@ -40,6 +40,9 @@ public:
     // Вставить образ диска и, для привода A, отдать управление автозагрузчику
     // ПЗУ контроллера. Тем же путём идут и меню, и образ из командной строки.
     bool insertDiskAndBoot(const QString& path, int drive = 0);
+    // --disk-rw: образы вставляются без защиты записи; изменённые пишутся обратно в
+    // файл при выходе и перед заменой дискеты
+    void setDiskWritable(bool on) { diskRw_ = on; }
 
     // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
@@ -110,6 +113,8 @@ private:
     QAction* aspectAction_ = nullptr;   // галка «Пиксели 3:4»
     QString lastBin_;
     QString lastDisk_;      // последний вставленный образ диска
+    bool diskRw_ = false;
+    void saveDisks();
     BkKeymap keymap_;
     Gamepad gamepad_;           // джойстик на порту 0177714 через SDL2-геймпад
     // Host-side typing buffer: a keypress may translate to more than one BK code
