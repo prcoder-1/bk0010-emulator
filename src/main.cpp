@@ -456,6 +456,7 @@ int main(int argc, char** argv) {
     MainWindow w(romDir, g_smk, g_aspect34);
     w.setArbitration(g_arb037);
     w.setCpuPhase(g_cpuPhase);
+    w.setDiskWritable(g_diskRw);
     w.show();
     if (!g_disk.isEmpty()) w.insertDiskAndBoot(g_disk, 0);
     else if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
