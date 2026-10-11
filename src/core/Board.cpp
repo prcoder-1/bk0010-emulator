@@ -496,8 +496,11 @@ bool Board::MpiMux::mpiWrite(uint16_t addr, uint16_t value, bool isByte) {
     // ANDOS с диска LAND.bkd: она меняет страницы, пока драйвер читает сектор.
     const uint16_t a = static_cast<uint16_t>(addr & ~1);
     const bool fddReg = (a == Kngmd::REG_CTRL || a == Kngmd::REG_DATA);
+    // Строб — только запись в регистр управления: слово данных с младшей тетрадой 6
+    // (запись сектора) обязано дойти до дисковода.
     const bool inProtocol = smk && fddReg
-        && (smk->fddBlocked() || (!isByte && (value & 017) == Smk512::STROBE));
+        && (smk->fddBlocked()
+            || (a == Kngmd::REG_CTRL && !isByte && (value & 017) == Smk512::STROBE));
 
     bool taken = false;
     if (smk) taken |= smk->mpiWrite(addr, value, isByte);
