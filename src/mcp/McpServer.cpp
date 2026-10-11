@@ -425,8 +425,22 @@ QJsonArray McpServer::toolDefs() const {
                   "and the largest un-executed gaps in a range (find dead / untested code).",
         schema({{"start", addrArg}, {"end", addrArg}, {"gaps", P("integer", "How many gaps to list (default 12)")}})));
     t.append(tool("bk_profile", "Export the call profile as Brendan-Gregg folded stacks to a file "
-                  "(open in speedscope / flamegraph.pl). Weight = self CPU ticks.",
-        schema({{"path", P("string", "Output .folded path")}}, {"path"})));
+                  "(open in speedscope / flamegraph.pl). Weight = self CPU ticks. With frames=N the "
+                  "profile is cleared first and covers only the next N frames.",
+        schema({{"path", P("string", "Output .folded path")},
+                {"frames", P("integer", "Profile only the next N frames (clears first, then runs)")},
+                {"input", P("array", "Input timeline while running, same format as bk_run")}}, {"path"})));
+    t.append(tool("bk_calltree", "Calling-context tree as text: inclusive % / self % / inclusive ticks "
+                  "per call path, children sorted by cost, plus a flat top of functions by self time. "
+                  "With frames=N the profile is cleared first and covers only the next N frames.",
+        schema({{"depth", P("integer", "Max tree depth (default 8)")},
+                {"min_pct", P("number", "Hide subtrees below this inclusive % (default 1.0)")},
+                {"addr", addrArg},
+                {"flat", P("integer", "Flat top-N by self time (default 10, 0 = off)")},
+                {"frames", P("integer", "Profile only the next N frames (clears first, then runs)")},
+                {"input", P("array", "Input timeline while running, same format as bk_run")}})));
+    t.append(tool("bk_profile_reset", "Clear the profile (call-tree ticks and bk_hotspots counters) "
+                  "keeping the current call stack, to profile from this point on.", schema({})));
     t.append(tool("bk_vram", "Render the screen as ASCII art so you can 'see' it without a PNG. "
                   "mode=ascii (default) downsamples the whole screen by luminance and reports the "
                   "non-black pixel count / bounding box. mode=index prints the exact 2-bit palette "
@@ -1540,7 +1554,90 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         if (gaps.empty()) out += "  (none)\n";
         return textContent(out);
     }
+    // frames > 0: профиль только за отрезок — обнулить, прогнать N кадров (с input).
+    auto profileWindow = [&](QString& note, QString& err) -> bool {
+        const int frames = args.value("frames").toInt(0);
+        if (frames <= 0) return true;
+        std::vector<InputStep> script;
+        if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
+            return false;
+        board_.trace().flameZero();
+        board_.trace().execClear();
+        note = runText(runFrames(frames, script)) + "\n";
+        return true;
+    };
+    if (name == "bk_profile_reset") {
+        board_.trace().flameZero();
+        board_.trace().execClear();
+        return textContent("Profile cleared: call-tree ticks and instruction counters (bk_hotspots) "
+                           "are zero; the current call stack is kept.");
+    }
+    if (name == "bk_calltree") {
+        QString note, err;
+        if (!profileWindow(note, err)) return fail(err);
+        const auto& flame = board_.trace().flame();
+        const int maxDepth = std::max(1, args.value("depth").toInt(8));
+        const double minPct = args.value("min_pct").toDouble(1.0);
+        const int flatN = std::max(0, args.value("flat").toInt(10));
+        // Узлы добавляются после родителя, поэтому обратный проход копит inclusive.
+        std::vector<uint64_t> incl(flame.size());
+        for (size_t i = flame.size(); i-- > 0;) {
+            incl[i] += flame[i].self;
+            if (flame[i].parent >= 0) incl[flame[i].parent] += incl[i];
+        }
+        const uint64_t total = incl.empty() ? 0 : incl[0];
+        if (total == 0) return fail("no profile data — run the program first (or pass frames)");
+        auto pct = [&](uint64_t v) { return 100.0 * double(v) / double(total); };
+        auto label = [&](uint16_t fn) {
+            auto it = symName_.find(fn);
+            return it != symName_.end() ? QString("%1 <%2>").arg(oct6(fn)).arg(QString::fromStdString(it->second)) : oct6(fn);
+        };
+        std::vector<int> roots;
+        uint16_t focus = 0;
+        if (args.contains("addr")) {
+            QString e; if (!resolveAddr(args, "addr", focus, e)) return fail(e);
+            for (size_t i = 1; i < flame.size(); ++i) {
+                if (flame[i].func != focus || !incl[i]) continue;
+                bool nested = false;                      // только внешние вхождения — без двойного счёта
+                for (int p = flame[i].parent; p > 0 && !nested; p = flame[p].parent) nested = flame[p].func == focus;
+                if (!nested) roots.push_back((int)i);
+            }
+            if (roots.empty()) return fail("function " + oct6(focus) + " has no ticks in the profile");
+            std::sort(roots.begin(), roots.end(), [&](int a, int b) { return incl[a] > incl[b]; });
+        } else roots.push_back(0);
+
+        QString out = note + QString("Call tree: %1 ticks (%2 frames of 61440)%3. incl% / self% / incl ticks:\n")
+            .arg(total).arg(double(total) / 61440.0, 0, 'f', 1)
+            .arg(args.contains("addr") ? " — subtrees of " + label(focus) : QString());
+        int hidden = 0;
+        std::function<void(int, int)> walk = [&](int n, int d) {
+            QString fn = n == 0 ? QString("(top level)") : label(flame[n].func);
+            out += QString("%1%2%  %3%  %4  %5\n").arg(QString(d * 2, ' '))
+                .arg(pct(incl[n]), 5, 'f', 1).arg(pct(flame[n].self), 5, 'f', 1).arg(incl[n], 9).arg(fn);
+            if (d + 1 >= maxDepth) { if (!flame[n].kids.empty()) ++hidden; return; }
+            std::vector<int> kids;
+            for (auto& k : flame[n].kids) if (incl[k.second]) kids.push_back(k.second);
+            std::sort(kids.begin(), kids.end(), [&](int a, int b) { return incl[a] > incl[b]; });
+            for (int k : kids) { if (pct(incl[k]) < minPct) { ++hidden; continue; } walk(k, d + 1); }
+        };
+        for (int r : roots) walk(r, 0);
+        if (hidden) out += QString("  (%1 branches hidden by depth=%2 / min_pct=%3)\n").arg(hidden).arg(maxDepth).arg(minPct);
+
+        if (flatN > 0) {                                  // плоский топ по собственному времени
+            std::unordered_map<uint16_t, uint64_t> self;
+            for (size_t i = 1; i < flame.size(); ++i) self[flame[i].func] += flame[i].self;
+            std::vector<std::pair<uint64_t, uint16_t>> v;
+            for (auto& kv : self) if (kv.second) v.push_back({kv.second, kv.first});
+            std::sort(v.rbegin(), v.rend());
+            out += "Top functions by self time:\n";
+            for (int i = 0; i < flatN && i < (int)v.size(); ++i)
+                out += QString("  %1%  %2  %3\n").arg(pct(v[i].first), 5, 'f', 1).arg(v[i].first, 9).arg(label(v[i].second));
+        }
+        return textContent(out);
+    }
     if (name == "bk_profile") {
+        QString note, err;
+        if (!profileWindow(note, err)) return fail(err);
         QString path = args.value("path").toString();
         const auto& flame = board_.trace().flame();
         if (flame.size() < 2) return fail("no profile data — the call tree is empty (run the game first)");
@@ -1561,7 +1658,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             ++lines;
         }
         std::fclose(f);
-        return textContent(QString("Wrote %1 folded-stack lines to %2 (open in speedscope or flamegraph.pl).").arg(lines).arg(path));
+        return textContent(note + QString("Wrote %1 folded-stack lines to %2 (open in speedscope or flamegraph.pl).").arg(lines).arg(path));
     }
     if (name == "bk_vram") {
         const bool mono = args.value("mono").toBool(false);
