@@ -90,16 +90,19 @@ void Board::timerCheck() {
     }
 }
 
-// Граница кадра эмулятора — кадровый синхроимпульс 037 (nVSYNC), в тот же момент
-// выдаётся кадровое прерывание. Видимые строки предыдущего кадра к этому времени
-// уже пройдены (импульс — на 21-й строке гашения), так что дорисовываем хвост и
-// начинаем новый кадр с нулевой строки; до неё луч дойдёт через 43 строки.
+// Граница кадра эмулятора — момент кадрового прерывания: на БК-0010 синхроимпульс
+// 037 (nVSYNC, 21-я строка гашения, до поля 43 строки), на БК-0011М — 2-я строка
+// кадрового гашения (до поля 63 строки). Видимые строки предыдущего кадра к этому времени уже
+// пройдены, так что дорисовываем хвост и начинаем новый кадр с нулевой строки.
 void Board::beginFrameRaster() {
     if (scanlineRender_) {
         renderRasterTo(Screen::TEX_H, 0);
         renderedLine_ = 0; renderedWord_ = 0;
     }
-    vp037_.syncToVsync();
+    // Где в развёртке приходит кадровое прерывание: на БК-0011М — через строку после
+    // начала кадрового гашения (снято по заставке Prince of Persia), на БК-0010 — на
+    // nVSYNC (RTL 037).
+    vp037_.syncToLine(bk11() ? Vp037::IRQ11_LINE : Vp037::VSYNC_LINE);
     vpHalf_ = 0;
 }
 
@@ -118,6 +121,40 @@ void Board::renderRasterTo(int line, int word) {
         screen_.renderSpan(mem_, line, scroll_, renderedWord_, word);
         renderedWord_ = word;
     }
+}
+
+// Запись в регистр экрана (0177662 на 11М, 0177664). На шине она идёт последним
+// обменом команды, то есть почти в её конце, а ioWrite зовётся из середины исполнения,
+// пока луч ещё стоит на начале команды. При построчной отрисовке это сдвигало смену
+// палитры на 5..6 слов строки раньше, поэтому внутри команды запись откладывается до
+// конца команды (applyRasterPending), а вне её (отладчик, тесты) применяется сразу.
+void Board::rasterWrite(uint16_t addr, uint16_t value) {
+    if (inStep_ && scanlineRender_) {
+        if (rasterPending_) applyRasterPending();   // две записи в одной команде — редкость
+        rasterPending_ = true;
+        pendingAddr_ = addr;
+        pendingVal_ = value;
+        pendingLogged_ = ioLogOn_ && !ioLog_.empty() && ioLog_.back().addr == addr
+                         && ioLog_.back().tick == totalTicks_ && !ioLog_.back().isRead;
+        return;
+    }
+    flushRaster();
+    applyRasterValue(addr, value);
+}
+
+void Board::applyRasterPending() {
+    rasterPending_ = false;
+    flushRaster();
+    applyRasterValue(pendingAddr_, pendingVal_);
+    if (pendingLogged_ && !ioLog_.empty() && ioLog_.back().addr == pendingAddr_) {
+        ioLog_.back().line = static_cast<int16_t>(vp037_.scanline());   // где запись вступила в силу
+        ioLog_.back().word = static_cast<uint8_t>(vp037_.lineWord());
+    }
+}
+
+void Board::applyRasterValue(uint16_t addr, uint16_t value) {
+    if (addr == REG_SCROLL) { scroll_ = value; vp037_.setM256(scroll_ & 01000); }
+    else { reg662_ = value; apply662(); }
 }
 
 // Догнать растр до текущего положения луча — перед сменой палитры/экрана/скролла,
@@ -281,10 +318,13 @@ int Board::stepCore() {
     watchArmed_ = false;
     uint16_t ir = arb037_ ? mem_.peekWord(pcBefore) : 0;
     nAcc_ = 0;
+    inStep_ = true;
     int t = cpu_.step();
+    inStep_ = false;
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
     if (arb037_) t = busTicks(ir, t);
     advanceDevices(t);
+    if (rasterPending_) applyRasterPending();   // запись в регистр экрана — в конце команды
     // Взведённые запросы разбираются после КАЖДОЙ команды, а не раз в кадр: иначе
     // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
     if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_) {
@@ -1484,8 +1524,8 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
     // из младшего байта при ADD/INC регистра (прокрутка) прополз бы в бит 9 и ложно
     // включал бы малый экран (баг в RUNING.BIN при движении вниз по лабиринту).
     case REG_SCROLL:
-        flushRaster();
-        scroll_ = value & 01377; vp037_.setM256(scroll_ & 01000); return true;
+        rasterWrite(REG_SCROLL, static_cast<uint16_t>(value & 01377));
+        return true;
     case REG_TIMER_LIM: timerLimit_ = value; return true;
     case REG_TIMER_CNT: return true;                       // counter is read-only
     case REG_TIMER_CSR: timerSetMode(value & 0377); return true;
@@ -1529,9 +1569,7 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // БК-0011М: регистр палитры, экранного буфера и кадрового таймера
             // (маска 0147400, GID Board_11M.cpp:191-222). Текущую строку растра
             // сначала дорисовываем старой палитрой — смена видна с места луча.
-            flushRaster();
-            reg662_ = static_cast<uint16_t>((reg662_ & ~0147400) | (wide & 0147400));
-            apply662();
+            rasterWrite(REG_KBD_DATA, static_cast<uint16_t>((reg662_ & ~0147400) | (wide & 0147400)));
             return true;
         }
         // Регистр данных клавиатуры на БК-0010 доступен ТОЛЬКО по чтению. Запись

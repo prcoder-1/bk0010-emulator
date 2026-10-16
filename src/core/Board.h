@@ -454,6 +454,14 @@ private:
     uint16_t reg716tap_ = 0;    // БК-0011М: 0177716 при бите 11 = 0
     void apply662();            // палитра и экранная страница из reg662_
     void flushRaster();         // дорисовать растр до текущего положения луча
+    // Запись в регистр экрана вступает в силу в конце команды (см. rasterWrite).
+    void rasterWrite(uint16_t addr, uint16_t value);
+    void applyRasterPending();
+    void applyRasterValue(uint16_t addr, uint16_t value);
+    bool     inStep_ = false;           // идёт cpu_.step() — запись регистра экрана отложить
+    bool     rasterPending_ = false;
+    bool     pendingLogged_ = false;
+    uint16_t pendingAddr_ = 0, pendingVal_ = 0;
     int  vpHalf_ = 0;           // остаток полутактов CLKIN (1 такт ЦП = 1,5 CLKIN на 11М)
     bool ayOn_ = false;         // звуковой сопроцессор на 0177714
     // Микросхема НГМД выдаёт слово раз в 64 мкс: 192 такта при 3 МГц, 256 при 4 МГц.
