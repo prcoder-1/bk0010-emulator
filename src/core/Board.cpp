@@ -94,7 +94,7 @@ void Board::timerCheck() {
 // 037 (nVSYNC, 21-я строка гашения, до поля 43 строки), на БК-0011М — 2-я строка
 // кадрового гашения (до поля 63 строки). Видимые строки предыдущего кадра к этому времени уже
 // пройдены, так что дорисовываем хвост и начинаем новый кадр с нулевой строки.
-void Board::beginFrameRaster() {
+void Board::beginFrameRaster(int over) {
     if (scanlineRender_) {
         renderRasterTo(Screen::TEX_H, 0);
         renderedLine_ = 0; renderedWord_ = 0;
@@ -104,6 +104,28 @@ void Board::beginFrameRaster() {
     // nVSYNC (RTL 037).
     vp037_.syncToLine(bk11() ? Vp037::IRQ11_LINE : Vp037::VSYNC_LINE);
     vpHalf_ = 0;
+    // Граница кадра пришлась на середину команды: луч уже ушёл от неё на `over` тактов.
+    if (over > 0) {
+        vpHalf_ = over * (2 * CLKIN_HZ / cpuFreqHz_);
+        vp037_.tick(vpHalf_ >> 1);
+        vpHalf_ &= 1;
+    }
+}
+
+// Граница кадра по абсолютному счёту тактов: каждый кадр — ровно ticksPerFrame() от
+// начала предыдущего. Кадр гоняют командами, и последняя перелетает границу на
+// несколько тактов (плюс вход в кадровое прерывание); раньше этот перелёт терялся,
+// кадр эмулятора выходил длиннее кадра 037 на десятки тактов, и всё, что держится за
+// таймер ВМ1 (а не за кадровое прерывание), уползало по экрану — в INSULT (часть 19)
+// полоса смены палитры за минуту доползала от бегущей строки до верха экрана. Перелёт
+// переносится в следующий кадр; если граница прошла давно (шаг в отладчике, пауза,
+// снимок) — кадр начинается заново от текущего такта.
+void Board::beginFrame() {
+    const uint64_t T = static_cast<uint64_t>(ticksPerFrame());
+    const uint64_t start = (totalTicks_ >= frameEnd_ && totalTicks_ - frameEnd_ < T) ? frameEnd_ : totalTicks_;
+    frameEnd_ = start + T;
+    beginFrameRaster(static_cast<int>(totalTicks_ - start));
+    deliverFrameInterrupts();
 }
 
 // Догнать отрисовку до строки `line`, слова `word` (всё ДО этой точки луч уже
@@ -565,6 +587,7 @@ void Board::reset() {
     timerCount_ = 0177777;
     timerLimit_ = 0177777;
     totalTicks_ = 0;
+    frameEnd_ = 0;
     // Счёт тактов начинается заново — и вращение диска вместе с ним. Иначе следующий
     // оборот оставался «в будущем» прошлой сессии, диск не крутился, и повторный сброс
     // с дискетой в приводе (на 11М её грузит БОС) загрузку не находил.
@@ -1024,16 +1047,16 @@ int Board::runTicks(int ticks) {
 }
 
 bool Board::runUntil(uint16_t addr, int maxTicks) {
-    int done = 0, frameTicks = 0;
+    int done = 0;
+    // Прогон отладчика обязан продолжать выдавать кадровые прерывания 50 Гц:
+    // подпрограмма, которая ждёт кадра (или стоит на WAIT), иначе не дождётся
+    // никогда, и «шаг с обходом»/«до адреса» просто упрётся в лимит тактов.
+    if (totalTicks_ >= frameEnd_) beginFrame();
     while (done < maxTicks) {
         if (cpu_.halted()) return false;
-        // Прогон отладчика обязан продолжать выдавать кадровые прерывания 50 Гц:
-        // подпрограмма, которая ждёт кадра (или стоит на WAIT), иначе не дождётся
-        // никогда, и «шаг с обходом»/«до адреса» просто упрётся в лимит тактов.
-        if (frameTicks == 0) { beginFrameRaster(); deliverFrameInterrupts(); }
         int t = stepCore();
-        done += t; frameTicks += t;
-        if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
+        done += t;
+        if (totalTicks_ >= frameEnd_) { trace_.tick(); ++framesSinceReset_; beginFrame(); }
         if (cpu_.pc() == addr) { screen_.setScroll(scroll_); return true; }
         if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc()) && breakAllows(cpu_.pc())) {
             breakHit_ = true; screen_.setScroll(scroll_); return true;
@@ -1045,13 +1068,13 @@ bool Board::runUntil(uint16_t addr, int maxTicks) {
 }
 
 bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
-    int done = 0, frameTicks = 0;
+    int done = 0;
+    if (totalTicks_ >= frameEnd_) beginFrame();   // 50 Hz IRQ
     while (done < maxTicks) {
         if (cpu_.halted()) { screen_.setScroll(scroll_); return false; }
-        if (frameTicks == 0) { beginFrameRaster(); deliverFrameInterrupts(); }  // 50 Hz IRQ
         int t = stepCore();
-        done += t; frameTicks += t;
-        if (frameTicks >= ticksPerFrame()) { frameTicks = 0; trace_.tick(); ++framesSinceReset_; }
+        done += t;
+        if (totalTicks_ >= frameEnd_) { trace_.tick(); ++framesSinceReset_; beginFrame(); }
         if (trace_.stackDepth() < targetDepth) { screen_.setScroll(scroll_); return true; }
         if (!breakpoints_.empty() && breakpoints_.count(cpu_.pc()) && breakAllows(cpu_.pc())) breakHit_ = true;
         if (breakHit_) { screen_.setScroll(scroll_); return true; }
@@ -1061,29 +1084,24 @@ bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
 }
 
 void Board::runFrame() {
-    beginFrameRaster();                     // верх кадра: доотрисовать прошлый, ресинк 037
-    deliverFrameInterrupts();
-    runTicks(ticksPerFrame());
+    beginFrame();                           // граница кадра: растр, ресинк 037, IRQ
+    if (totalTicks_ < frameEnd_) runTicks(static_cast<int>(frameEnd_ - totalTicks_));
     trace_.tick();
     ++framesSinceReset_;
 }
 
 void Board::runFrameSlice(int slice, int nslices) {
     if (nslices < 1) nslices = 1;
-    if (slice <= 0) {
-        beginFrameRaster();                     // верх кадра (VSYNC)
-        deliverFrameInterrupts(); sliceIdle_ = false; sliceFrameTicks_ = 0;
-    }
+    if (slice <= 0) { beginFrame(); sliceIdle_ = false; }   // верх кадра (прерывание)
     if (!sliceIdle_) {
-        // Run up to this slice's *cumulative* tick boundary, so per-slice overshoot
-        // is compensated in the next slice and the frame totals exactly ticksPerFrame
-        // — the whole frame then runs the identical instruction stream as runFrame().
-        int target = static_cast<int>(static_cast<int64_t>(ticksPerFrame()) * (slice + 1) / nslices);
-        int want = target - sliceFrameTicks_;
-        if (want > 0) {
-            int ran = runTicks(want);
-            sliceFrameTicks_ += ran;
-            // A short run means the CPU idled (WAIT/HALT) or a breakpoint stopped it;
+        // Каждый слайс доходит до своей доли кадра по абсолютному счёту тактов, так что
+        // кадр целиком — тот же поток команд, что и runFrame().
+        const uint64_t T = static_cast<uint64_t>(ticksPerFrame());
+        const uint64_t target = frameEnd_ - T + T * static_cast<uint64_t>(slice + 1) / static_cast<uint64_t>(nslices);
+        if (totalTicks_ < target) {
+            const int want = static_cast<int>(target - totalTicks_);
+            const int ran = runTicks(want);
+            // A short run means the CPU halted or a breakpoint stopped it;
             // it stays idle for the rest of the frame, so skip the later slices.
             if (ran < want) sliceIdle_ = true;
         }
@@ -1399,7 +1417,8 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
     if (handled && ioLogOn_ && ioLogReads_ && addr >= ADDR_IO_PAGE &&
         (!ioLogFilter_ || addr == ioLogFilter_)) {
         ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, true,
-                          static_cast<int16_t>(vp037_.scanline()), static_cast<uint8_t>(vp037_.lineWord())});
+                          static_cast<int16_t>(vp037_.scanline()), static_cast<uint8_t>(vp037_.lineWord()),
+                          false, false});
         while (ioLog_.size() > ioLogCap_) ioLog_.pop_front();
     }
     return handled;
@@ -1515,7 +1534,8 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
     if (addr >= ADDR_IO_PAGE) ioLastWrite_[(addr - ADDR_IO_PAGE) >> 1] = value; // for the debugger
     if (ioLogOn_ && addr >= ADDR_IO_PAGE && (!ioLogFilter_ || addr == ioLogFilter_)) {
         ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, false,
-                          static_cast<int16_t>(vp037_.scanline()), static_cast<uint8_t>(vp037_.lineWord())});
+                          static_cast<int16_t>(vp037_.scanline()), static_cast<uint8_t>(vp037_.lineWord()),
+                          isByte, static_cast<bool>(addrIn & 1)});
         while (ioLog_.size() > ioLogCap_) ioLog_.pop_front();
     }
     switch (addr) {
@@ -1569,6 +1589,13 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // БК-0011М: регистр палитры, экранного буфера и кадрового таймера
             // (маска 0147400, GID Board_11M.cpp:191-222). Текущую строку растра
             // сначала дорисовываем старой палитрой — смена видна с места луча.
+            //
+            // Байтовая запись шиной подтверждается, но регистр не меняет: это внешняя
+            // защёлка, как регистр памяти 0177716 («байтовая запись не проходит»,
+            // БК-docs §20.3) и регистр смещения БК-0010. Так выглядит INSULT, часть
+            // 19: её цикл MOVB в 0177663 по строкам на живой машине палитру не трогает
+            // (весь кадр — палитра 0). GID байтовую запись принимает.
+            if (isByte) return true;
             rasterWrite(REG_KBD_DATA, static_cast<uint16_t>((reg662_ & ~0147400) | (wide & 0147400)));
             return true;
         }

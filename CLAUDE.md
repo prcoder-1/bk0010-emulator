@@ -124,6 +124,14 @@ Key cross-cutting facts to know before editing the CPU or screen:
   up to `lineWord()` (`Board::flushRaster`, `Screen::renderSpan`). Inside an instruction such a
   write takes effect at the END of the instruction (`Board::rasterWrite`) — the bus write is the
   last cycle; applying it at the instruction start moved palette splits 5–6 words early.
+  On the 11M a BYTE write to 0177662/0177663 is acknowledged but ignored (INSULT part 19; GID
+  accepts it).
+- **Frames are exactly ticksPerFrame() apart in absolute ticks** (`Board::beginFrame`,
+  `frameEnd_`): the overshoot of the last instruction and the frame-IRQ entry carry into the next
+  frame, and the beam is advanced by it at the frame start. Starting each frame from "now" made
+  the emulated frame tens of ticks too long, so anything locked to the VM1 timer crawled up the
+  screen (INSULT part 19). `runFrame`, `runFrameSlice`, `runUntil`, `runUntilReturn` all go
+  through `beginFrame`.
 - **WAIT idles in time**: `runTicks` no longer skips the rest of the frame on WAIT; it calls
   `idleTicks` in 64-tick chunks so sound (AY music runs from the frame IRQ), the floppy, the
   VM1 timer and the beam keep going. Interrupt entry ticks also go through `advanceDevices`.
