@@ -6,8 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A BK-0010-01 (Soviet PDP-11 clone, K1801VM1 CPU) emulator-debugger in C++17/Qt6
 with OpenGL screen output and a Soft-ICE style debugger. Loads and runs `.BIN`
-game files. Also emulates the **BK-0011M** (menu «Машина», `--machine bk11m`, MCP
-`bk_reset {machine}`): 4 MHz, 128 KB paged RAM, BOS ROMs, 16 palettes switchable
+game files. Also emulates the **BK-0011M** — the DEFAULT machine of the app (GUI without a
+saved choice, headless, MCP server), with the AY on; a `.BIN` on the command line without
+`--machine` runs on the BK-0010, and MCP `bk_load` switches to the BK-0010 by itself. `Board`
+itself still defaults to the BK-0010 (tests rely on it). The 11M is selected via the menu «Машина», `--machine bk11m`, MCP
+`bk_reset {machine}`; it has 4 MHz, 128 KB paged RAM, BOS ROMs, 16 palettes switchable
 mid-frame, the AY-3-8910 on 0177714 — see `docs/bk0011m.md`. See `README.md` for the user-facing feature list and hotkeys, and
 `docs/BK0010-hardware.md` for the verified hardware reference (memory map, I/O
 registers, interrupt vectors, screen encoding, palette, .BIN format, timing).
@@ -68,7 +71,7 @@ Two layers, deliberately decoupled:
   an integral number of milliseconds.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
   as ~46 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
-  run/step/step-over/step-out, regs/mem, break (optionally conditional) / watch
+  run/step/step-over/step-out, `bk_machine` (show / switch БК-0010-01 ↔ БК-0011М), regs/mem, break (optionally conditional) / watch
   (data watchpoints), backtrace, xrefs, search/diff memory, type, callers/callees,
   frames, coverage, profile (speedscope folded stacks) / calltree (text CCT) / profile-reset
   (`frames: N` = profile only the next N frames), vram (ASCII-art screen),

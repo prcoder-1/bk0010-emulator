@@ -19,10 +19,10 @@ public:
     QString fddState() const;
     QString fddLog(int limit) const;      // сводка по контроллеру НГМД для bk_io_state
 
-    // machine: 0 — БК-0010-01, 1 — БК-0011М; ay: -1 — по машине, 0/1 — явно.
+    // machine: 0 — БК-0010-01, 1 — БК-0011М (по умолчанию); ay: -1 — по машине, 0/1 — явно.
     explicit McpServer(std::string romDir, bool smk512 = false,
                        std::string disk = {}, bool diskRw = false,
-                       int machine = 0, int ay = -1);
+                       int machine = 1, int ay = -1);
 
     // Run the stdio message loop until EOF. Returns a process exit code.
     int run();
@@ -80,5 +80,9 @@ private:
     bool    resolveAddr(const QJsonObject& args, const char* key, uint16_t& out, QString& err);
     int     loadSymbols(const QString& path);
     QString regsText();
+    // Включить другую машину (как выключить одну и включить другую): ПЗУ, частота, карта
+    // памяти, отрисовка по лучу на 11М, сброс. false — машина уже такая.
+    bool    switchMachine(bool want11);
+    QString machineText();              // сводка: модель, частота, AY, СМК, диск
     QString disasmText(uint16_t addr, int count);
 };
