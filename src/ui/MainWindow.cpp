@@ -43,7 +43,7 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     board_ = std::make_unique<bk::Board>();
     // Машина: настройка запоминается между запусками, --machine перекрывает её.
     const int machine = machineOverride >= 0 ? machineOverride
-                                             : QSettings().value("machine", 0).toInt();
+                                             : QSettings().value("machine", 1).toInt();
     board_->setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
     {
         const bool ay = ayOverride >= 0 ? ayOverride > 0

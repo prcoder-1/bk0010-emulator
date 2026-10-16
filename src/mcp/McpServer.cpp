@@ -106,6 +106,31 @@ McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool dis
     board_.setSpeakerLog(true);           // фронты динамика — для разбора звука в bk_audio
 }
 
+bool McpServer::switchMachine(bool want11) {
+    if (want11 == board_.bk11()) return false;
+    board_.setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+    board_.setScanlineRender(want11);    // палитры 11М меняются по ходу кадра
+    romsOk_ = board_.loadRoms(romDir_);
+    board_.reset();
+    cyrState_ = false;
+    return true;
+}
+
+QString McpServer::machineText() {
+    const bool b11 = board_.bk11();
+    QString s = QString("Машина: %1, ЦП %2 МГц, кадр %3 тактов (%4 Гц). AY-3-8910 %5, СМК-512 %6, "
+                        "отрисовка %7.")
+        .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
+        .arg(board_.cpuFreqHz() / 1000000).arg(board_.ticksPerFrame())
+        .arg(board_.frameRateHz(), 0, 'f', 2)
+        .arg(board_.ay() ? "вкл" : "выкл").arg(board_.smk512() ? "вкл" : "выкл")
+        .arg(board_.scanlineRender() ? "по лучу" : "покадровая");
+    if (board_.diskAttached(0)) s += QString(" Дискета A: %1.").arg(QString::fromStdString(board_.diskPath(0)));
+    if (!romsOk_) s += QString(" ⚠ ПЗУ %1 не загружены из %2.").arg(b11 ? "БК-0011М" : "БК-0010")
+                           .arg(QString::fromStdString(romDir_));
+    return s;
+}
+
 // Сводка по контроллеру НГМД для bk_io_state. Длины последних полей — главное:
 // поле идентификатора это 5 слов, поле данных 258; всё, что короче, означает, что
 // процессор не поспел за темпом обмена и передача оборвалась.
@@ -291,6 +316,16 @@ QJsonArray McpServer::toolDefs() const {
                 {"disk", P("string", "Floppy image (.bkd/.img) to insert into drive 0 and boot; \"\" = eject (default: keep)")},
                 {"disk_rw", P("boolean", "Insert the image writable (default false = read-only)")},
                 {"frames", P("integer", "Run this many frames after reset/boot (default 0)")}})));
+    t.append(tool("bk_machine", "Show or switch the emulated machine. Without `machine` it reports the "
+                  "current model (БК-0010-01 or БК-0011М), CPU clock, frame length, AY / СМК-512 state and the "
+                  "inserted floppy. With `machine` = \"bk10\" or \"bk11m\" it powers on the other machine: "
+                  "ROMs, 3/4 MHz clock, memory map and per-scanline rendering change, RAM is cleared and the CPU "
+                  "starts from the ROM (switching to the current model does nothing). An inserted floppy stays "
+                  "in drive A and is booted (BOS boots it on the 11M by itself). The AY chip follows the "
+                  "machine's default (on for bk11m) unless `ay` is given. .BIN programs load only on bk10.",
+        schema({{"machine", P("string", "\"bk10\" (БК-0010-01) or \"bk11m\" (БК-0011М); omit to just report")},
+                {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: the machine's default when switching, else keep)")},
+                {"frames", P("integer", "Run this many frames after switching (default 0)")}})));
     t.append(tool("bk_run", "Run frames (with 50 Hz interrupts) until a breakpoint, HALT, or the frame "
                   "limit. `input` scripts keyboard/joystick over time, so a whole control sequence "
                   "is reproducible in ONE call — e.g. "
@@ -837,6 +872,10 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
 
     if (name == "bk_load") {
         if (!romsOk_) return fail("ROMs not loaded from " + QString::fromStdString(romDir_));
+        // .BIN грузится только на БК-0010-01; сервер по умолчанию — БК-0011М, поэтому
+        // загрузка программы сама переключает машину (как bk_reset {"machine":"bk10"}).
+        QString switched;
+        if (switchMachine(false)) switched = "Машина переключена на БК-0010-01 (.BIN грузится только туда). ";
         if (args.value("reset").toBool(false)) {
             board_.reset();          // заодно сбрасывает трассу: данные двух игр не смешиваются
             cyrState_ = false;
@@ -858,7 +897,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         RunOutcome r;
         const int frames = args.value("frames").toInt(0);
         if (frames > 0) r = runFrames(frames);
-        return textContent(QString("Loaded %1: addr=%2 len=%3 (octal).%4%5\n%6")
+        return textContent(switched + QString("Loaded %1: addr=%2 len=%3 (octal).%4%5\n%6")
             .arg(lastBin_).arg(oct6(a)).arg(oct6(l)).arg(entry)
             .arg(frames > 0 ? "\n" + runText(r) : QString())
             .arg(regsText()));
@@ -890,16 +929,37 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             .arg(path.isEmpty() ? QString::fromStdString(fdd.path(drive)) : path)
             .arg(dirty ? "had changes" : "no changes since attach"));
     }
+    if (name == "bk_machine") {
+        QString head;
+        if (args.contains("machine")) {
+            const QString m = args.value("machine").toString().toLower();
+            const bool want11 = m.contains("11");
+            if (!want11 && !m.contains("10")) return fail("machine must be \"bk10\" or \"bk11m\"");
+            if (switchMachine(want11)) {
+                head = "Машина переключена, питание включено заново.";
+                if (board_.diskAttached(0) && !board_.bk11()) {
+                    // БК-0010: сначала монитор, потом автозагрузчик контроллера (на 11М это делает БОС).
+                    board_.ensureMonitorBooted();
+                    board_.bootFromDisk();
+                    head += " Загрузка с дискеты A.";
+                }
+            } else {
+                head = "Машина уже такая — ничего не меняю.";
+            }
+        }
+        if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
+        RunOutcome r;
+        const int frames = args.value("frames").toInt(0);
+        if (frames > 0) r = runFrames(frames);
+        return textContent((head.isEmpty() ? QString() : head + "\n") + machineText() + "\n"
+                           + (frames > 0 ? runText(r) + "\n" : QString()) + regsText());
+    }
     if (name == "bk_reset") {
         if (args.contains("machine")) {
             const QString m = args.value("machine").toString().toLower();
             const bool want11 = m.contains("11");
             if (!want11 && !m.contains("10")) return fail("machine must be \"bk10\" or \"bk11m\"");
-            if (want11 != board_.bk11()) {
-                board_.setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
-                board_.setScanlineRender(want11);
-                romsOk_ = board_.loadRoms(romDir_);
-            }
+            switchMachine(want11);
         }
         if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
         if (args.contains("cpu_phase")) board_.setCpuPhase(args.value("cpu_phase").toInt());

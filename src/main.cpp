@@ -25,6 +25,7 @@
 #include "Disasm.h"
 #include <QKeyEvent>
 #include <QGuiApplication>
+#include <QSettings>
 
 // Self-test of the Qt-key -> BK-code translation (Cyrillic, РУС/ЛАТ, Ctrl, specials).
 static int runKeyTest() {
@@ -71,7 +72,8 @@ static bool g_arb037 = true;
 static int  g_cpuPhase = 0;
 static bool g_scanline = false;   // --scanline: построчная отрисовка экрана
 // --machine bk10|bk11m (--bk10, --bk11m): эмулируемая машина. -1 — ключ не задан
-// (в GUI берётся сохранённая настройка, в безголовом режиме и MCP — БК-0010-01).
+// (в GUI берётся сохранённая настройка, по умолчанию БК-0011М; в безголовом режиме
+// и MCP — БК-0011М; с .BIN в командной строке — БК-0010-01, .BIN грузится только туда).
 static int  g_machine = -1;
 // --ay / --no-ay: звуковой сопроцессор AY-3-8910 на 0177714. -1 — по машине
 // (на БК-0011М включён, на БК-0010 выключен) или сохранённая настройка GUI.
@@ -120,7 +122,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
         if (fc.size() == 2) keys.push_back({fc[0].toInt(), fc[1].toInt(nullptr, 0)});
     }
     bk::Board board;
-    board.setMachine(g_machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+    board.setMachine(g_machine == 0 ? bk::Machine::Bk0010 : bk::Machine::Bk0011m);
     if (g_ay >= 0) board.setAy(g_ay != 0);
     board.setMstd(g_mstd);
     board.setArbitration(g_arb037);
@@ -361,7 +363,8 @@ static void printHelp(const char* prog) {
         "идёт загрузка; любой другой файл — программа в формате .BIN (только БК-0010-01).\n"
         "\n"
         "Машина:\n"
-        "  --machine bk10|bk11m   эмулируемая машина (в GUI выбор запоминается в меню «Машина»)\n"
+        "  --machine bk10|bk11m   эмулируемая машина; по умолчанию БК-0011М (в GUI — выбор\n"
+        "                         из меню «Машина»), а с .BIN в командной строке — БК-0010-01\n"
         "  --bk10, --bk11m        то же коротко\n"
         "  --ay, --no-ay          звуковой сопроцессор AY-3-8910 на порту 0177714\n"
         "                         (по умолчанию: на БК-0011М вкл, на БК-0010 выкл)\n"
@@ -437,7 +440,7 @@ int main(int argc, char** argv) {
             if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
             bool smk = false;
             std::string disk; bool diskRw = false;
-            int machine = 0, ay = -1;
+            int machine = 1, ay = -1;      // по умолчанию — БК-0011М
             for (int j = 1; j < argc; ++j) {
                 if (std::string(argv[j]) == "--machine" && j + 1 < argc)
                     machine = std::max(0, parseMachine(QString::fromLocal8Bit(argv[j + 1])));
@@ -538,12 +541,23 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Машина по умолчанию — БК-0011М. Но .BIN грузится только на БК-0010-01, поэтому
+    // программа в командной строке без явного --machine запускает этот раз БК-0010-01
+    // (сохранённую настройку GUI это не меняет).
+    if (g_machine < 0 && !binToLoad.isEmpty() && g_disk.isEmpty()) {
+        g_machine = 0;
+        std::fprintf(stderr, ".BIN: машина БК-0010-01 (на БК-0011М .BIN не загружается)\n");
+    }
+    // Какая машина реально запустится: ключ, иначе сохранённая настройка GUI, иначе 11М.
+    const int effMachine = g_machine >= 0 ? g_machine
+                         : headless ? 1 : QSettings().value("machine", 1).toInt();
+
     // Дискета почти всегда подразумевает и блок расширения памяти: у голой
     // БК-0010-01 под ядро остаётся около 16 Кбайт ОЗУ, и большинство систем без
     // платы просто некуда грузить. Поэтому образ включает СМК-512 сам, если ключ
     // не задан явно; --no-smk по-прежнему сильнее. Сохранённую настройку GUI это
     // не переписывает — плата включается только на этот запуск.
-    if (!g_disk.isEmpty() && g_smk < 0 && g_machine != 1) {
+    if (!g_disk.isEmpty() && g_smk < 0 && effMachine == 0) {
         g_smk = 1;
         std::fprintf(stderr, "Дискета: включён блок расширения памяти СМК-512 "
                              "(отключить — ключом --no-smk)\n");

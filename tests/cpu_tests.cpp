@@ -2185,6 +2185,38 @@ int main() {
     }
 
 
+    // ---- БК-0011М: БОС грузится с дискеты и после повторного сброса ----------
+    // Сброс обнуляет счёт тактов; момент следующего оборота диска раньше оставался из
+    // прошлой сессии, диск «стоял», и второй раз дискета не грузилась.
+    {
+        Board b; b.setMachine(Machine::Bk0011m);
+        if (b.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            const std::string img = (std::filesystem::temp_directory_path() / "bk11_boot_test.img").string();
+            {
+                std::vector<uint8_t> d(819200, 0);
+                const uint16_t code[] = {000240, 012737, 0123, 02000, 000777};   // NOP; MOV #123,@#2000; BR .
+                for (size_t i = 0; i < sizeof code / sizeof code[0]; ++i) {
+                    d[2 * i] = static_cast<uint8_t>(code[i] & 0xff);
+                    d[2 * i + 1] = static_cast<uint8_t>(code[i] >> 8);
+                }
+                FILE* f = std::fopen(img.c_str(), "wb");
+                std::fwrite(d.data(), 1, d.size(), f);
+                std::fclose(f);
+            }
+            b.reset();
+            CHECK(b.attachDisk(0, img), "11М: дискета вставлена");
+            b.bootFromDisk();
+            for (int i = 0; i < 300 && b.memory().peekWord(02000) != 0123; ++i) b.runFrame();
+            CHECK(b.memory().peekWord(02000) == 0123, "11М: БОС загрузился с дискеты");
+            b.memory().pokeWord(02000, 0);
+            for (int i = 0; i < 400; ++i) b.runFrame();     // наработать такты дольше окна ожидания ниже
+            b.reset();
+            for (int i = 0; i < 300 && b.memory().peekWord(02000) != 0123; ++i) b.runFrame();
+            CHECK(b.memory().peekWord(02000) == 0123, "11М: повторный сброс снова грузит с дискеты");
+            std::filesystem::remove(img);
+        }
+    }
+
     // ======================= БК-0011М + СМК-512 ================================
     {
         Board b; b.setMachine(Machine::Bk0011m);
