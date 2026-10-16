@@ -114,13 +114,16 @@ Key cross-cutting facts to know before editing the CPU or screen:
   firmware would, and the floppy controller stays on the bus even with no disks — BOS probes
   it with a write to 0177130, which the SMK accepts, then calls 0160000. On the 11M `IoBus::ioWrite` gets the UNALIGNED address for
   byte writes (the odd byte goes to the high half, as in GID).
-- **The emulator frame starts at the 037 nVSYNC pulse** (both machines): `Vp037::syncToVsync`
-  puts the beam on line 277 (21st blanking line, RTL `va_037.v:239-241`), the 0100 IRQ is
-  delivered there, and the visible field starts 43 lines later. `Vp037::fieldLine()` is the
-  field line within the current frame (negative before the field); per-scanline rendering
-  uses it, and a write to 0177662/0177664 first finishes the current line up to
-  `lineWord()` (`Board::flushRaster`, `Screen::renderSpan`) — that is how mid-line palette
-  changes (INSULT, DENON) render.
+- **The emulator frame starts at the frame IRQ** (`Vp037::syncToLine`): on the BK-0010 at the
+  037 nVSYNC pulse, line 277 (21st blanking line, RTL `va_037.v:239-241`), 43 lines before the
+  field; on the BK-0011M at line 257 (`Vp037::IRQ11_LINE`, one line after blanking starts, 63
+  lines before the field) — fitted to Prince of Persia's title screen, whose SOB-timed palette
+  switches land on the art boundaries (rows 130/221) only there; nVSYNC put them 20 lines low.
+  `Vp037::fieldLine()` is the field line within the current frame (negative before the field);
+  per-scanline rendering uses it, and a write to 0177662/0177664 first finishes the current line
+  up to `lineWord()` (`Board::flushRaster`, `Screen::renderSpan`). Inside an instruction such a
+  write takes effect at the END of the instruction (`Board::rasterWrite`) — the bus write is the
+  last cycle; applying it at the instruction start moved palette splits 5–6 words early.
 - **WAIT idles in time**: `runTicks` no longer skips the rest of the frame on WAIT; it calls
   `idleTicks` in 64-tick chunks so sound (AY music runs from the frame IRQ), the floppy, the
   VM1 timer and the beam keep going. Interrupt entry ticks also go through `advanceDevices`.

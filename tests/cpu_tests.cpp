@@ -2097,6 +2097,37 @@ int main() {
                       (px[100 * Screen::TEX_W + splitWord * 16 - 1] & 0xFFFFFF) == 0xFFFFFF,
                       "11М: до слова, где стоял луч, — старая палитра");
             }
+            // ---- Фаза кадрового прерывания 11М и момент записи в регистр палитры ----
+            {
+                b.reset();
+                b.setScanlineRender(true);
+                m.pokeWord(01000, 000777);
+                b.cpu().reset(01000, 0340);
+                b.runFrameSlice(0, 100000);
+                CHECK(b.vp037().fieldLine() == -63 && b.vp037().scanline() == Vp037::IRQ11_LINE,
+                      "11М: кадр (и прерывание 0100) — через строку после начала гашения, за 63 строки до поля");
+                Board z; z.reset(); z.memory().pokeWord(01000, 000777); z.cpu().reset(01000, 0340);
+                z.runFrameSlice(0, 100000);
+                CHECK(z.vp037().fieldLine() == -43, "БК-0010: кадр — на nVSYNC, за 43 строки до поля");
+                // Запись MOV #0,@#177662 вступает в силу в конце команды, а не в её начале.
+                for (size_t i = 0; i < Memory::PAGE11_BYTES; ++i) m.ram11()[5 * Memory::PAGE11_BYTES + i] = 0377;
+                loadProg(m, 01000, {012737, 0, 0177662, 000777});   // MOV #0,@#177662; BR .
+                m.pokeWord(02000, 000777);                            // BR . — ожидание
+                m.writeWord(0177662, 017 << 8);                  // палитра 15: цвет 3 — белый
+                b.cpu().reset(02000, 0340);
+                b.runFrameSlice(0, 1000);
+                while (!(b.vp037().fieldLine() == 100 && b.vp037().lineWord() >= 6 && b.vp037().lineWord() <= 12))
+                    b.stepInstruction();
+                b.cpu().r[7] = 01000;                            // встать на MOV на строке 100
+                const int w0 = b.vp037().lineWord();
+                b.stepInstruction();                             // MOV #0,@#177662
+                const int w1 = b.vp037().lineWord();
+                while (b.vp037().fieldLine() <= 101) b.stepInstruction();
+                const uint32_t* px = b.screen().pixels();
+                CHECK(w1 > w0 + 2 && (px[100 * Screen::TEX_W + (w0 + 1) * 16] & 0xFFFFFF) == 0xFFFFFF
+                      && (px[100 * Screen::TEX_W + (w1 + 1) * 16] & 0xFFFFFF) == 0xFF0000,
+                      "11М: смена палитры вступает в силу в конце команды записи");
+            }
             // ---- Модель шины 11М: среднее время команд в ДОЗУ (таблица Manwe) ----
             {
                 auto avg = [&](uint16_t ir) {
