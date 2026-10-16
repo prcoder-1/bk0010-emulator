@@ -75,12 +75,14 @@ void Board::timerCheck() {
                                             - static_cast<uint32_t>(delta));
         timerStart_ += delta * timerPeriod_;
     } else {
-        // Reload mode (limit > 0): on each underflow the counter reloads from the
-        // limit. `delta` may span many periods (e.g. a long busy loop between
-        // register reads), so fold it modulo one full period — otherwise
-        // `limit - delta` would underflow to a huge value and the next poll loop
-        // would appear to hang for seconds (Digger frame pacer, commit 1d4128b).
-        uint32_t period = static_cast<uint32_t>(timerLimit_) + 1;   // limit..0 inclusive
+        // Режим перезагрузки (предел > 0): дойдя до нуля, счётчик загружается из
+        // предела, и отдельного отсчёта со значением 0 НЕТ — ноль сразу сменяется
+        // пределом (проверено на живой машине): 5, 4, 3, 2, 1, 5, 4… Период — ровно
+        // предел; INSULT ставит предел 01200 = 640 и получает ровно кадр БК-0011М.
+        // `delta` может охватить много периодов (долгий цикл между чтениями регистра),
+        // поэтому сворачиваем её по модулю периода — иначе `limit - delta` ушло бы в
+        // огромное число и опросный цикл «зависал» бы на секунды (Digger, 1d4128b).
+        uint32_t period = static_cast<uint32_t>(timerLimit_);
         uint32_t rem = static_cast<uint32_t>((delta - timerCount_) % period);
         timerCount_ = static_cast<uint16_t>(timerLimit_ - rem);
         timerStart_ += delta * timerPeriod_;
@@ -222,7 +224,13 @@ void Board::resetDevices() {
     speaker_ = 0;
     sysWriteFlag_ = false;
     cpuMode_ = 0;
-    timerSetMode(0);            // остановить таймер
+    // Таймер останавливается, но счётчик остаётся прежним: «сброс по входам nINIT и
+    // nDCLO никак не изменяет состояние регистра TVE_COUNT» (описание К1801ВМ1, §6.6).
+    // timerSetMode() здесь не годится — запись в TVE_CSR копирует предел в счётчик.
+    timerCheck();               // досчитать счётчик до текущего такта
+    timerCsr_ = 0;
+    timerPeriod_ = TIMER_BASE_PERIOD;
+    timerStart_ = totalTicks_;
     // Регистра режима СМК команда RESET НЕ касается. Она дёргает шинный СБРОС
     // (INIT, контакт Б19), а в прошивке ПЛИС реплики это отдельный сигнал
     // (`reset <= not rst_n`); `extended_reg` обнуляется только по `btn_reset` с
