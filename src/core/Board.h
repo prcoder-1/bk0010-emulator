@@ -390,6 +390,7 @@ private:
     private:
         bool smkRam(uint16_t addr) const;      // ДОЗУ платы подключено по этому адресу?
         bool smkRomCell(uint16_t addr) const;  // здесь по Табл. 1 видно ПЗУ контроллера
+        bool smkVersion(uint16_t addr, uint16_t& value) const;   // слово версии платы 0167776
     };
     MpiMux mux_;
     void updateMpi();
