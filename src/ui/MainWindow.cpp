@@ -119,9 +119,30 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     emu->addAction("&Пауза", this, [this]{ setSuspended(!suspended_); }, QKeySequence(Qt::Key_Pause));
     emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_); }, QKeySequence("F12"));
 
+    // --- Машина: БК-0010-01 или БК-0011М и её оборудование: СМК-512, AY, джойстик ---
+    QMenu* mach = menuBar()->addMenu("&Машина");
+    auto* machGroup = new QActionGroup(this);
+    machGroup->setExclusive(true);
+    machine10Action_ = mach->addAction("БК-00&10-01 (3 МГц, 32 Кбайт ОЗУ)");
+    machine11Action_ = mach->addAction("БК-00&11М (4 МГц, 128 Кбайт ОЗУ, 16 палитр)");
+    for (auto* a : {machine10Action_, machine11Action_}) { a->setCheckable(true); machGroup->addAction(a); }
+    connect(machine10Action_, &QAction::triggered, this, [this] { setMachine(0); });
+    connect(machine11Action_, &QAction::triggered, this, [this] { setMachine(1); });
+    mach->addSeparator();
+    // Блок расширения памяти СМК-512 («АльтПро») в разъёме МПИ. На живой машине
+    // плату ставят только при выключенном питании, поэтому переключатель
+    // перезапускает машину — раскладка верхней половины адресов меняется целиком.
+    smkAction_ = mach->addAction("Блок расширения памяти &СМК-512 (512 Кбайт)");
+    smkAction_->setCheckable(true);
+    smkAction_->setChecked(board_->smk512());
+    connect(smkAction_, &QAction::toggled, this, [this](bool on) { setSmk512(on); });
+    ayAction_ = mach->addAction("Звуковой сопроцессор &AY-3-8910 / YM2149 (порт 0177714)");
+    ayAction_->setCheckable(true);
+    connect(ayAction_, &QAction::toggled, this, [this](bool on) { setAy(on); });
+    mach->addSeparator();
     // Джойстик: геймпад через SDL2, порт 0177714. Раскладка выбирается — у БК их две
     // (несовместимые). Если геймпад подключён — покажем его имя в подменю.
-    QMenu* joy = emu->addMenu("&Джойстик (геймпад)");
+    QMenu* joy = mach->addMenu("&Джойстик (геймпад)");
     auto* joyGroup = new QActionGroup(this);
     joyGroup->setExclusive(true);
     auto* aStd = joy->addAction("Раскладка «Стандарт» (Джойвокс/gid, по умолч.)");
@@ -139,29 +160,6 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
         ? QString::fromStdString("Подключён: " + gamepad_.name())
         : QString::fromUtf8("Геймпад не найден"));
     joyStatus->setEnabled(false);
-
-    emu->addSeparator();
-    // Блок расширения памяти СМК-512 («АльтПро») в разъёме МПИ. На живой машине
-    // плату ставят только при выключенном питании, поэтому переключатель
-    // перезапускает машину — раскладка верхней половины адресов меняется целиком.
-    smkAction_ = emu->addAction("Блок расширения памяти &СМК-512 (512 Кбайт)");
-    smkAction_->setCheckable(true);
-    smkAction_->setChecked(board_->smk512());
-    connect(smkAction_, &QAction::toggled, this, [this](bool on) { setSmk512(on); });
-
-    // --- Машина: БК-0010-01 или БК-0011М, звуковой сопроцессор ---
-    QMenu* mach = menuBar()->addMenu("&Машина");
-    auto* machGroup = new QActionGroup(this);
-    machGroup->setExclusive(true);
-    machine10Action_ = mach->addAction("БК-00&10-01 (3 МГц, 32 Кбайт ОЗУ)");
-    machine11Action_ = mach->addAction("БК-00&11М (4 МГц, 128 Кбайт ОЗУ, 16 палитр)");
-    for (auto* a : {machine10Action_, machine11Action_}) { a->setCheckable(true); machGroup->addAction(a); }
-    connect(machine10Action_, &QAction::triggered, this, [this] { setMachine(0); });
-    connect(machine11Action_, &QAction::triggered, this, [this] { setMachine(1); });
-    mach->addSeparator();
-    ayAction_ = mach->addAction("Звуковой сопроцессор &AY-3-8910 / YM2149 (порт 0177714)");
-    ayAction_->setCheckable(true);
-    connect(ayAction_, &QAction::toggled, this, [this](bool on) { setAy(on); });
     syncMachineMenu();
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");

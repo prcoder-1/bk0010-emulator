@@ -101,7 +101,7 @@ void SmkRamView::paintEvent(QPaintEvent*) {
         p.setPen(dim);
         p.drawText(rect(), Qt::AlignCenter,
                    QString::fromUtf8("Блок расширения памяти СМК-512 не установлен.\n"
-                                     "Меню «Эмуляция» → «Блок расширения памяти СМК-512»"));
+                                     "Меню «Машина» → «Блок расширения памяти СМК-512»"));
         return;
     }
     const Smk512& smk = board_->smk();
