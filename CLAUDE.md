@@ -101,7 +101,11 @@ Key cross-cutting facts to know before editing the CPU or screen:
   0177662 writes (palette, screen page 5/6, bit 14 = 1 DISABLES the 0100 frame IRQ — on the
   0010 that write must stay a bus error, the СМК firmware relies on it), start address
   0140000, ROM writes trap (vector 4) and empty ROM sockets trap on read, no EMT 36 intercept,
-  no `.BIN` loading, no СМК-512. On the 11M `IoBus::ioWrite` gets the UNALIGNED address for
+  no `.BIN` loading. СМК-512 works on the 11M too: its ВЭД signal (modes SYS/Std10/ОЗУ10/All)
+  disconnects the 11M window 1 (`Memory::setWindow1Off`, driven by `Smk512::setModeHook`),
+  without the SMK firmware image the board starts (power-on, СТОП) in Std11 the way the
+  firmware would, and the floppy controller stays on the bus even with no disks — BOS probes
+  it with a write to 0177130, which the SMK accepts, then calls 0160000. On the 11M `IoBus::ioWrite` gets the UNALIGNED address for
   byte writes (the odd byte goes to the high half, as in GID).
 - **The emulator frame starts at the 037 nVSYNC pulse** (both machines): `Vp037::syncToVsync`
   puts the beam on line 277 (21st blanking line, RTL `va_037.v:239-241`), the 0100 IRQ is

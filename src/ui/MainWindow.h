@@ -124,6 +124,8 @@ private:
     QAction* machine11Action_ = nullptr;
     QAction* ayAction_ = nullptr;          // галка «AY-3-8910»
     int  scanlineOverride_ = -1;
+    // Ключ настройки «плата СМК-512 стоит» — свой у каждой машины.
+    QString smkKey() const { return (board_ && board_->bk11()) ? "smk512_11m" : "smk512"; }
     void applyScanline();
     void syncMachineMenu();                // галки меню — по состоянию платы (без сигналов)
     QAction* aspectAction_ = nullptr;   // галка «Пиксели 3:4»

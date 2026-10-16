@@ -123,6 +123,9 @@ public:
     // меньше (см. docs/floppy.md).
     void setDiskRom(const std::string& nameOrPath) { diskRom_ = nameOrPath; }
     bool attachDisk(int drive, const std::string& path, bool readOnly = true, int sides = 0);
+    // Поставить контроллер (ПЗУ + 1801ВП1-128) на шину без дискет — так на БК-0011М
+    // с СМК-512, где плата и есть контроллер.
+    bool controllerOn();
     void detachDisk(int drive);
     bool diskAttached(int drive = 0) const { return kngmd_.fdd().attached(drive); }
     const std::string& diskPath(int drive = 0) const { return kngmd_.fdd().path(drive); }
@@ -160,7 +163,8 @@ public:
     // На БК-0011М клавишу блокирует бит 12 ленточного регистра 0177716.
     void pressStop() {
         if (bk11() && (reg716tap_ & 010000)) return;
-        stopPending_ = true; if (smkOn_) smk_.reset();
+        stopPending_ = true;
+        if (smkOn_) { smk_.reset(); smkStartMode(); }
     }
 
     // --- БК-0011М ---
@@ -350,11 +354,21 @@ private:
     Vp037  vp037_;                 // видеоконтроллер 037: арбитраж доступа к ДОЗУ
     Smk512 smk_;                   // блок расширения памяти в разъёме МПИ
     bool   smkOn_ = false;         // плата СМК-512 установлена
+    // Есть ли на шине прошивка контроллера, перехватывающая пуск (smk512.rom): тогда
+    // режим после включения и «СТОП» ставит она сама.
+    bool smkFirmware() const { return diskOn_ && kngmd_.romStart() != 0; }
+    // Режим платы после включения питания и «СТОП». Контроллер сам распознаёт
+    // машину и на БК-0011М переходит в Std11 (БК-docs §15.9); без образа его ПЗУ
+    // делаем это за прошивку — иначе в SYS сегменты 0,1 накрыли бы БОС на 0140000.
+    void smkStartMode();
+    // Сигнал ВЭД платы → карта памяти 11М (окно 1 отключено в SYS/Std10/ОЗУ10/All).
+    void syncSmk11() { mem_.setWindow1Off(bk11() && smkOn_ && smk_.upperRamOff()); }
     Kngmd  kngmd_;                 // контроллер НГМД: ПЗУ драйвера + 1801ВП1-128
     bool   diskOn_ = false;        // контроллер НГМД на шине
     uint64_t fddNextTick_ = 0;     // такт следующего поворота диска (раз в 64 мкс)
     std::string diskRom_;          // выбранная прошивка контроллера (пусто — авто)
     std::string romDir_;           // откуда грузили ПЗУ — оттуда же берём прошивку НГМД
+    bool loadControllerRom();      // прошивка контроллера (diskRom_ или disk326.rom)
 
     // На шине МПИ могут быть оба устройства сразу — блок расширения памяти и
     // контроллер НГМД, — поэтому обращения разводит мультиплексор.

@@ -64,6 +64,15 @@ void Smk512::reset() {
     page_  = 0;
     armed_ = false;
     fddBlocked_ = false;
+    modeChanged();
+}
+
+void Smk512::setMode(Mode m, int page) {
+    mode_  = m;
+    page_  = static_cast<uint8_t>(page & 15);
+    armed_ = false;
+    fddBlocked_ = false;
+    modeChanged();
 }
 
 void Smk512::writeCtrl(uint16_t value) {
@@ -89,6 +98,7 @@ void Smk512::writeCtrl(uint16_t value) {
                                | (((value >> 2) & 1) << 1)    // разряд 02 — вес 2
                                | (((value >> 3) & 1) << 2)    // разряд 03 — вес 4
                                | ((value & 1) << 3));         // разряд 00 — вес 8
+    modeChanged();
 }
 
 bool Smk512::decode(uint16_t addr, Slot& s) const {

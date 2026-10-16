@@ -126,7 +126,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     board.setArbitration(g_arb037);
     board.setCpuPhase(g_cpuPhase);
     board.setScanlineRender((g_scanline || board.bk11()) && !g_noScanline);
-    board.setSmk512(g_smk > 0 && !board.bk11());
+    board.setSmk512(g_smk > 0);
     if (!board.loadRoms(romDir.toStdString())) {
         std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
         return 2;

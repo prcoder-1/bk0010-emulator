@@ -12,6 +12,7 @@
 #include "Fdd.h"
 #include "Ay8910.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
@@ -2179,6 +2180,103 @@ int main() {
                 const std::string txt = ocrAuto(m, bits, o, true, true).text();
                 if (txt.find("Ok") == std::string::npos) std::printf("  OCR:\n%s\n", txt.c_str());
                 CHECK(txt.find("Ok") != std::string::npos, "11М: БОС поднимает БЕЙСИК — на экране Ok");
+            }
+        }
+    }
+
+
+    // ======================= БК-0011М + СМК-512 ================================
+    {
+        Board b; b.setMachine(Machine::Bk0011m);
+        if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            std::printf("SKIP: ПЗУ БК-0011М не найдены — тесты СМК на 11М пропущены\n");
+        } else {
+            b.setSmk512(true);
+            b.reset();
+            Memory& m = b.memory();
+            auto smkMode = [&](uint16_t code) {
+                m.writeWord(0177130, 6); m.writeWord(0177130, code); m.writeWord(0177130, 0);
+            };
+            CHECK(b.smk().mode() == Smk512::STD11, "11М+СМК: без прошивки платы пуск в Std11 (а не SYS)");
+            CHECK(b.diskControllerOn(), "11М+СМК: контроллер с ПЗУ на шине и без дискет");
+            CHECK(!m.window1Off() && m.readWord(0140000) == 0106427, "11М+СМК Std11: окно 1 и БОС — машины");
+            // ВЭД: в SYS/Std10/ОЗУ10/All ОЗУ окна 1 машины отключается.
+            for (int pg = 0; pg < 8; ++pg) m.ram11()[pg * Memory::PAGE11_BYTES] = static_cast<uint8_t>(0100 + pg);
+            m.writeWord(0177716, 04000);                         // окно 1 — страница 1
+            smkMode(0160);                                       // SYS
+            CHECK(m.window1Off(), "11М+СМК SYS: ВЭД отключает окно 1");
+            b.smk().ram()[6 * Smk512::SEG_BYTES] = 0125;
+            CHECK(m.readByte(0120000) == 0125, "11М+СМК SYS: 0120000 — сегмент 6 платы");
+            {
+                m.pokeWord(04, 02000); m.pokeWord(06, 0340); m.pokeWord(02000, 000777);
+                loadProg(m, 01000, {013700, 0100000, 000777});   // MOV @#100000,R0
+                b.cpu().reset(01000, 0340);
+                b.stepInstruction(); b.stepInstruction();
+                CHECK(b.cpu().pc() == 02000, "11М+СМК SYS: 0100000 — ни ОЗУ машины, ни платы: зависание");
+            }
+            smkMode(0120 | Smk512::pageCode(2));                 // ОЗУ10, страница 2
+            m.writeWord(0100000, 0123456);
+            CHECK((b.smk().ram()[2 * Smk512::PAGE_BYTES] | (b.smk().ram()[2 * Smk512::PAGE_BYTES + 1] << 8)) == 0123456
+                  && m.ram11()[1 * Memory::PAGE11_BYTES] == 0101,
+                  "11М+СМК ОЗУ10: 0100000 — сегмент 0 платы, ОЗУ машины не задето");
+            smkMode(040);                                        // ОЗУ11
+            CHECK(!m.window1Off() && m.readByte(0100000) == 0101, "11М+СМК ОЗУ11: окно 1 — снова машины");
+            b.smk().ram()[4 * Smk512::SEG_BYTES] = 0;
+            CHECK(m.readWord(0140000) == 0, "11М+СМК ОЗУ11: на месте БОС — сегмент 4 платы");
+            // Приём загрузчика leCSIcon: CLR в режиме платы не трогает ОЗУ машины.
+            smkMode(0140);
+            m.writeWord(0100000, 0123456);
+            smkMode(0120 | Smk512::pageCode(2));
+            m.writeWord(0100000, 0);
+            smkMode(0140);
+            CHECK(m.readWord(0100000) == 0123456, "11М+СМК: проверка наличия платы (как в leCSIcon) проходит");
+            // «СТОП» возвращает плату в исходный режим машины.
+            smkMode(0120);
+            b.pressStop();
+            CHECK(b.smk().mode() == Smk512::STD11 && !m.window1Off(), "11М+СМК: «СТОП» — снова Std11");
+            b.stepInstruction();                                 // забрать прерывание «СТОП»
+            // Быстрая память на 4 МГц: код в ОЗУ платы, данные в ДОЗУ (столбец Manwe).
+            {
+                auto avg = [&](uint16_t ir) {
+                    for (uint16_t a = 010000; a < 040000; a += 2) m.pokeWord(a, 033000);
+                    for (int i = 0; i < 112; ++i) m.pokeWord(static_cast<uint16_t>(0140000 + 2 * i), ir);
+                    b.cpu().reset(0140000, 0340);
+                    b.cpu().r[1] = 024000; b.cpu().r[2] = 026000;
+                    for (int i = 0; i < 16; ++i) b.stepInstruction();
+                    long t = 0;
+                    for (int i = 0; i < 96; ++i) t += b.stepInstruction();
+                    return double(t) / 96;
+                };
+                smkMode(040);                                    // ОЗУ11: 0140000 — сегмент 4
+                CHECK(avg(010102) == 8.0, "11М+СМК: MOV R1,R2 из ОЗУ платы = 8 (Manwe)");
+                CHECK(std::fabs(avg(011102) - 64.0 / 3) < 0.01, "11М+СМК: MOV (R1),R2 = 21,333 (Manwe)");
+                CHECK(std::fabs(avg(014102) - 80.0 / 3) < 0.01, "11М+СМК: MOV -(R1),R2 = 26,666 (Manwe)");
+                CHECK(avg(010152) == 48.0, "11М+СМК: MOV R1,@-(R2) = 48 (Manwe)");
+            }
+            // Снимок 11М с платой.
+            {
+                smkMode(0120 | Smk512::pageCode(5));
+                b.smk().ram()[5 * Smk512::PAGE_BYTES + 7] = 0177;
+                std::vector<uint8_t> st;
+                b.saveStateMem(st);
+                Board c; c.loadRoms(BK_DEFAULT_ROM_DIR);
+                CHECK(c.loadStateMem(st) && c.bk11() && c.smk512() && c.smk().mode() == Smk512::RAM10
+                      && c.smk().page() == 5 && c.smk().ram()[5 * Smk512::PAGE_BYTES + 7] == 0177
+                      && c.memory().window1Off(),
+                      "снимок 11М+СМК: плата, режим, страница, ДОЗУ и ВЭД восстановлены");
+            }
+            // БОС с платой: драйвер не находит дискет и возвращает управление — БЕЙСИК.
+            {
+                Board f; f.setMachine(Machine::Bk0011m); f.loadRoms(BK_DEFAULT_ROM_DIR);
+                f.setSmk512(true); f.reset();
+                for (int i = 0; i < 800; ++i) f.runFrame();
+                std::vector<uint8_t> bits;
+                screenBitmap(f.memory(), f.peekReg(0177664), bits);
+                OcrOptions o;
+                useBk11Font(o, f.memory());
+                o.wide = true; o.y0 = 0;
+                const std::string txt = ocrAuto(f.memory(), bits, o, true, true).text();
+                CHECK(txt.find("Ok") != std::string::npos, "11М+СМК без дискет: БОС доходит до БЕЙСИКа");
             }
         }
     }
