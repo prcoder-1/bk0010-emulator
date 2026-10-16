@@ -37,6 +37,7 @@ ctest --test-dir build                 # same, via ctest
 QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png game.bin
 ```
 
+`--help` / `-h` prints every option (keep `printHelp` in `src/main.cpp` in sync when adding one).
 Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
 `--no-arb037` (disable the КР1801ВП1-037 DRAM-window model, on by default),

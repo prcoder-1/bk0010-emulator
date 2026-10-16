@@ -350,11 +350,78 @@ static int runHeadless(const QString& romDir, const QString& bin,
     return 0;
 }
 
+// Справка по ключам командной строки (--help, -h). Печатается до создания окна и
+// до разбора остальных ключей.
+static void printHelp(const char* prog) {
+    std::printf("Эмулятор-отладчик БК-0010-01 / БК-0011М\n\n"
+                "Запуск:\n"
+                "  %s [ключи] [игра.bin | диск.bkd | диск.img]\n\n", prog);
+    std::fputs(
+        "Позиционный аргумент: .bkd и .img (в любом регистре) — образ дискеты, с него сразу\n"
+        "идёт загрузка; любой другой файл — программа в формате .BIN (только БК-0010-01).\n"
+        "\n"
+        "Машина:\n"
+        "  --machine bk10|bk11m   эмулируемая машина (в GUI выбор запоминается в меню «Машина»)\n"
+        "  --bk10, --bk11m        то же коротко\n"
+        "  --ay, --no-ay          звуковой сопроцессор AY-3-8910 на порту 0177714\n"
+        "                         (по умолчанию: на БК-0011М вкл, на БК-0010 выкл)\n"
+        "  --smk, --no-smk        блок расширения памяти СМК-512 (512 Кбайт)\n"
+        "  --mstd                 БК-0011М: вставить тестовый блок МСТД в окно 0160000\n"
+        "  --roms <каталог>       каталог ПЗУ (иначе BK_ROM_DIR или каталог при сборке)\n"
+        "\n"
+        "Дисковод:\n"
+        "  --disk <образ>         вставить дискету в привод A и загрузиться с неё\n"
+        "  --disk-b <образ>       вставить дискету в привод B\n"
+        "  --disk-rw              образы без защиты записи (изменения пишутся в файл)\n"
+        "  --disk-sides 1|2       число сторон (по умолчанию — по размеру образа)\n"
+        "  --disk-rom smk|326|<файл>  прошивка контроллера: smk512.rom, disk326.rom или своя\n"
+        "\n"
+        "Тайминг и экран:\n"
+        "  --cpu-phase 0|1        фаза такта ЦП относительно окна 037 (по умолчанию 0)\n"
+        "  --no-arb037            «идеальная» память без ожиданий 037\n"
+        "  --scanline             построчная отрисовка по лучу (на БК-0011М — по умолчанию)\n"
+        "  --no-scanline          выключить построчную отрисовку\n"
+        "  --mono                 чёрно-белый режим экрана (безголовый режим)\n"
+        "  --aspect34, --no-aspect34  неквадратный пиксель БК в окне (GUI; по умолчанию вкл)\n"
+        "\n"
+        "Безголовый режим (без окна). Включается ключами --frames, --dbgshot, --memvis,\n"
+        "профилировщиков, --type или --keys; --shot, --key и --keyframe работают вместе с ними:\n"
+        "  --frames N             прогнать N кадров\n"
+        "  --shot <файл.png>      снимок экрана 512x256 после прогона\n"
+        "  --dbgshot <файл.png>   снимок с отладчиком Soft-ICE\n"
+        "  --memvis <файл.png>    визуализация памяти\n"
+        "  --hotpath, --callgraph, --flame, --flamechart, --hotchart <файл.png>\n"
+        "                         профилировщики: горячий путь, граф вызовов, пламенный\n"
+        "                         граф, хронология вызовов, горячие инструкции во времени\n"
+        "  --key <код>            нажать клавишу с кодом БК (восьм. с ведущим 0, 0x — шестн.)\n"
+        "  --keyframe N           ... на кадре N (по умолчанию 0)\n"
+        "  --keys кадр:код,...    несколько нажатий по кадрам\n"
+        "  --type <текст>         набрать текст с клавиатуры (с 60-го кадра)\n"
+        "\n"
+        "Прочее:\n"
+        "  --server               MCP-сервер (JSON-RPC 2.0 по stdio) для отладки через Claude;\n"
+        "                         понимает --roms, --machine, --bk10/--bk11m, --ay/--no-ay,\n"
+        "                         --smk, --disk, --disk-rw и позиционный образ диска\n"
+        "  --keytest              самопроверка перевода клавиш Qt в коды БК\n"
+        "  -h, --help             эта справка\n"
+        "\n"
+        "Примеры:\n"
+        "  bk0010-emulator game.bin\n"
+        "  bk0010-emulator --machine bk11m INSULT.IMG\n"
+        "  QT_QPA_PLATFORM=offscreen bk0010-emulator --frames 200 --shot out.png game.bin\n",
+        stdout);
+}
+
 int main(int argc, char** argv) {
     // Имя организации и приложения нужно QSettings: без них настройки легли бы в
     // файл, названный по имени исполняемого файла.
     QCoreApplication::setOrganizationName("bk0010-emulator");
     QCoreApplication::setApplicationName("bk0010-emulator");
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--help" || a == "-h") { printHelp(argv[0]); return 0; }
+    }
 
     // MCP server mode: a headless JSON-RPC-over-stdio server for debugging BK
     // programs from an MCP client (e.g. Claude Code). Handled before the GUI so
