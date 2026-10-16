@@ -45,7 +45,10 @@ Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
 `--no-arb037` (disable the КР1801ВП1-037 DRAM-window model, on by default),
 `--cpu-phase 0|1` (CPU clock phase vs the 037 window, see below),
-`--smk` / `--no-smk` (СМК-512 memory-expansion board, off by default),
+`--smk` / `--no-smk` (СМК-512 memory-expansion board, ON by default in the GUI, headless and
+MCP since 2026-10-16; `Board` itself still starts without it. On the BK-0010 it covers the BASIC
+ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, overclk — need
+`--no-smk`),
 `--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--scanline` (per-scanline rendering — each line drawn with the scroll register value

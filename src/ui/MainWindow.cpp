@@ -54,7 +54,7 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     // Блок расширения памяти СМК-512: настройка запоминается между запусками,
     // ключ --smk/--no-smk перекрывает её на один запуск.
     const bool smkOn = smkOverride >= 0 ? smkOverride > 0
-                                        : QSettings().value(smkKey(), false).toBool();
+                                        : QSettings().value(smkKey(), true).toBool();
     board_->setSmk512(smkOn);
     if (board_->smk512()) {
         // Стоит сказать вслух: с платой карта верхней половины адресов не штатная
@@ -611,7 +611,7 @@ void MainWindow::setMachine(int m) {
     board_->setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
     board_->setAy(QSettings().value(want11 ? "ay11m" : "ay10", want11).toBool());
     // Плата — своя настройка у каждой машины (на БК-0011М её ставят реже).
-    board_->setSmk512(QSettings().value(smkKey(), false).toBool());
+    board_->setSmk512(QSettings().value(smkKey(), true).toBool());
     applyScanline();
     lastBin_.clear();                  // .BIN другой машины перезапускать нельзя
     syncMachineMenu();

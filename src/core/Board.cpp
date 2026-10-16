@@ -581,10 +581,23 @@ bool Board::MpiMux::smkRomCell(uint16_t addr) const {
     return fdc->romStart() != 0 || addr <= Kngmd::ROM_LAST;
 }
 
+// Слово модели и версии СМК (0167776). На живой машине окно 0160000 занимает ПЗУ
+// самой платы, и это слово там есть всегда; программы опознают плату только по нему
+// (Prince of Persia для 11М: CMP @#167776,#177600 / ... #177700). Мы ставим в окно ПЗУ
+// драйвера 326 — в нём по этому адресу 0, — поэтому слово отдаёт плата.
+bool Board::MpiMux::smkVersion(uint16_t addr, uint16_t& value) const {
+    if (!smk || addr != Smk512::REG_VERS) return false;
+    Smk512::Slot s;
+    if (!smk->decode(addr, s) || s.cell != Smk512::Cell::Rom) return false;
+    value = Smk512::VERSION;
+    return true;
+}
+
 bool Board::MpiMux::mpiRead(uint16_t addr, uint16_t& value) {
     if (fdc && (addr == Kngmd::REG_CTRL || addr == Kngmd::REG_DATA))
         return fdc->mpiRead(addr, value);          // регистры микросхемы НГМД
     if (smkRam(addr)) return smk->mpiRead(addr, value);
+    if (smkVersion(addr, value)) return true;
     if (fdc && smkRomCell(addr) && fdc->romMirror(addr, value)) return true;  // зеркало ПЗУ
     if (fdc && fdc->mpiRead(addr, value)) return true;   // ПЗУ контроллера в своём окне
     return smk && smk->mpiRead(addr, value);       // слово версии СМК и прочее
@@ -594,6 +607,7 @@ bool Board::MpiMux::mpiPeek(uint16_t addr, uint16_t& value) const {
     if (fdc && (addr == Kngmd::REG_CTRL || addr == Kngmd::REG_DATA))
         return fdc->mpiPeek(addr, value);
     if (smkRam(addr)) return smk->mpiPeek(addr, value);
+    if (smkVersion(addr, value)) return true;
     if (fdc && smkRomCell(addr) && fdc->romMirror(addr, value)) return true;
     if (fdc && fdc->mpiPeek(addr, value)) return true;
     return smk && smk->mpiPeek(addr, value);

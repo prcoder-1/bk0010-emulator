@@ -92,7 +92,7 @@ static int parseMachine(const QString& v) {
     return -1;
 }
 // --smk / --no-smk: блок расширения памяти СМК-512. -1 — ключ не задан (в GUI
-// берётся сохранённая настройка, в безголовом режиме и в MCP — выключено).
+// берётся сохранённая настройка, по умолчанию ВКЛ; в безголовом режиме и в MCP — ВКЛ).
 static int  g_smk = -1;
 // --aspect34 / --no-aspect34: неквадратный пиксель БК (блок 4x3 точки хоста, кадр
 // 1024x768). -1 — ключ не задан, в GUI берётся сохранённая настройка (по умолчанию
@@ -128,7 +128,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     board.setArbitration(g_arb037);
     board.setCpuPhase(g_cpuPhase);
     board.setScanlineRender((g_scanline || board.bk11()) && !g_noScanline);
-    board.setSmk512(g_smk > 0);
+    board.setSmk512(g_smk != 0);              // по умолчанию плата стоит
     if (!board.loadRoms(romDir.toStdString())) {
         std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
         return 2;
@@ -368,7 +368,7 @@ static void printHelp(const char* prog) {
         "  --bk10, --bk11m        то же коротко\n"
         "  --ay, --no-ay          звуковой сопроцессор AY-3-8910 на порту 0177714\n"
         "                         (по умолчанию: на БК-0011М вкл, на БК-0010 выкл)\n"
-        "  --smk, --no-smk        блок расширения памяти СМК-512 (512 Кбайт)\n"
+        "  --smk, --no-smk        блок расширения памяти СМК-512 (512 Кбайт; по умолчанию вкл)\n"
         "  --mstd                 БК-0011М: вставить тестовый блок МСТД в окно 0160000\n"
         "  --roms <каталог>       каталог ПЗУ (иначе BK_ROM_DIR или каталог при сборке)\n"
         "\n"
@@ -404,7 +404,7 @@ static void printHelp(const char* prog) {
         "Прочее:\n"
         "  --server               MCP-сервер (JSON-RPC 2.0 по stdio) для отладки через Claude;\n"
         "                         понимает --roms, --machine, --bk10/--bk11m, --ay/--no-ay,\n"
-        "                         --smk, --disk, --disk-rw и позиционный образ диска\n"
+        "                         --smk/--no-smk, --disk, --disk-rw и позиционный образ диска\n"
         "  --keytest              самопроверка перевода клавиш Qt в коды БК\n"
         "  -h, --help             эта справка\n"
         "\n"
@@ -438,7 +438,7 @@ int main(int argc, char** argv) {
             romDir = BK_DEFAULT_ROM_DIR;
 #endif
             if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
-            bool smk = false;
+            bool smk = true;               // СМК-512 по умолчанию стоит
             std::string disk; bool diskRw = false;
             int machine = 1, ay = -1;      // по умолчанию — БК-0011М
             for (int j = 1; j < argc; ++j) {
@@ -450,6 +450,7 @@ int main(int argc, char** argv) {
                 else if (std::string(argv[j]) == "--no-ay") ay = 0;
                 if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
                 else if (std::string(argv[j]) == "--smk") smk = true;
+                else if (std::string(argv[j]) == "--no-smk") smk = false;
                 else if (std::string(argv[j]) == "--disk" && j + 1 < argc) disk = argv[j + 1];
                 else if (argv[j][0] != '-' && bk::Fdd::looksLikeImage(argv[j])) disk = argv[j];
                 else if (std::string(argv[j]) == "--disk-rw") diskRw = true;
@@ -554,10 +555,11 @@ int main(int argc, char** argv) {
 
     // Дискета почти всегда подразумевает и блок расширения памяти: у голой
     // БК-0010-01 под ядро остаётся около 16 Кбайт ОЗУ, и большинство систем без
-    // платы просто некуда грузить. Поэтому образ включает СМК-512 сам, если ключ
-    // не задан явно; --no-smk по-прежнему сильнее. Сохранённую настройку GUI это
-    // не переписывает — плата включается только на этот запуск.
-    if (!g_disk.isEmpty() && g_smk < 0 && effMachine == 0) {
+    // платы просто некуда грузить. Плата стоит по умолчанию, но в GUI могла быть
+    // снята переключателем — тогда образ включает её сам на этот запуск, если ключ не
+    // задан явно; --no-smk по-прежнему сильнее. Сохранённую настройку это не меняет.
+    const bool smkSaved = headless || QSettings().value(effMachine == 1 ? "smk512_11m" : "smk512", true).toBool();
+    if (!g_disk.isEmpty() && g_smk < 0 && effMachine == 0 && !smkSaved) {
         g_smk = 1;
         std::fprintf(stderr, "Дискета: включён блок расширения памяти СМК-512 "
                              "(отключить — ключом --no-smk)\n");
