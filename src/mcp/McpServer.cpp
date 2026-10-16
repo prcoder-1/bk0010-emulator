@@ -1978,6 +1978,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                                .arg(oct6(board_.reg662()))
                          : QString())
         + (board_.ay() ? QString("\n  AY-3-8910 %1").arg(QString::fromStdString(board_.aySummary())) : QString())
+        + (board_.ay2Active() ? QString("\n  AY №2     %1").arg(QString::fromStdString(board_.aySummary(1))) : QString())
         + (board_.diskControllerOn() ? fddState() : QString())
         + ((board_.diskControllerOn() && args.value("fdd_log").toBool())
                ? fddLog(std::max(4, args.value("fdd_log_count").toInt(40))) : QString()));

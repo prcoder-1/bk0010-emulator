@@ -2111,17 +2111,18 @@ int main() {
                 CHECK(b.cpu().pc() == 01010, "11М: запись в 0177662 принимается (без вектора 4)");
                 CHECK(b.screen().palette() == 5 && m.videoPage() == 6, "11М: палитра 5, экран — страница 6");
                 CHECK(m.readWord(0177662) == 0, "11М: 0177662 на чтение — по-прежнему код клавиши");
-                // Байтовая запись в регистр палитры не проходит (как в регистр памяти 0177716),
-                // но и зависания не даёт: INSULT, часть 19, пишет так по строкам.
-                loadProg(m, 01000, {0112737, 0001, 0177663, 000240, 000777});   // MOVB #1,@#177663; NOP
+                // Байтовая запись в 0177663 — старший байт регистра: палитра, таймер, экран.
+                // Демо «200%» включает так кадровый таймер: MOVB #14,@#177663.
+                loadProg(m, 01000, {0112737, 0014, 0177663, 000240, 000777});   // MOVB #14,@#177663; NOP
                 b.cpu().reset(01000, 0340);
                 b.stepInstruction(); b.stepInstruction();
-                CHECK(b.cpu().pc() == 01010 && b.screen().palette() == 5 && b.reg662() == 0102400,
-                      "11М: байтовая запись в 0177663 палитру не меняет и не зависает");
+                CHECK(b.cpu().pc() == 01010 && b.screen().palette() == 12 && !(b.reg662() & 040000)
+                      && m.videoPage() == 5,
+                      "11М: MOVB #14,@#177663 — палитра 12, кадровый таймер включён, экран стр. 5");
                 loadProg(m, 01000, {000005, 000777});           // RESET
                 b.cpu().reset(01000, 0340);
                 b.stepInstruction();
-                CHECK(b.reg662() == 0102400, "11М: команда RESET регистр палитры не трогает");
+                CHECK(b.reg662() == 006000, "11М: команда RESET регистр палитры не трогает");
             }
             {
                 // Кадровое прерывание 0100 разрешается битом 14 = 0.
@@ -2177,6 +2178,28 @@ int main() {
                 CHECK(splitWord >= 16 && splitWord < 32 &&
                       (px[100 * Screen::TEX_W + splitWord * 16 - 1] & 0xFFFFFF) == 0xFFFFFF,
                       "11М: до слова, где стоял луч, — старая палитра");
+            }
+            // ---- Скролл посреди поля: 037 берёт его только на синхроимпульсе ----
+            {
+                b.reset();
+                b.setScanlineRender(true);
+                uint8_t* vram = m.ram11() + 5 * Memory::PAGE11_BYTES;
+                for (size_t i = 0; i < Memory::PAGE11_BYTES; ++i) vram[i] = 0;
+                for (int i = 0; i < 64; ++i) vram[105 * 64 + i] = 0377;   // светится строка ВОЗУ 105
+                m.pokeWord(01000, 000777);
+                b.cpu().reset(01000, 0340);
+                m.writeWord(0177662, 017 << 8);                  // палитра 15: цвет 3 — белый
+                b.runFrameSlice(0, 1000);
+                while (b.vp037().fieldLine() < 50) b.stepInstruction();
+                m.writeWord(0177664, 01335);                     // смещение +5
+                while (b.vp037().fieldLine() <= 110) b.stepInstruction();
+                const uint32_t* px = b.screen().pixels();
+                auto lit = [&](int y) { return (px[y * Screen::TEX_W] & 0xFFFFFF) != 0; };
+                CHECK(lit(105) && !lit(100), "11М: скролл, записанный посреди поля, в этом кадре не действует");
+                b.runFrameSlice(0, 1000);                        // следующий кадр
+                while (b.vp037().fieldLine() <= 110) b.stepInstruction();
+                CHECK(lit(100) && !lit(105), "11М: со следующего кадра — новое смещение");
+                m.writeWord(0177664, 01330);
             }
             // ---- Фаза кадрового прерывания 11М и момент записи в регистр палитры ----
             {
@@ -2258,6 +2281,28 @@ int main() {
                 double mn = 1, mx = 0;
                 for (int i = 0; i < 4410; ++i) { ay.advance(1.0 / 44100); const double v = ay.takeSample(); mn = std::min(mn, v); mx = std::max(mx, v); }
                 CHECK(mx - mn < 1e-9, "AY: громкость 0 — тишина");
+                // Два AY: разряд 15 = 0 — первый чип, 14 = 0 — второй (демо «200%»).
+                CHECK(!b.ay2Active(), "2AY: пока программа не выбрала второй чип, он не подключён");
+                auto ayw2 = [&](uint16_t sel, int r, int v) {
+                    m.writeWord(0177714, static_cast<uint16_t>(sel | (~r & 0377)));
+                    m.writeByte(0177714, static_cast<uint8_t>(~v));
+                };
+                ayw2(0100000, 0, 55);                     // второй чип
+                ayw2(040000, 0, 77);                      // первый чип
+                CHECK(b.ay2Active() && b.ayChip(1).regs()[0] == 55 && b.ayChip(0).regs()[0] == 77,
+                      "2AY: 0100000|~рег — второй чип, 040000|~рег — первый");
+                ayw2(0, 2, 33);                           // оба
+                CHECK(b.ayChip(0).regs()[2] == 33 && b.ayChip(1).regs()[2] == 33, "2AY: оба разряда 0 — оба чипа");
+                ayw(4, 11);                               // ~рег целиком: ни один не выбран
+                CHECK(b.ayChip(0).regs()[4] == 11 && b.ayChip(1).regs()[4] == 0,
+                      "2AY: запись `~рег` без выбора чипа идёт в первый");
+                std::vector<uint8_t> st;
+                b.saveStateMem(st);
+                Board c; c.loadRoms(BK_DEFAULT_ROM_DIR);
+                CHECK(c.loadStateMem(st) && c.ay2Active() && c.ayChip(1).regs()[0] == 55,
+                      "2AY: второй чип в снимке");
+                b.reset();
+                CHECK(!b.ay2Active(), "2AY: сброс отключает второй чип");
             }
             // ---- Снимок BK11ST1: ОЗУ 128К и регистры 11М ----
             {

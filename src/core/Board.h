@@ -171,17 +171,20 @@ public:
     // Однострочные сводки для отладчика и MCP: карта памяти/палитра/экран/таймер
     // БК-0011М и регистры звукового сопроцессора.
     std::string bk11Summary() const;
-    std::string aySummary() const;
+    std::string aySummary(int chip = 0) const;
     uint16_t reg662() const { return reg662_; }        // 0177662 на запись: палитра/экран/таймер
     uint16_t reg716tap() const { return reg716tap_; }  // 0177716 (бит 11 = 0): лента/динамик
     // Блок МСТД (ПЗУ 330) в окне 0160000. Его первое слово 000240, поэтому БОС
     // при пуске отдаёт ему управление — по умолчанию блок не вставлен.
     void setMstd(bool on) { mem_.setMstd(on); }
     // Звуковой сопроцессор AY-3-8910 / YM2149 на параллельном порту 0177714.
-    void setAy(bool on) { ayOn_ = on; sound_.setAy(on ? &ay_ : nullptr); }
-    const Ay8910& ayChip() const { return ay_; }
-    Ay8910&       ayChip()       { return ay_; }
+    void setAy(bool on) {
+        ayOn_ = on; sound_.setAy(on ? &ay_ : nullptr); sound_.setAy2(on && ay2Seen_ ? &ay2_ : nullptr);
+    }
+    const Ay8910& ayChip(int chip = 0) const { return chip ? ay2_ : ay_; }
+    Ay8910&       ayChip(int chip = 0)       { return chip ? ay2_ : ay_; }
     bool ay() const { return ayOn_; }
+    bool ay2Active() const { return ayOn_ && ay2Seen_; }   // программа обратилась ко второму AY
 
     // True while an unread code sits in the register (ready flag set).
     bool keyReady() const { return (kbdStatus_ & 0200) != 0; }
@@ -401,6 +404,9 @@ private:
     bool scanlineRender_ = false;  // построчная отрисовка экрана
     int  renderedLine_ = 0;        // следующая строка кадра, ещё не отрисованная
     int  renderedWord_ = 0;        // в строке renderedLine_ уже нарисованы слова [0, renderedWord_)
+    uint16_t rasterScroll_ = 01330;  // скролл, защёлкнутый 037 для текущего поля
+    bool scrollLatched_ = false;     // защёлкнут ли он уже в этом кадре
+    void latchScroll();
     void renderRasterTo(int line, int word);   // догнать отрисовку до точки луча
     void beginFrameRaster(int over);      // верх кадра: доотрисовать, ресинк луча (+over тактов)
     void beginFrame();                    // граница кадра по абсолютному счёту тактов
@@ -556,6 +562,13 @@ private:
 
     Speaker sound_;
     Ay8910  ay_;                // звуковой сопроцессор на 0177714 (если ayOn_)
+    // Второй AY: плата «2AY» с выбором чипа разрядами 15/14 слова адреса (режим
+    // «Грифон» в GID). ay2Seen_ — программа хоть раз выбрала его отдельно: до этого
+    // всё идёт в первый чип, как на плате с одним AY.
+    Ay8910  ay2_;
+    bool    ay2Seen_ = false;
+    uint8_t aySel_ = 1;         // выбранные чипы: бит 0 — первый, бит 1 — второй
+    void ayWrite(uint16_t value, uint16_t wide, bool isByte);
     Trace   trace_;
 };
 

@@ -44,6 +44,7 @@ void Speaker::feed(int level, int ticks) {
         const double a = 1.0 - std::exp(-(take / sampleRate_) / kTauSeconds);
         filtered_ += (target - filtered_) * a;
         if (ay_) ay_->advance(take / sampleRate_);
+        if (ay_ && ay2_) ay2_->advance(take / sampleRate_);
         acc_  += take;
         span  -= take;
         if (acc_ < 1.0) break;                            // отсчёт ещё не набран
@@ -51,8 +52,10 @@ void Speaker::feed(int level, int ticks) {
         dc_ += (filtered_ - dc_) * dcRc;                  // DC-блокер: покой -> тишина
         double v = filtered_ - dc_;
         if (ay_) {
-            // Полная громкость трёх каналов (выход 1.0) — 28000 в размахе.
-            const double ay = ay_->takeSample() * 28000.0;
+            // Полная громкость трёх каналов (выход 1.0) — 28000 в размахе; два чипа —
+            // по 18000, чтобы шесть каналов не упирались в потолок.
+            const double ay = ay2_ ? (ay_->takeSample() + ay2_->takeSample()) * 18000.0
+                                   : ay_->takeSample() * 28000.0;
             ayDc_ += (ay - ayDc_) * dcRc;
             v += ay - ayDc_;
         }
