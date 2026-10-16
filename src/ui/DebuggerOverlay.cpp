@@ -567,6 +567,10 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         p.setPen(fg);
         p.drawText(srx, gy, fm.elidedText("AY " + QString::fromStdString(board_->aySummary()), Qt::ElideRight, srw));
         gy += lineH_;
+        if (board_->ay2Active()) {
+            p.drawText(srx, gy, fm.elidedText("AY2 " + QString::fromStdString(board_->aySummary(1)), Qt::ElideRight, srw));
+            gy += lineH_;
+        }
     }
     // Контроллер НГМД: где головка и успевает ли процессор за обменом. Счётчик
     // потерянных слов — главный признак того, что передача рвётся не «где-то», а

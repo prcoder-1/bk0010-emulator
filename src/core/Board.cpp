@@ -101,6 +101,8 @@ void Board::beginFrameRaster(int over) {
         renderRasterTo(Screen::TEX_H, 0);
         renderedLine_ = 0; renderedWord_ = 0;
     }
+    latchScroll();
+    scrollLatched_ = false;
     // Где в развёртке приходит кадровое прерывание: на БК-0011М — через строку после
     // начала кадрового гашения (снято по заставке Prince of Persia), на БК-0010 — на
     // nVSYNC (RTL 037).
@@ -133,16 +135,19 @@ void Board::beginFrame() {
 // Догнать отрисовку до строки `line`, слова `word` (всё ДО этой точки луч уже
 // прошёл). Строки за пределами видимого поля (гашение) не рисуются.
 void Board::renderRasterTo(int line, int word) {
+    latchScroll();
     if (line < 0) return;                       // луч ещё в кадровом гашении
     if (line >= Screen::TEX_H) { line = Screen::TEX_H; word = 0; }
+    // Смещение — защёлкнутое на синхроимпульсе; бит 9 (малый экран) 037 смотрит вживую.
+    const uint16_t scroll = static_cast<uint16_t>((scroll_ & 01000) | (rasterScroll_ & 0377));
     while (renderedLine_ < line) {
-        screen_.renderSpan(mem_, renderedLine_, scroll_, renderedWord_, Screen::WORDS_PER_LINE);
+        screen_.renderSpan(mem_, renderedLine_, scroll, renderedWord_, Screen::WORDS_PER_LINE);
         ++renderedLine_;
         renderedWord_ = 0;
     }
     if (renderedLine_ == line && line < Screen::TEX_H && word > renderedWord_) {
         if (word > Screen::WORDS_PER_LINE) word = Screen::WORDS_PER_LINE;
-        screen_.renderSpan(mem_, line, scroll_, renderedWord_, word);
+        screen_.renderSpan(mem_, line, scroll, renderedWord_, word);
         renderedWord_ = word;
     }
 }
@@ -176,8 +181,16 @@ void Board::applyRasterPending() {
     }
 }
 
+// Запись в 0177664 посреди поля видна только со следующего кадра (SCROLL_LATCH_LINE).
+void Board::latchScroll() {
+    if (!scrollLatched_ && vp037_.fieldLine() >= Vp037::SCROLL_LATCH_LINE - Vp037::LINES_PER_FRAME) {
+        rasterScroll_ = scroll_;
+        scrollLatched_ = true;
+    }
+}
+
 void Board::applyRasterValue(uint16_t addr, uint16_t value) {
-    if (addr == REG_SCROLL) { scroll_ = value; vp037_.setM256(scroll_ & 01000); }
+    if (addr == REG_SCROLL) { latchScroll(); scroll_ = value; vp037_.setM256(scroll_ & 01000); }
     else { reg662_ = value; apply662(); }
 }
 
@@ -566,6 +579,7 @@ void Board::reset() {
     // priority itself once it has installed its interrupt vectors.
     cpu_.reset(start, 0340);
     scroll_ = 01330;   // 0330 + бит 9: полный экран (256 строк) по умолчанию
+    rasterScroll_ = scroll_; scrollLatched_ = false;
     kbdStatus_ = 0;    // bit 6 (0100) = interrupt MASK (0 => enabled), bit 7 = ready
     kbdData_ = 0;
     keyIntPending_ = false;
@@ -617,7 +631,9 @@ void Board::reset() {
     reg662_ = 047400;
     if (bk11()) { mem_.setPageMap(0); apply662(); }
     else screen_.setPalette(0);
-    ay_.reset();
+    ay_.reset(); ay2_.reset();
+    ay2Seen_ = false; aySel_ = 1;
+    sound_.setAy2(nullptr);
     vp037_.reset();
     vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
     if (smkOn_) { smk_.powerOn(); smkStartMode(); }   // включение питания: ДОЗУ чисто
@@ -916,6 +932,7 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     }
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
+    rasterScroll_ = scroll_; scrollLatched_ = true;
     vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
     return true;
 }
@@ -938,7 +955,8 @@ void Board::saveState11(std::vector<uint8_t>& out) const {
     put(&v037, sizeof v037);
     const uint16_t m11[8] = {mem_.pageMap(), reg716tap_, reg662_, static_cast<uint16_t>(vpHalf_),
                              static_cast<uint16_t>(ayOn_ ? 1 : 0), ay_.address(),
-                             static_cast<uint16_t>(mem_.mstd() ? 1 : 0), 0};
+                             static_cast<uint16_t>(mem_.mstd() ? 1 : 0),
+                             static_cast<uint16_t>((ay2Seen_ ? 1 : 0) | (aySel_ << 1) | (ay2_.address() << 8))};
     put(m11, sizeof m11);
     put(ay_.regs(), 16);
     const uint16_t bus[4] = {static_cast<uint16_t>((totalTicks_ + busSkew_) % busPeriodTicks()),
@@ -953,6 +971,7 @@ void Board::saveState11(std::vector<uint8_t>& out) const {
                              static_cast<uint16_t>(smk_.armed() ? 1 : 0)};
     put(smk, sizeof smk);
     if (smkOn_) put(smk_.ram().data(), Smk512::RAM_BYTES);
+    put(ay2_.regs(), 16);   // второй AY (раньше хвоста не было — тогда он молчит)
 }
 
 bool Board::loadState11(const std::vector<uint8_t>& in) {
@@ -977,6 +996,9 @@ bool Board::loadState11(const std::vector<uint8_t>& in) {
         if (smk[3]) smk_.writeCtrl(Smk512::STROBE);
         if (in.size() >= off + Smk512::RAM_BYTES) get(smk_.ram().data(), Smk512::RAM_BYTES);
     }
+    uint8_t ay2Regs[16] = {0};
+    const bool hasAy2 = in.size() >= off + sizeof ay2Regs;
+    if (hasAy2) get(ay2Regs, sizeof ay2Regs);
     vp037_.unpack(v037);
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
     keyIntPending_ = false; keyIntDeferAt_ = 0;
@@ -985,6 +1007,11 @@ bool Board::loadState11(const std::vector<uint8_t>& in) {
     speaker_ = static_cast<uint8_t>(dev[6]);
     joystick_ = ext[0];
     keyHeld_  = ext[1] != 0;
+    ay2Seen_ = hasAy2 && (m11[7] & 1);
+    aySel_ = hasAy2 ? static_cast<uint8_t>((m11[7] >> 1) & 3) : 1;
+    ay2_.reset();
+    for (int r = 0; r < 16; ++r) ay2_.writeReg(static_cast<uint8_t>(r), ay2Regs[r]);
+    ay2_.writeAddress(static_cast<uint8_t>((m11[7] >> 8) & 017));
     mem_.setMstd(m11[6] != 0);
     mem_.setPageMap(m11[0]);
     reg716tap_ = m11[1];
@@ -1006,6 +1033,7 @@ bool Board::loadState11(const std::vector<uint8_t>& in) {
     }
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
+    rasterScroll_ = scroll_; scrollLatched_ = true;
     vp037_.setM256(scroll_ & 01000);
     return true;
 }
@@ -1517,8 +1545,9 @@ std::string Board::bk11Summary() const {
     return b;
 }
 
-std::string Board::aySummary() const {
-    const uint8_t* r = ay_.regs();
+std::string Board::aySummary(int chip) const {
+    const Ay8910& ay = chip ? ay2_ : ay_;
+    const uint8_t* r = ay.regs();
     auto tone = [&](int c) { return r[c * 2] | ((r[c * 2 + 1] & 017) << 8); };
     auto vol = [&](int c) {
         char v[8];
@@ -1527,7 +1556,7 @@ std::string Board::aySummary() const {
     };
     char b[200];
     std::snprintf(b, sizeof b, "рег=%d  тон A/B/C=%d/%d/%d  громк=%s/%s/%s  смес=%03o  шум=%d  огиб=%d форма=%d",
-                  ay_.address(), tone(0), tone(1), tone(2), vol(0).c_str(), vol(1).c_str(), vol(2).c_str(),
+                  ay.address(), tone(0), tone(1), tone(2), vol(0).c_str(), vol(1).c_str(), vol(2).c_str(),
                   r[7], r[6] & 037, r[11] | (r[12] << 8), r[13] & 017);
     return b;
 }
@@ -1535,6 +1564,26 @@ std::string Board::aySummary() const {
 // addrIn при байтовой записи не выровнен: на БК-0011М нечётный байт идёт в старший
 // (как у GID: `src &= 0377; if (addr & 1) src <<= 8`). Поведение БК-0010 прежнее —
 // байт как младший.
+// Выбор чипа на плате с двумя AY (GID AYSnd.cpp, MODE_GRYPHON): в слове адреса
+// разряд 15 = 0 выбирает первый чип, 14 = 0 — второй, оба нуля — оба сразу. Обычная
+// программа для одного AY пишет `~рег` целиком, старший байт 0377 — ни один чип не
+// выбран, и GID такую запись теряет; у нас она идёт в первый чип. Второй чип
+// подключается к звуку, когда программа впервые выберет его отдельно (демо «200%»).
+void Board::ayWrite(uint16_t value, uint16_t wide, bool isByte) {
+    if (isByte) {
+        const uint8_t d = static_cast<uint8_t>(~wide & 0377);
+        if (aySel_ & 1) ay_.writeData(d);
+        if (aySel_ & 2) ay2_.writeData(d);
+        return;
+    }
+    const bool c1 = !(value & 0100000), c2 = !(value & 040000);
+    if (c2 && !c1 && !ay2Seen_) { ay2Seen_ = true; sound_.setAy2(&ay2_); }
+    aySel_ = static_cast<uint8_t>((c1 || !c2 ? 1 : 0) | (c2 && ay2Seen_ ? 2 : 0));
+    const uint8_t a = static_cast<uint8_t>(~value & 017);
+    if (aySel_ & 1) ay_.writeAddress(a);
+    if (aySel_ & 2) ay2_.writeAddress(a);
+}
+
 bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
     const uint16_t addr = static_cast<uint16_t>(addrIn & ~1);
     uint16_t wide = value;                     // значение, выровненное по байту, для 11М
@@ -1587,8 +1636,7 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // AY-3-8910 на порту (GID devemu/Board.cpp:1184-1193, AYSnd.cpp): запись
             // словом — номер регистра, байтом — данные; линии инверсные. Байт по
             // нечётному адресу приходит в старший байт, младший тогда 0 → данные 0377.
-            if (isByte) ay_.writeData(static_cast<uint8_t>(~wide & 0377));
-            else        ay_.writeAddress(static_cast<uint8_t>(~value & 017));   // один чип: как GID, номер — младшая тетрада
+            ayWrite(value, wide, isByte);
         }
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
@@ -1598,12 +1646,10 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // (маска 0147400, GID Board_11M.cpp:191-222). Текущую строку растра
             // сначала дорисовываем старой палитрой — смена видна с места луча.
             //
-            // Байтовая запись шиной подтверждается, но регистр не меняет: это внешняя
-            // защёлка, как регистр памяти 0177716 («байтовая запись не проходит»,
-            // БК-docs §20.3) и регистр смещения БК-0010. Так выглядит INSULT, часть
-            // 19: её цикл MOVB в 0177663 по строкам на живой машине палитру не трогает
-            // (весь кадр — палитра 0). GID байтовую запись принимает.
-            if (isByte) return true;
+            // Байтовая запись проходит (как у GID): байт по нечётному адресу 0177663 —
+            // старший байт регистра. На этом стоит демо «200%» (11М + СМК-512): оно
+            // включает кадровый таймер командой MOVB #14,@#177663 и без неё навсегда
+            // встаёт на WAIT.
             rasterWrite(REG_KBD_DATA, static_cast<uint16_t>((reg662_ & ~0147400) | (wide & 0147400)));
             return true;
         }

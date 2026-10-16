@@ -51,8 +51,8 @@ ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, ove
 `--no-smk`),
 `--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
-`--scanline` (per-scanline rendering — each line drawn with the scroll register value
-that was live when the beam crossed it, driven off the `Vp037` raster; OFF by default,
+`--scanline` (per-scanline rendering — each line drawn with the palette/screen values live
+when the beam crossed it and the scroll latched for the field, driven off the `Vp037` raster; OFF by default,
 see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
 GUI-only: `--aspect34` / `--no-aspect34` (non-square BK pixels, ON by default).
 Screenshots render from the CPU-side pixel buffer / `QWidget::grab`, so no GL
@@ -124,8 +124,15 @@ Key cross-cutting facts to know before editing the CPU or screen:
   up to `lineWord()` (`Board::flushRaster`, `Screen::renderSpan`). Inside an instruction such a
   write takes effect at the END of the instruction (`Board::rasterWrite`) — the bus write is the
   last cycle; applying it at the instruction start moved palette splits 5–6 words early.
-  On the 11M a BYTE write to 0177662/0177663 is acknowledged but ignored (INSULT part 19; GID
-  accepts it).
+  On the 11M a BYTE write to 0177663 goes to the high half, as in GID/BKBTL: the "200%" demo
+  enables the frame IRQ only with `MOVB #14,@#177663` and hangs on WAIT without it. INSULT
+  part 19 then shows its per-line page/palette "checker floor"; a whole-frame renderer shows
+  that frame in palette 0 instead (its last write is `CLR @#177662`) — do not "fix" that.
+- **The scroll register is latched once per field**: 037 loads `0177664` into the line
+  address only at ALOAD (lines 278–279, `Vp037::SCROLL_LATCH_LINE`); afterwards the address
+  just counts lines. A mid-field write shows from the NEXT frame (`Board::latchScroll`,
+  `rasterScroll_`); only bit 9 (small screen) acts live. 0330 is "no scroll" because the
+  address counts 40 blank lines (050) before the field.
 - **Frames are exactly ticksPerFrame() apart in absolute ticks** (`Board::beginFrame`,
   `frameEnd_`): the overshoot of the last instruction and the frame-IRQ entry carry into the next
   frame, and the beam is advanced by it at the frame start. Starting each frame from "now" made
@@ -208,7 +215,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
 - **Speaker is 3-bit**: the piezo sums bits 6, 5 and 2 of `0177716` (mask `0144`) into 8
   levels; `Speaker::feed()` takes a level 0..7, not a bit. The AY-3-8910 (`Ay8910`, emu2149
   semantics, 1.714 MHz) is mixed into the same mono stream past the piezo RC filter; on
-  0177714 a WORD write selects the register, a BYTE write sends data, both inverted.
+  0177714 a WORD write selects the register, a BYTE write sends data, both inverted. A second
+  AY (`ay2_`) is selected by bits 15/14 = 0 of the address word (GID "Gryphon" mode); `~reg`
+  with neither bit clear goes to the first chip, and the second joins the mix only once a
+  program selects it alone (`Board::ayWrite`).
 - **Interrupt gating**: reset PSW is `0340` (priority 7, masked) so the monitor ROM
   can install its vectors before the 50 Hz IRQ fires — do not reset to 0, games will
   jump to an unset vector and HALT. `Board::deliverFrameInterrupts` also refuses to
