@@ -1939,6 +1939,53 @@ int main() {
     }
 
 
+    // ---- Таймер ВМ1, режим перезагрузки: отсчёта со значением 0 нет, период = предел ----
+    {
+        Board b; b.reset();
+        Memory& m = b.memory();
+        m.pokeWord(01000, 000777);                       // BR .
+        b.cpu().reset(01000, 0340);
+        m.writeWord(0177706, 5);
+        m.writeWord(0177712, 020);                       // RUN, перезагрузка
+        const uint64_t t0 = b.totalTicks();
+        bool zero = false, seqOk = true;
+        int reads = 0;
+        while (b.totalTicks() - t0 < 128 * 40) {
+            b.stepInstruction();
+            const uint16_t v = m.readWord(0177710);
+            const uint64_t k = (b.totalTicks() - t0) / 128;   // отсчётов с запуска
+            if (v == 0) zero = true;
+            if (v != 5 - k % 5) seqOk = false;
+            ++reads;
+        }
+        CHECK(!zero && seqOk && reads > 100, "таймер ВМ1: 5,4,3,2,1,5,… — нуля нет, период равен пределу");
+        // То же, когда между чтениями прошло много периодов.
+        m.writeWord(0177712, 020);
+        const uint64_t t1 = b.totalTicks();
+        while (b.totalTicks() - t1 < 128 * 1003) b.stepInstruction();
+        const uint64_t k = (b.totalTicks() - t1) / 128;
+        CHECK(m.readWord(0177710) == 5 - k % 5, "таймер ВМ1: пропуск многих периодов считается с тем же периодом");
+    }
+
+    // ---- Команда RESET останавливает таймер, но счётчик не трогает (К1801ВМ1, §6.6) ----
+    {
+        Board b; b.reset();
+        Memory& m = b.memory();
+        loadProg(m, 01000, {000777, 000005, 000777});    // BR . (ожидание); RESET; BR .
+        b.cpu().reset(01000, 0340);
+        m.writeWord(0177706, 01000);
+        m.writeWord(0177712, 020);                       // RUN, перезагрузка
+        while (b.totalTicks() < 128 * 37) b.memory().readWord(0177710), b.stepInstruction();
+        b.cpu().r[7] = 01002;
+        const uint16_t before = m.readWord(0177710);
+        b.stepInstruction();                             // RESET
+        const uint16_t after = m.readWord(0177710);
+        for (int i = 0; i < 50; ++i) b.stepInstruction();
+        CHECK(before != 01000 && (after == before || after == before - 1) && m.readWord(0177710) == after
+              && !(m.readWord(0177712) & 020),
+              "RESET: таймер остановлен, счётчик остался прежним (предел в него не копируется)");
+    }
+
     // ---- Кадры идут точно по 61440/81920 тактов: перелёт последней команды и вход
     //      в прерывание не удлиняют кадр (иначе всё, что держится за таймер ВМ1, уползает)
     for (int m11 = 0; m11 < 2; ++m11) {

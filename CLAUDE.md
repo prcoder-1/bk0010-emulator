@@ -182,7 +182,11 @@ Key cross-cutting facts to know before editing the CPU or screen:
   register is undefined on real hardware, and all-ones makes the counter a plain 16-bit
   down-counter that passes through the negative half — which is what the common
   `TST @#177710 / BPL` wait idiom (and any program that never programs the limit)
-  needs. See `docs/BK0010-hardware.md`.
+  needs. See `docs/BK0010-hardware.md`. In reload mode there is NO count with the value 0: 0 is
+  replaced by the limit at once, so the period is exactly the limit (5,4,3,2,1,5…; verified on
+  real hardware, and K1801VM1 manual §6.6) — also when many periods pass between register reads.
+  The `RESET` instruction stops the timer but does NOT touch `TVE_COUNT` (§6.6: nINIT/nDCLO do not
+  change it), so `resetDevices` must not go through `timerSetMode` (a CSR write copies LIMIT→COUNT).
 - **The VM1 C-flag bug** is emulated: after `MOVB xx,Rd` / `MFPS Rd` (register
   destination only) *conditional branches* read C as clear, while PSW keeps the correct
   value. Model it as a separate read path (`Cpu::brFlags()`) — clearing C in PSW instead
