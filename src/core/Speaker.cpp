@@ -43,12 +43,19 @@ void Speaker::feed(int level, int ticks) {
         // Шаг точный: a = 1 - exp(-dt/tau), dt — реальная длительность куска.
         const double a = 1.0 - std::exp(-(take / sampleRate_) / kTauSeconds);
         filtered_ += (target - filtered_) * a;
+        if (ay_) ay_->advance(take / sampleRate_);
         acc_  += take;
         span  -= take;
         if (acc_ < 1.0) break;                            // отсчёт ещё не набран
         acc_ = 0.0;
         dc_ += (filtered_ - dc_) * dcRc;                  // DC-блокер: покой -> тишина
         double v = filtered_ - dc_;
+        if (ay_) {
+            // Полная громкость трёх каналов (выход 1.0) — 28000 в размахе.
+            const double ay = ay_->takeSample() * 28000.0;
+            ayDc_ += (ay - ayDc_) * dcRc;
+            v += ay - ayDc_;
+        }
         if (v > 32767.0) v = 32767.0; else if (v < -32767.0) v = -32767.0;
         const int16_t smp = static_cast<int16_t>(v);
         if (buf_.size() >= maxBuf) for (size_t i = 0; i < maxBuf / 4; ++i) buf_.pop_front();

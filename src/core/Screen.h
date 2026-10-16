@@ -26,7 +26,12 @@ public:
     void render(const Memory& mem);
     // Отрисовать одну строку заданным значением регистра 0177664 — построчный режим,
     // которым Board рисует кадр по мере движения луча (см. Board::setScanlineRender).
-    void renderLine(const Memory& mem, int y, uint16_t scrollReg);
+    void renderLine(const Memory& mem, int y, uint16_t scrollReg) { renderSpan(mem, y, scrollReg, 0, WORDS_PER_LINE); }
+    // Отрисовать часть строки — слова [fromWord, toWord) — текущей палитрой. Так
+    // смена палитры или экранного буфера посреди строки (БК-0011М) видна ровно с
+    // того слова, где стоял луч.
+    static constexpr int WORDS_PER_LINE = 32;
+    void renderSpan(const Memory& mem, int y, uint16_t scrollReg, int fromWord, int toWord);
 
     const uint32_t* pixels() const { return tex_; }
 

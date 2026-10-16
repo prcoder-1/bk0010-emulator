@@ -31,7 +31,7 @@ void AudioOut::start() {
     //    render, so production arrives unevenly. readData drains greedily, which
     //    would keep the FIFO near-empty and make every hitch insert a click; instead
     //    we prime a ~90 ms cushion before serving so hitches are absorbed. With
-    //    exact rate-matching (60000 ticks/frame × 50 Hz = 3 MHz = cpuFreq) the
+    //    exact rate-matching (ticksPerFrame × 48.83 Hz = cpuFreq: 3 or 4 MHz) the
     //    cushion is stable; maxSamples_ is a valve against pathological drift.
     sink_->setBufferSize(fmt.bytesForDuration(40000)); // ~40 ms
     sink_->setVolume(0.6);

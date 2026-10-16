@@ -463,7 +463,8 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     // блоком СМК-512 там же появляется строка режима — панель растёт на строку,
     // стек ровно на столько же сжимается. ----
     int sregH = (11 + (board_->smk512() ? 1 : 0)
-                    + (board_->diskControllerOn() ? 1 : 0)) * lineH_ + 8;
+                    + (board_->diskControllerOn() ? 1 : 0)
+                    + (board_->bk11() ? 1 : 0) + (board_->ay() ? 1 : 0)) * lineH_ + 8;
     QRect stkRect(mx, memRect.bottom() + margin, mw,
                   dTop + dH - sregH - 2 * margin - memRect.bottom());
     stkRect_ = stkRect;   // для попадания мышью при правке
@@ -554,6 +555,19 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         }
         gy += lineH_;
     }
+    // БК-0011М: какие страницы стоят в окнах, палитра, видимый буфер, кадровый
+    // таймер — то, без чего отладка страничной программы идёт вслепую.
+    if (board_->bk11()) {
+        p.setPen(fg);
+        p.drawText(srx, gy, fm.elidedText(QString::fromStdString(board_->bk11Summary()), Qt::ElideRight, srw));
+        gy += lineH_;
+    }
+    // Звуковой сопроцессор: номер выбранного регистра и что звучит.
+    if (board_->ay()) {
+        p.setPen(fg);
+        p.drawText(srx, gy, fm.elidedText("AY " + QString::fromStdString(board_->aySummary()), Qt::ElideRight, srw));
+        gy += lineH_;
+    }
     // Контроллер НГМД: где головка и успевает ли процессор за обменом. Счётчик
     // потерянных слов — главный признак того, что передача рвётся не «где-то», а
     // именно по темпу: микросхема отдаёт слово раз в 64 мкс и ждать не умеет.
@@ -582,8 +596,10 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         if (sr.addr == 0177712) { if (rd & 020) flag += "R"; if (rd & 0200) flag += "F"; }
         else if (sr.addr == 0177716 && !(rd & 0100)) flag = "К";
         // addr | name (padded) | written | read | flag
+        // На БК-0011М 0177662 на запись — регистр палитры, экрана и таймера.
+        const char* nm = (board_->bk11() && sr.addr == 0177662) ? "палитра/экр" : sr.name;
         QString s = QString("%1 %2 %3 %4%5").arg(oct6(sr.addr))
-                        .arg(QString::fromUtf8(sr.name), -12).arg(oct6(wr)).arg(oct6(rd))
+                        .arg(QString::fromUtf8(nm), -12).arg(oct6(wr)).arg(oct6(rd))
                         .arg(flag.isEmpty() ? "" : " " + flag);
         p.setPen(fg);
         p.drawText(srx, gy, fm.elidedText(s, Qt::ElideRight, srw));

@@ -4,11 +4,75 @@
 
 namespace bk {
 
-Memory::Memory() { reset(); }
+Memory::Memory() { applyMap(); reset(); }
 
 void Memory::reset() {
     // Clear RAM only (0..romStart_); leave ROM contents intact.
-    std::memset(mem_.data(), 0, romStart_);
+    if (bk11_) std::fill(ram11_.begin(), ram11_.end(), 0);
+    else std::memset(mem_.data(), 0, romStart_);
+}
+
+void Memory::setBk11(bool on) {
+    bk11_ = on;
+    if (on) {
+        ram11_.assign(RAM11_BYTES, 0);
+        if (rom11_.empty()) rom11_.assign(ROM11_SLOTS * ROM11_BYTES, 0);
+    } else {
+        ram11_.clear(); ram11_.shrink_to_fit();
+    }
+    pageReg_ = 0;
+    videoPage_ = 5;
+    applyMap();
+}
+
+bool Memory::loadRom11(int slot, const char* path) {
+    if (slot < 0 || slot >= ROM11_SLOTS) return false;
+    if (rom11_.empty()) rom11_.assign(ROM11_SLOTS * ROM11_BYTES, 0);
+    romOk_[slot] = false;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) { std::fprintf(stderr, "Memory: cannot open ROM '%s'\n", path); applyMap(); return false; }
+    uint8_t* dst = rom11_.data() + slot * ROM11_BYTES;
+    std::memset(dst, 0, ROM11_BYTES);
+    const size_t got = std::fread(dst, 1, ROM11_BYTES, f);
+    std::fclose(f);
+    if (got != ROM11_BYTES)
+        std::fprintf(stderr, "Memory: ROM '%s' size %zu != expected %zu\n", path, got, ROM11_BYTES);
+    romOk_[slot] = got > 0;
+    applyMap();
+    return romOk_[slot];
+}
+
+void Memory::setPageMap(uint16_t reg) {
+    pageReg_ = reg;
+    applyMap();
+}
+
+// Карта блоков по 8 Кбайт. На БК-0010 — тождественная (защита ПЗУ — по romStart_).
+// На БК-0011М — по регистру памяти 0177716 (GID devemu/Board_11M.cpp:485-555).
+void Memory::applyMap() {
+    if (!bk11_) {
+        for (int i = 0; i < 8; ++i) { blk_[i] = mem_.data() + i * ROM11_BYTES; attr_[i] = Ram; }
+        return;
+    }
+    auto ramBlk = [&](int i, int page, int half) {
+        blk_[i] = ram11_.data() + page * PAGE11_BYTES + half * ROM11_BYTES;
+        attr_[i] = Ram;
+    };
+    auto romBlk = [&](int i, int slot) {
+        if (slot >= 0 && romOk_[slot]) { blk_[i] = rom11_.data() + slot * ROM11_BYTES; attr_[i] = Rom; }
+        else { blk_[i] = zero_.data(); attr_[i] = Absent; }   // никто не отвечает — зависание
+    };
+    ramBlk(0, 0, 0); ramBlk(1, 0, 1);
+    const int w0 = pageForCode(pageReg_ >> 12);
+    ramBlk(2, w0, 0); ramBlk(3, w0, 1);
+    switch (romPageForReg(pageReg_)) {
+    case -1: { const int w1 = pageForCode(pageReg_ >> 8); ramBlk(4, w1, 0); ramBlk(5, w1, 1); break; }
+    case 0:  romBlk(4, ROM_BASIC2); romBlk(5, ROM_BASIC3); break;
+    case 1:  romBlk(4, ROM_BASIC1); romBlk(5, ROM_EXT);    break;
+    default: romBlk(4, -1); romBlk(5, -1); break;            // ПЗУ-страницы 2, 3 — пустые розетки
+    }
+    romBlk(6, ROM_BOS);
+    romBlk(7, mstd_ ? ROM_MSTD : -1);
 }
 
 bool Memory::loadRom(uint16_t addr, const uint8_t* data, size_t len) {
@@ -60,7 +124,13 @@ uint16_t Memory::busRead(uint16_t addr) {
         uint16_t v = 0;
         if (io_->ioRead(addr, v)) return v;
     }
-    return static_cast<uint16_t>(mem_[addr] | (mem_[addr + 1] << 8));
+    // Пустой блок БК-0011М (нет ПЗУ в розетке): ответа на шине нет — зависание.
+    if (attr_[addr >> 13] == Absent && addr < ADDR_IO_PAGE) {
+        if (busError_) busError_(addr);
+        return 0;
+    }
+    const uint8_t* p = at(addr);
+    return static_cast<uint16_t>(p[0] | (p[1] << 8));
 }
 
 uint16_t Memory::readWord(uint16_t addr) {
@@ -71,11 +141,13 @@ uint16_t Memory::readWord(uint16_t addr) {
 
 uint8_t Memory::readByte(uint16_t addr) {
     if (hook_) hook_(addr, false, true);
-    if (addr < ADDR_RAM_END) return mem_[addr];
+    if (addr < ADDR_RAM_END && attr_[addr >> 13] == Ram) return *at(addr);
     const uint16_t v = busRead(addr & ~1);
     return (addr & 1) ? (v >> 8) : (v & 0xff);
 }
 
+// Запись в ПЗУ: на БК-0010 просто пропадает; на БК-0011М, как у GID (devemu/
+// Board.cpp:458-466), ПЗУ записи не подтверждает — зависание. Пустой блок — тоже.
 void Memory::writeWord(uint16_t addr, uint16_t value) {
     addr &= ~1;
     if (hook_) hook_(addr, true, false);
@@ -87,7 +159,10 @@ void Memory::writeWord(uint16_t addr, uint16_t value) {
         if (busError_) busError_(addr);
         return;
     }
-    if (isRom(addr)) return;     // ПЗУ: запись просто пропадает
+    if (isRom(addr)) {           // ПЗУ: запись просто пропадает
+        if (bk11_ && busError_) busError_(addr);
+        return;
+    }
     rawWord(addr, value);
 }
 
@@ -95,11 +170,14 @@ void Memory::writeByte(uint16_t addr, uint8_t value) {
     if (hook_) hook_(addr, true, true);
     if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiWrite(addr, value, true)) return;
     if (addr >= ADDR_IO_PAGE && io_) {
-        if (io_->ioWrite(addr & ~1, value, true)) return;
+        if (io_->ioWrite(addr, value, true)) return;   // адрес не выровнен: нужен IoBus для 11М
         if (busError_) busError_(addr);
         return;
     }
-    if (isRom(addr)) return;
+    if (isRom(addr)) {
+        if (bk11_ && busError_) busError_(addr);
+        return;
+    }
     rawByte(addr, value);
 }
 
@@ -114,7 +192,8 @@ uint16_t Memory::peekWord(uint16_t addr) const {
         uint16_t v = 0;
         if (mpi_->mpiPeek(addr, v)) return v;
     }
-    return static_cast<uint16_t>(mem_[addr] | (mem_[addr + 1] << 8));
+    const uint8_t* p = at(addr);
+    return static_cast<uint16_t>(p[0] | (p[1] << 8));
 }
 
 uint8_t Memory::peekByte(uint16_t addr) const {
@@ -122,7 +201,7 @@ uint8_t Memory::peekByte(uint16_t addr) const {
         uint16_t v = 0;
         if (mpi_->mpiPeek(addr & ~1, v)) return (addr & 1) ? (v >> 8) : (v & 0xff);
     }
-    return mem_[addr];
+    return *at(addr);
 }
 
 void Memory::pokeWord(uint16_t addr, uint16_t value) {

@@ -1,4 +1,5 @@
 #include "Board.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cctype>
@@ -22,6 +23,7 @@ enum : uint16_t {
     REG_PORT       = 0177714,
     REG_SYS        = 0177716,
     START_VECTOR   = 0100000,
+    START_VECTOR11 = 0140000,   // БК-0011М: 0177716 читается как 0140000 — БОС
 };
 
 // 1801VM1 timer control-register bits (ported from the reference bk/timer.c).
@@ -88,20 +90,40 @@ void Board::timerCheck() {
     }
 }
 
-// Верх кадра: доотрисовать хвост предыдущего кадра и начать новый с нулевой строки,
-// затем выровнять фазу 037 к VSYNC.
+// Граница кадра эмулятора — кадровый синхроимпульс 037 (nVSYNC), в тот же момент
+// выдаётся кадровое прерывание. Видимые строки предыдущего кадра к этому времени
+// уже пройдены (импульс — на 21-й строке гашения), так что дорисовываем хвост и
+// начинаем новый кадр с нулевой строки; до неё луч дойдёт через 43 строки.
 void Board::beginFrameRaster() {
-    if (scanlineRender_) { renderScanlinesUpTo(Screen::TEX_H); renderedLine_ = 0; }
-    if (arb037_ || scanlineRender_) vp037_.syncToFrameTop();
+    if (scanlineRender_) {
+        renderRasterTo(Screen::TEX_H, 0);
+        renderedLine_ = 0; renderedWord_ = 0;
+    }
+    vp037_.syncToVsync();
+    vpHalf_ = 0;
 }
 
-// Догнать построчную отрисовку до строки `line` (строки ДО неё луч уже прошёл).
-void Board::renderScanlinesUpTo(int line) {
-    if (line > Screen::TEX_H) line = Screen::TEX_H;
+// Догнать отрисовку до строки `line`, слова `word` (всё ДО этой точки луч уже
+// прошёл). Строки за пределами видимого поля (гашение) не рисуются.
+void Board::renderRasterTo(int line, int word) {
+    if (line < 0) return;                       // луч ещё в кадровом гашении
+    if (line >= Screen::TEX_H) { line = Screen::TEX_H; word = 0; }
     while (renderedLine_ < line) {
-        screen_.renderLine(mem_, renderedLine_, scroll_);
+        screen_.renderSpan(mem_, renderedLine_, scroll_, renderedWord_, Screen::WORDS_PER_LINE);
         ++renderedLine_;
+        renderedWord_ = 0;
     }
+    if (renderedLine_ == line && line < Screen::TEX_H && word > renderedWord_) {
+        if (word > Screen::WORDS_PER_LINE) word = Screen::WORDS_PER_LINE;
+        screen_.renderSpan(mem_, line, scroll_, renderedWord_, word);
+        renderedWord_ = word;
+    }
+}
+
+// Догнать растр до текущего положения луча — перед сменой палитры/экрана/скролла,
+// чтобы уже пройденная лучом часть кадра осталась нарисованной старыми значениями.
+void Board::flushRaster() {
+    if (scanlineRender_) renderRasterTo(vp037_.fieldLine(), vp037_.lineWord());
 }
 
 // Record a frame-synchronisation boundary at the current tick (deduped, capped).
@@ -175,6 +197,12 @@ Board::Board() {
 // tests/hw/ROMIO.BIN на реальной БК-0010-01 в фазе 1 показал, что чтение из ПЗУ
 // на окно 037 медленнее чтения из В-В (docs/slow-memory-timing.md).
 uint8_t Board::busClass(uint16_t addr, bool write) const {
+    if (bk11()) {
+        // БК-0011М: всё ОЗУ (и страницы в окне 1) — ДОЗУ за 037; ПЗУ и пустые розетки — ПЗУ.
+        if (addr >= 0177600) return BusFast;
+        if (diskOn_ && addr >= Kngmd::ROM_FIRST && addr <= Kngmd::ROM_LAST) return BusRom;
+        return mem_.isRam(addr) ? BusDram : BusRom;
+    }
     if (addr < 0100000) return BusDram;
     if (addr >= 0177600) return BusFast;
     if (smkOn_ && smkRamAccess(addr, write)) return BusFast;
@@ -191,6 +219,53 @@ bool Board::smkRamAccess(uint16_t addr, bool write) const {
                  : (s.cell == Smk512::Cell::Rw || s.cell == Smk512::Cell::Ro);
 }
 
+// Время идёт для всего, что вокруг процессора: луч 037 (и построчная отрисовка),
+// счётчик тактов (таймер ВМ1 считается от него), динамик и AY, вращение диска,
+// отложенный сброс готовности клавиатуры.
+void Board::advanceDevices(int t) {
+    // Фаза 037 идёт в лок-степе с ЦП — по ней рисуются строки при построчной
+    // отрисовке. 1 такт ЦП = 2 такта CLKIN на БК-0010 (3 МГц) и 1,5 на БК-0011М
+    // (4 МГц), поэтому счёт — в полутактах CLKIN с переносом остатка.
+    vpHalf_ += t * (2 * CLKIN_HZ / cpuFreqHz_);
+    vp037_.tick(vpHalf_ >> 1);
+    vpHalf_ &= 1;
+    // Луч ушёл вперёд — дорисовать пройденные строки текущим значением скролла.
+    if (scanlineRender_) renderRasterTo(vp037_.fieldLine(), 0);
+    totalTicks_ += static_cast<uint64_t>(t);
+    sound_.feed(speaker_, t);
+    // Вращение диска. Микросхема 1801ВП1-128 формирует слово за 64 мкс (192 такта
+    // при 3 МГц), и драйвер обязан успевать за этим темпом по флагу TR. Крутим
+    // ПОСЛЕ КАЖДОЙ команды, а не раз в кадр: опросный цикл драйвера — три-четыре
+    // команды, и раз в кадр он не увидел бы ни одного слова.
+    if (diskOn_) {
+        const uint64_t period = fddPeriod();
+        if (totalTicks_ > fddNextTick_ + period * 64)
+            fddNextTick_ = totalTicks_;   // большой разрыв (снимок, пауза) — не догоняем
+        while (totalTicks_ >= fddNextTick_) {
+            kngmd_.fdd().periodic();
+            fddNextTick_ += period;
+        }
+    }
+    // Отложенный сброс флага готовности клавиатуры (см. ioRead REG_KBD_DATA).
+    if (kbdReadyClearAt_ && totalTicks_ >= kbdReadyClearAt_) {
+        kbdStatus_ &= ~0200;
+        kbdReadyClearAt_ = 0;
+    }
+}
+
+// Простой по WAIT: команд нет, но время идёт. Раньше остаток кадра просто
+// пропускался — и вместе с ним звук (AY-музыка по прерыванию звучала обрывками),
+// вращение диска, таймер и луч. Запросы прерываний разбираются так же, как после
+// команды: клавиатура может разбудить процессор посреди кадра.
+int Board::idleTicks(int t) {
+    advanceDevices(t);
+    if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_) {
+        const int it = tryDeliverInterrupts();
+        if (it) { advanceDevices(it); t += it; }
+    }
+    return t;
+}
+
 // Execute one instruction with sound + trace bookkeeping. Returns ticks.
 int Board::stepCore() {
     uint16_t pcBefore = cpu_.pc();
@@ -205,35 +280,12 @@ int Board::stepCore() {
     int t = cpu_.step();
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
     if (arb037_) t = busTicks(ir, t);
-    // Фаза 037 идёт в лок-степе с ЦП (1 такт ЦП = 2 такта CLKIN) — по ней рисуются
-    // строки при построчной отрисовке.
-    if (arb037_ || scanlineRender_) vp037_.tick(2 * t);
-    // Луч ушёл вперёд — дорисовать пройденные строки текущим значением скролла.
-    if (scanlineRender_) renderScanlinesUpTo(vp037_.scanline());
-    totalTicks_ += static_cast<uint64_t>(t);
-    sound_.feed(speaker_, t);
-    // Вращение диска. Микросхема 1801ВП1-128 формирует слово за 64 мкс (192 такта
-    // при 3 МГц), и драйвер обязан успевать за этим темпом по флагу TR. Крутим
-    // ПОСЛЕ КАЖДОЙ команды, а не раз в кадр: опросный цикл драйвера — три-четыре
-    // команды, и раз в кадр он не увидел бы ни одного слова.
-    if (diskOn_) {
-        if (totalTicks_ > fddNextTick_ + Fdd::PERIOD_TICKS * 64)
-            fddNextTick_ = totalTicks_;   // большой разрыв (снимок, пауза) — не догоняем
-        while (totalTicks_ >= fddNextTick_) {
-            kngmd_.fdd().periodic();
-            fddNextTick_ += Fdd::PERIOD_TICKS;
-        }
-    }
-    // Отложенный сброс флага готовности клавиатуры (см. ioRead REG_KBD_DATA).
-    if (kbdReadyClearAt_ && totalTicks_ >= kbdReadyClearAt_) {
-        kbdStatus_ &= ~0200;
-        kbdReadyClearAt_ = 0;
-    }
+    advanceDevices(t);
     // Взведённые запросы разбираются после КАЖДОЙ команды, а не раз в кадр: иначе
     // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
     if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_) {
         const int it = tryDeliverInterrupts();
-        if (it) { totalTicks_ += static_cast<uint64_t>(it); sound_.feed(speaker_, it); t += it; }
+        if (it) { advanceDevices(it); t += it; }
     }
     if (trace_.enabled()) {
         uint16_t pcNow = cpu_.pc();
@@ -297,39 +349,45 @@ bool Board::mapAccesses(const Vm1Sched& s, int& from, uint8_t* cls) const {
     return true;
 }
 
-// Единица — четверть такта (83 нс, полупериод CLKIN): окна 037 решаются на
-// полупериодах CLKIN. Запрос в ДОЗУ получает окно, если пришёл не позже чем за 5
-// четвертей до решающего фронта (это задержка запроса в кремнии, в RTL её нет);
-// ответ ЦП видит на ближайшем своём такте через 11 четвертей после решения. Решения
-// идут раз в 16 четвертей (4 такта) со смещением 3 или 1 по модулю 4 — это и есть
-// фаза включения питания. Быстрая память отвечает сразу: строб через 6 четвертей
-// после запроса, RPLY через полутакт на чтение и такт на запись (ещё такт — у записи
-// в чтении-модификации-записи). Так считает eCat3, и это даёт таблицу СМК-512. ПЗУ
-// на чтении отвечает на kRomReadExtra четвертей позже, ЦП видит RPLY на фронте своего
-// такта (полутакт).
+// Единица времени U — 1/12 такта ЦП: общий знаменатель четверти такта (полупериод
+// CLKIN у БК-0010, где 1 такт = 2 CLKIN) и полупериода CLKIN у БК-0011М (1 такт =
+// 1,5 CLKIN). Модель исходно снята для БК-0010 в четвертях такта; там все величины
+// просто умножены на 3, и результаты совпадают с прежними до такта.
+//
+// Окна 037 решаются на полупериодах CLKIN раз в 8 CLKIN (48 U у БК-0010, 64 U у
+// БК-0011М). Запрос в ДОЗУ получает окно, если пришёл не позже чем за busReqU_ до
+// решающего фронта (задержка запроса в кремнии, в RTL её нет); ответ ЦП видит на
+// ближайшем своём такте через busRespU_ после решения. Смещение решений — фаза
+// включения питания. Быстрая память отвечает сразу: строб через 6 четвертей после
+// запроса, RPLY через полутакт на чтение и такт на запись (ещё такт — у записи в
+// чтении-модификации-записи). Так считает eCat3, и это даёт таблицу СМК-512. ПЗУ на
+// чтении отвечает на kRomReadExtra четвертей позже, ЦП видит RPLY на фронте своего
+// полутакта. Параметры БК-0011М подобраны по замерам Manwe (docs/bk0011m.md).
 int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks) {
-    const int64_t base = static_cast<int64_t>(ticks + static_cast<uint64_t>(busSkew_)) * 4;
-    const int64_t phi = cpuPhase_ ? 1 : 3;
-    auto done = [&](int64_t q, char kind, uint8_t c) {
-        if (c == BusRom && kind == 'R') return (q + 8 + kRomReadExtra + 1) & ~int64_t(1);
-        if (c != BusDram) return q + (kind == 'W' ? 10 : kind == 'M' ? 14 : 8);
-        int64_t d = q + 5;
-        d += ((phi - d) % 16 + 16) % 16;
-        return (d + 11 + 3) & ~int64_t(3);
+    constexpr int64_t T = 12, Q = 3;              // такт и четверть такта в U
+    const int64_t base = static_cast<int64_t>(ticks + static_cast<uint64_t>(busSkew_)) * T;
+    const int64_t win = busWinU(), phi = busPhaseU();
+    auto ceilTo = [](int64_t x, int64_t m) { return (x + m - 1) / m * m; };
+    auto done = [&](int64_t q, char kind, uint8_t c) -> int64_t {
+        if (c == BusRom && kind == 'R') return ceilTo(q + Q * (8 + kRomReadExtra), T / 2);
+        if (c != BusDram) return q + Q * (kind == 'W' ? 10 : kind == 'M' ? 14 : 8);
+        int64_t d = q + busReqU_;
+        d += ((phi - d) % win + win) % win;
+        return ceilTo(d + busRespU_, T);
     };
     int64_t c = done(base + busFrac_, 'R', cls[0]);        // выборка
-    int64_t ref = c + 4 + 2 * (cls[0] != BusDram ? prevTeFast_ : prevTeDram_);  // старт микрокода
+    int64_t ref = c + T + (T / 2) * (cls[0] != BusDram ? prevTeFast_ : prevTeDram_);  // старт микрокода
     bool fast = cls[0] != BusDram;
     for (int i = 0; i < s.n; ++i) {
         const int gap = s.op[i].gap + (fast ? s.op[i].xf : 0);
-        ref = done(ref + 2 * gap, s.op[i].kind, cls[1 + i]);
+        ref = done(ref + (T / 2) * gap, s.op[i].kind, cls[1 + i]);
         fast = cls[1 + i] != BusDram;
     }
-    const int64_t next = ref + 2 * (s.tail + (fast ? s.pfXf : 0));
+    const int64_t next = ref + (T / 2) * (s.tail + (fast ? s.pfXf : 0));
     prevTeDram_ = s.early ? 2 : 0;
     prevTeFast_ = s.teFast;
-    busFrac_ = static_cast<int>(next & 3);
-    return static_cast<int>((next >> 2) - (base >> 2));
+    busFrac_ = static_cast<int>(next % T);
+    return static_cast<int>(next / T - base / T);
 }
 
 // Вход в прерывание по шине. Обмены — от acc_[from]; если их нет или они не те
@@ -373,8 +431,37 @@ void Board::checkWatch(uint16_t addr, bool write, bool isByte) {
     if (!isByte) hit(static_cast<uint16_t>(addr + 1));
 }
 
+void Board::setMachine(Machine m) {
+    machine_ = m;
+    cpuFreqHz_ = bk11() ? 4000000 : 3000000;
+    busReqU_  = bk11() ? bus11Req_  : 15;
+    busRespU_ = bk11() ? bus11Resp_ : 33;
+    sound_.setCpuFreq(cpuFreqHz_);
+    if (bk11() && smkOn_) setSmk512(false);   // СМК-512 на БК-0011М не эмулируем
+    mem_.setBk11(bk11());
+    setAy(bk11());
+    if (!romDir_.empty()) loadRoms(romDir_);
+}
+
 bool Board::loadRoms(const std::string& romDir) {
     romDir_ = romDir;
+    if (bk11()) {
+        // Имена — как у GID BKemu (devemu/Config.cpp:245-259), по 8 Кбайт.
+        static const struct { int slot; const char* file; } kRoms[] = {
+            {Memory::ROM_BOS,    "bk11m_324_bos.rom"},
+            {Memory::ROM_EXT,    "bk11m_325_ext.rom"},
+            {Memory::ROM_BASIC1, "bk11m_327_basic1.rom"},
+            {Memory::ROM_BASIC2, "bk11m_328_basic2.rom"},
+            {Memory::ROM_BASIC3, "bk11m_329_basic3.rom"},
+            {Memory::ROM_MSTD,   "bk11m_330_mstd.rom"},
+        };
+        bool ok = true;
+        for (const auto& r : kRoms) {
+            const bool got = mem_.loadRom11(r.slot, (romDir + "/" + r.file).c_str());
+            if (r.slot == Memory::ROM_BOS) ok = got;
+        }
+        return ok;
+    }
     bool ok = true;
     ok &= mem_.loadRomFile(ADDR_ROM_MON, (romDir + "/monit10.rom").c_str(), 8192);
     // BASIC is optional for running games but harmless; load if present.
@@ -387,7 +474,8 @@ void Board::reset() {
     // Адрес начального пуска процессор берёт из ячейки 0177716. Обычно там ПЗУ БК
     // с адресом 0100000, но контроллер с собственной прошивкой зеркалит своё ПЗУ
     // на эту ячейку и уводит старт на себя (§17.9) — так грузится машина с СМК.
-    const uint16_t start = (diskOn_ && kngmd_.romStart()) ? kngmd_.romStart() : START_VECTOR;
+    const uint16_t start = (diskOn_ && kngmd_.romStart()) ? kngmd_.romStart()
+                         : bk11() ? START_VECTOR11 : START_VECTOR;
     // Power-up: priority 7 (all interrupts masked). The monitor lowers the
     // priority itself once it has installed its interrupt vectors.
     cpu_.reset(start, 0340);
@@ -432,6 +520,13 @@ void Board::reset() {
     framesSinceReset_ = 0;
     std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));
     screen_.setScroll(scroll_);
+    // БК-0011М: обе защёлки 0177716 — нули (оба окна — страница 1, ПЗУ в окне 1 нет;
+    // GID Board.cpp:752), 0177662 = 047400: палитра 15, таймер выключен, экран 5.
+    reg716tap_ = 0;
+    reg662_ = 047400;
+    if (bk11()) { mem_.setPageMap(0); apply662(); }
+    else screen_.setPalette(0);
+    ay_.reset();
     vp037_.reset();
     vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
     if (smkOn_) smk_.powerOn();        // включение питания: ДОЗУ чисто, режим SYS
@@ -546,7 +641,7 @@ bool Board::attachDisk(int drive, const std::string& path, bool readOnly, int si
     }
     if (!diskOn_) {
         diskOn_ = true;
-        fddNextTick_ = totalTicks_ + Fdd::PERIOD_TICKS;
+        fddNextTick_ = totalTicks_ + fddPeriod();
         updateMpi();
     }
     return true;
@@ -563,6 +658,9 @@ void Board::detachDisk(int drive) {
 // набирая в мониторе «160000G». Стек и векторы поднимает сам драйвер.
 bool Board::bootFromDisk() {
     if (!diskOn_ || !kngmd_.romLoaded()) return false;
+    // БК-0011М: БОС при пуске сам находит контроллер и вызывает загрузчик 0160000
+    // (БК-docs §20.8) — достаточно сбросить машину с подключённым диском.
+    if (bk11()) { reset(); return true; }
     // Прошивка СМК перехватывает адрес начального пуска: машина должна стартовать
     // с неё, а не с монитора, иначе своей инициализации (ROM-BIOS, векторы,
     // рабочий режим) контроллер не сделает и система с диска не поднимется.
@@ -586,6 +684,11 @@ void Board::setSmk512(bool on) {
 // ---- Save / restore state ---------------------------------------------------
 namespace {
 constexpr char kMagic[8] = {'B','K','1','0','S','T','1','\0'};
+// БК-0011М: свой формат — 128 Кбайт ОЗУ и регистры страниц/палитры/AY.
+// Раскладка: магия(8) + ОЗУ(128К) + R0-R7 + PSW + dev[7] + ext[2] + v037(u32)
+// + m11[8] = {память 0177716, лента 0177716, 0177662, полутакт CLKIN, AY вкл,
+// адрес AY, МСТД, резерв} + регистры AY(16) + bus[4].
+constexpr char kMagic11[8] = {'B','K','1','1','S','T','1','\0'};
 }
 
 // Раскладка снимка: магия(8) + ОЗУ(0100000) + R0-R7(8 слов) + PSW + dev[7] и —
@@ -601,6 +704,7 @@ constexpr size_t kStateSmkRam = kStateSmk + Smk512::RAM_BYTES;            // + 5
 
 void Board::saveStateMem(std::vector<uint8_t>& out) const {
     out.clear();
+    if (bk11()) { saveState11(out); return; }
     out.reserve(smkOn_ ? kStateSmkRam : kStateSmk);
     auto put = [&](const void* p, size_t n) {
         const uint8_t* b = static_cast<const uint8_t*>(p);
@@ -626,15 +730,18 @@ void Board::saveStateMem(std::vector<uint8_t>& out) const {
     if (smkOn_) put(smk_.ram().data(), Smk512::RAM_BYTES);
     // Фаза цепочки шины: где стоит окно 037 относительно счёта тактов и хвост
     // предыдущей команды — иначе прогоны из одного снимка расходятся по тактам.
-    const uint16_t bus[4] = {static_cast<uint16_t>((totalTicks_ + busSkew_) & 3),
-                             static_cast<uint16_t>(busFrac_),
+    // busFrac_ БК-0010 кратен 3 U и пишется в четвертях такта, как до перехода на U.
+    const uint16_t bus[4] = {static_cast<uint16_t>((totalTicks_ + busSkew_) % busPeriodTicks()),
+                             static_cast<uint16_t>(bk11() ? busFrac_ : busFrac_ / 3),
                              static_cast<uint16_t>(prevTeDram_),
                              static_cast<uint16_t>(prevTeFast_)};
     put(bus, sizeof bus);
 }
 
 bool Board::loadStateMem(const std::vector<uint8_t>& in) {
+    if (in.size() >= 8 && std::memcmp(in.data(), kMagic11, 8) == 0) return loadState11(in);
     if (in.size() < kStateBase || std::memcmp(in.data(), kMagic, 8) != 0) return false;
+    if (bk11()) { setMachine(Machine::Bk0010); setAy(false); }   // снимок другой машины
     size_t off = 8;
     auto get = [&](void* p, size_t n) { std::memcpy(p, in.data() + off, n); off += n; };
     get(mem_.raw(), ADDR_RAM_END);
@@ -672,11 +779,89 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     if (timerCsr_ & TIM_DIV16) timerPeriod_ *= 16;
     if (timerCsr_ & TIM_DIV4)  timerPeriod_ *= 4;
     timerStart_ = totalTicks_;
-    busFrac_ = bus[1] & 3; prevTeDram_ = bus[2]; prevTeFast_ = bus[3];
-    busSkew_ = hasBus ? static_cast<int>((bus[0] - totalTicks_) & 3) : 0;
+    busFrac_ = bk11() ? bus[1] % 12 : (bus[1] & 3) * 3; prevTeDram_ = bus[2]; prevTeFast_ = bus[3];
+    {
+        const uint64_t per = static_cast<uint64_t>(busPeriodTicks());
+        busSkew_ = hasBus ? static_cast<int>((bus[0] + per - totalTicks_ % per) % per) : 0;
+    }
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
     vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
+    return true;
+}
+
+void Board::saveState11(std::vector<uint8_t>& out) const {
+    out.reserve(8 + Memory::RAM11_BYTES + 256);
+    auto put = [&](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        out.insert(out.end(), b, b + n);
+    };
+    put(kMagic11, 8);
+    put(mem_.ram11(), Memory::RAM11_BYTES);
+    put(cpu_.r, 8 * sizeof(uint16_t));
+    put(&cpu_.psw, sizeof(uint16_t));
+    const uint16_t dev[7] = {scroll_, kbdStatus_, kbdData_, timerLimit_, timerCount_, timerCsr_, speaker_};
+    put(dev, sizeof dev);
+    const uint16_t ext[2] = {joystick_, static_cast<uint16_t>(keyHeld_ ? 1 : 0)};
+    put(ext, sizeof ext);
+    const uint32_t v037 = vp037_.pack();
+    put(&v037, sizeof v037);
+    const uint16_t m11[8] = {mem_.pageMap(), reg716tap_, reg662_, static_cast<uint16_t>(vpHalf_),
+                             static_cast<uint16_t>(ayOn_ ? 1 : 0), ay_.address(),
+                             static_cast<uint16_t>(mem_.mstd() ? 1 : 0), 0};
+    put(m11, sizeof m11);
+    put(ay_.regs(), 16);
+    const uint16_t bus[4] = {static_cast<uint16_t>((totalTicks_ + busSkew_) % busPeriodTicks()),
+                             static_cast<uint16_t>(busFrac_),
+                             static_cast<uint16_t>(prevTeDram_),
+                             static_cast<uint16_t>(prevTeFast_)};
+    put(bus, sizeof bus);
+}
+
+bool Board::loadState11(const std::vector<uint8_t>& in) {
+    const size_t need = 8 + Memory::RAM11_BYTES + (8 + 1 + 7 + 2) * 2 + 4 + 8 * 2 + 16 + 4 * 2;
+    if (in.size() < need) return false;
+    if (!bk11()) setMachine(Machine::Bk0011m);   // снимок другой машины: ПЗУ и карта 11М
+    size_t off = 8;
+    auto get = [&](void* p, size_t n) { std::memcpy(p, in.data() + off, n); off += n; };
+    get(mem_.ram11(), Memory::RAM11_BYTES);
+    get(cpu_.r, 8 * sizeof(uint16_t));
+    get(&cpu_.psw, sizeof(uint16_t));
+    uint16_t dev[7], ext[2], m11[8], bus[4];
+    uint32_t v037 = 0;
+    uint8_t ayRegs[16];
+    get(dev, sizeof dev); get(ext, sizeof ext); get(&v037, sizeof v037);
+    get(m11, sizeof m11); get(ayRegs, sizeof ayRegs); get(bus, sizeof bus);
+    vp037_.unpack(v037);
+    scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
+    keyIntPending_ = false; keyIntDeferAt_ = 0;
+    timerLimit_ = dev[3]; timerCount_ = dev[4];
+    timerCsr_ = static_cast<uint8_t>(dev[5]);
+    speaker_ = static_cast<uint8_t>(dev[6]);
+    joystick_ = ext[0];
+    keyHeld_  = ext[1] != 0;
+    mem_.setMstd(m11[6] != 0);
+    mem_.setPageMap(m11[0]);
+    reg716tap_ = m11[1];
+    reg662_ = m11[2];
+    vpHalf_ = m11[3] & 1;
+    apply662();
+    setAy(m11[4] != 0);
+    ay_.reset();
+    for (int r = 0; r < 16; ++r) ay_.writeReg(static_cast<uint8_t>(r), ayRegs[r]);
+    ay_.writeAddress(static_cast<uint8_t>(m11[5]));
+    timerPeriod_ = TIMER_BASE_PERIOD;
+    if (timerCsr_ & TIM_DIV16) timerPeriod_ *= 16;
+    if (timerCsr_ & TIM_DIV4)  timerPeriod_ *= 4;
+    timerStart_ = totalTicks_;
+    busFrac_ = bus[1] % 12; prevTeDram_ = bus[2]; prevTeFast_ = bus[3];
+    {
+        const uint64_t per = static_cast<uint64_t>(busPeriodTicks());
+        busSkew_ = static_cast<int>((bus[0] + per - totalTicks_ % per) % per);
+    }
+    cpu_.clearHalt(); cpu_.clearWait();
+    screen_.setScroll(scroll_);
+    vp037_.setM256(scroll_ & 01000);
     return true;
 }
 
@@ -712,11 +897,13 @@ int Board::runTicks(int ticks) {
             break;
         }
         if (breakHit_) break;   // data watchpoint fired inside the instruction
-        // Простой по WAIT: остаток кадра пропускаем, но флаг ожидания НЕ снимаем —
-        // его снимает Cpu::interrupt(), и только там PC переставляется за команду
-        // WAIT. Если сбросить флаг здесь, пришедшее следующим кадром прерывание
-        // вернётся по RTI на тот же WAIT, и программа зависнет.
-        if (cpu_.waiting()) break;
+        // Простой по WAIT: до конца отрезка время идёт кусками без команд. Флаг
+        // ожидания НЕ снимаем — его снимает Cpu::interrupt(), и только там PC
+        // переставляется за команду WAIT. Если сбросить флаг здесь, пришедшее
+        // следующим кадром прерывание вернётся по RTI на тот же WAIT, и программа
+        // зависнет.
+        while (cpu_.waiting() && done < ticks)
+            done += idleTicks(std::min(ticks - done, 64));
     }
     screen_.setScroll(scroll_);
     return done;
@@ -821,9 +1008,12 @@ bool Board::pressKey(uint16_t bkCode) {
 // целиком — отсюда рывки анимации и музыки. Реальный запрос разбирается в
 // tryDeliverInterrupts() после каждой команды, как это делает GID (devemu/CPU.cpp:413).
 void Board::deliverFrameInterrupts() {
+    // БК-0011М: бит 14 регистра 0177662 — «таймер выключен» (0 = прерывание идёт;
+    // БК-docs §20.4, проверено по ПЗУ БОС .BTIM).
+    if (bk11() && (reg662_ & 040000)) return;
     irqFramePending_ = true;
     const int t = tryDeliverInterrupts();
-    if (t) { totalTicks_ += static_cast<uint64_t>(t); sound_.feed(speaker_, t); }
+    if (t) advanceDevices(t);
 }
 
 // Вход в прерывание: IRQ2 и СТОП — по фиксированному вектору, клавиатура — векторное
@@ -891,6 +1081,10 @@ int Board::stepInstruction() {
 }
 
 bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16_t* outLen) {
+    if (bk11()) {
+        std::fprintf(stderr, "loadBin: загрузка .BIN на БК-0011М пока не поддерживается\n");
+        return false;
+    }
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) { std::fprintf(stderr, "loadBin: cannot open '%s'\n", path.c_str()); return false; }
     uint8_t hdr[4];
@@ -997,6 +1191,9 @@ bool Board::handleEmt36() {
     // 034) и передаёт туда управление — на нерасшифрованном мусоре ЦП улетал в
     // ПЗУ драйвера НГМД и вис в ожидании флага TR.
     if (diskOn_) return false;
+    // У БОС БК-0011М своя схема EMT (ленточный драйвер — по .BLOAD), формат
+    // блока параметров монитора БК-0010 к ней не относится.
+    if (bk11()) return false;
 
     const uint16_t base = cpu_.r[1];
     const uint8_t  cmd  = mem_.peekByte(base);
@@ -1087,7 +1284,8 @@ bool Board::ioRead(uint16_t addr, uint16_t& value) {
     const bool handled = ioReadRaw(addr, value);
     if (handled && ioLogOn_ && ioLogReads_ && addr >= ADDR_IO_PAGE &&
         (!ioLogFilter_ || addr == ioLogFilter_)) {
-        ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, true});
+        ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, true,
+                          static_cast<int16_t>(vp037_.scanline()), static_cast<uint8_t>(vp037_.lineWord())});
         while (ioLog_.size() > ioLogCap_) ioLog_.pop_front();
     }
     return handled;
@@ -1115,6 +1313,16 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
     case REG_CPU_ERROR:  value = 0177440; return true;     // флаги сбрасываются на выборке каждой команды
     case REG_PORT:       value = joystick_; return true;   // джойстик на парал. порту
     case REG_SYS: {
+        if (bk11()) {
+            // БК-0011М (БК-docs §20.3): старший байт — адрес пуска 0140000, бит 7 всегда 1,
+            // бит 6 — «нет нажатой клавиши», бит 5 — вход с ленты (у нас 0), бит 2 —
+            // «была запись», гасится чтением.
+            uint16_t v = START_VECTOR11 | 0200;
+            if (!keyHeld_) v |= 0100;
+            if (sysWriteFlag_) { v |= 004; sysWriteFlag_ = false; }
+            value = v;
+            return true;
+        }
         // BK-0010: bit15 set, high byte 0200 (serial idle). Bit 6 (0100) is the
         // "key pressed" indicator, active-low: 0 while a key is physically held.
         // This tracks the key press/release directly (like the reference bk's
@@ -1135,10 +1343,64 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
     }
 }
 
-bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
+// Уровень пьезодинамика из бит 6, 5 и 2 (маска 0144): он слышит сумму трёх бит,
+// бит 6 — основной, 5 и 2 подмешиваются в тот же аналоговый узел. Складываем их в
+// уровень 0..7 так же, как GID (devemu/Speaker.cpp:132-139): бит 2 переносится в
+// позицию 4, потом >>4.
+void Board::setSpeakerBits(uint16_t value) {
+    const uint8_t was = speaker_;
+    uint16_t w = value & 0144;
+    if (w & 004) w |= 020;
+    speaker_ = static_cast<uint8_t>((w >> 4) & 7);
+    if (spkLogOn_ && was != speaker_) {          // смена уровня динамика
+        spkLog_.push_back({totalTicks_, speaker_});
+        while (spkLog_.size() > spkLogCap_) spkLog_.pop_front();
+    }
+}
+
+void Board::apply662() {
+    screen_.setPalette((reg662_ >> 8) & 15);
+    mem_.setVideoPage((reg662_ & 0100000) ? 6 : 5);
+}
+
+std::string Board::bk11Summary() const {
+    char b[160];
+    const int rom = mem_.window1Rom();
+    char w1[24];
+    if (rom >= 0) std::snprintf(w1, sizeof w1, "ПЗУ%d", rom);
+    else std::snprintf(w1, sizeof w1, "стр%d", mem_.window1Page());
+    std::snprintf(b, sizeof b, "окно0=стр%d окно1=%s пал=%d экран=стр%d таймер=%s СТОП=%s",
+                  mem_.window0Page(), w1, (reg662_ >> 8) & 15, mem_.videoPage(),
+                  (reg662_ & 040000) ? "выкл" : "вкл", (reg716tap_ & 010000) ? "блок" : "да");
+    return b;
+}
+
+std::string Board::aySummary() const {
+    const uint8_t* r = ay_.regs();
+    auto tone = [&](int c) { return r[c * 2] | ((r[c * 2 + 1] & 017) << 8); };
+    auto vol = [&](int c) {
+        char v[8];
+        if (r[8 + c] & 020) std::snprintf(v, sizeof v, "E"); else std::snprintf(v, sizeof v, "%d", r[8 + c] & 017);
+        return std::string(v);
+    };
+    char b[200];
+    std::snprintf(b, sizeof b, "рег=%d  тон A/B/C=%d/%d/%d  громк=%s/%s/%s  смес=%03o  шум=%d  огиб=%d форма=%d",
+                  ay_.address(), tone(0), tone(1), tone(2), vol(0).c_str(), vol(1).c_str(), vol(2).c_str(),
+                  r[7], r[6] & 037, r[11] | (r[12] << 8), r[13] & 017);
+    return b;
+}
+
+// addrIn при байтовой записи не выровнен: на БК-0011М нечётный байт идёт в старший
+// (как у GID: `src &= 0377; if (addr & 1) src <<= 8`). Поведение БК-0010 прежнее —
+// байт как младший.
+bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
+    const uint16_t addr = static_cast<uint16_t>(addrIn & ~1);
+    uint16_t wide = value;                     // значение, выровненное по байту, для 11М
+    if (isByte) { wide &= 0377; if (addrIn & 1) wide = static_cast<uint16_t>(wide << 8); }
     if (addr >= ADDR_IO_PAGE) ioLastWrite_[(addr - ADDR_IO_PAGE) >> 1] = value; // for the debugger
     if (ioLogOn_ && addr >= ADDR_IO_PAGE && (!ioLogFilter_ || addr == ioLogFilter_)) {
-        ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, false});
+        ioLog_.push_back({addr, value, curInstrPc_, totalTicks_, false,
+                          static_cast<int16_t>(vp037_.scanline()), static_cast<uint8_t>(vp037_.lineWord())});
         while (ioLog_.size() > ioLogCap_) ioLog_.pop_front();
     }
     switch (addr) {
@@ -1146,23 +1408,26 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     // аппаратно НЕ реализован — маскируем его (как bk/tty.c: & 01377). Иначе перенос
     // из младшего байта при ADD/INC регистра (прокрутка) прополз бы в бит 9 и ложно
     // включал бы малый экран (баг в RUNING.BIN при движении вниз по лабиринту).
-    case REG_SCROLL:    scroll_ = value & 01377; vp037_.setM256(scroll_ & 01000); return true;
+    case REG_SCROLL:
+        flushRaster();
+        scroll_ = value & 01377; vp037_.setM256(scroll_ & 01000); return true;
     case REG_TIMER_LIM: timerLimit_ = value; return true;
     case REG_TIMER_CNT: return true;                       // counter is read-only
     case REG_TIMER_CSR: timerSetMode(value & 0377); return true;
     case REG_SYS: {
         sysWriteFlag_ = true;   // бит 2 на чтение: «была запись в системный регистр»
-        const uint8_t was = speaker_;
-        // Динамик слышит сумму трёх бит (маска 0144): бит 6 — основной, биты 5 и 2
-        // подмешиваются в тот же аналоговый узел. Складываем их в уровень 0..7 так же,
-        // как GID (devemu/Speaker.cpp:132-139): бит 2 переносится в позицию 4, потом >>4.
-        uint16_t w = value & 0144;
-        if (w & 004) w |= 020;
-        speaker_ = static_cast<uint8_t>((w >> 4) & 7);
-        if (spkLogOn_ && was != speaker_) {          // смена уровня динамика
-            spkLog_.push_back({totalTicks_, speaker_});
-            while (spkLog_.size() > spkLogCap_) spkLog_.pop_front();
+        if (bk11()) {
+            // Два регистра по одному адресу, разводит бит 11 (БК-docs §20.3, GID
+            // Board_11M.cpp:97-109): 1 — карта памяти, 0 — лента, динамик, блокировка СТОП.
+            if (wide & 04000) {
+                mem_.setPageMap(static_cast<uint16_t>((mem_.pageMap() & ~077433) | (wide & 077433)));
+            } else {
+                reg716tap_ = static_cast<uint16_t>((reg716tap_ & ~010344) | (wide & 010344));
+                setSpeakerBits(reg716tap_);
+            }
+            return true;
         }
+        setSpeakerBits(value);
         return true;
     }
     case REG_CPU_MODE:
@@ -1172,12 +1437,28 @@ bool Board::ioWrite(uint16_t addr, uint16_t value, bool /*isByte*/) {
     case REG_CPU_ERROR: return true;   // писать бессмысленно: биты гаснут на выборке команды
     case REG_PORT:
         // Параллельный порт — ДВА раздельных регистра: чтение отдаёт джойстик
-        // (входные линии), запись защёлкивается отдельно (принтер/ковокс).
+        // (входные линии), запись защёлкивается отдельно (принтер/ковокс/AY).
         // Раньше запись просто проглатывалась, и отладчику её видно не было.
         portOut_ = value;
+        if (ayOn_) {
+            // AY-3-8910 на порту (GID devemu/Board.cpp:1184-1193, AYSnd.cpp): запись
+            // словом — номер регистра, байтом — данные; линии инверсные. Байт по
+            // нечётному адресу приходит в старший байт, младший тогда 0 → данные 0377.
+            if (isByte) ay_.writeData(static_cast<uint8_t>(~wide & 0377));
+            else        ay_.writeAddress(static_cast<uint8_t>(~value & 017));   // один чип: как GID, номер — младшая тетрада
+        }
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
     case REG_KBD_DATA:
+        if (bk11()) {
+            // БК-0011М: регистр палитры, экранного буфера и кадрового таймера
+            // (маска 0147400, GID Board_11M.cpp:191-222). Текущую строку растра
+            // сначала дорисовываем старой палитрой — смена видна с места луча.
+            flushRaster();
+            reg662_ = static_cast<uint16_t>((reg662_ & ~0147400) | (wide & 0147400));
+            apply662();
+            return true;
+        }
         // Регистр данных клавиатуры на БК-0010 доступен ТОЛЬКО по чтению. Запись
         // не обрабатываем — она проваливается дальше по шине, и если за адресом
         // нет записываемой памяти (обычно там ПЗУ), выходит «зависание» по вектору
@@ -1204,7 +1485,8 @@ uint16_t Board::peekReg(uint16_t addr) const {
     case REG_CPU_IVEC:   return 0177777;
     case REG_CPU_ERROR:  return 0177440;
     case REG_PORT:       return joystick_;                       // джойстик на парал. порту
-    case REG_SYS:        return static_cast<uint16_t>(0100000 | 0200 | (keyHeld_ ? 0 : 0100)
+    case REG_SYS:        return static_cast<uint16_t>((bk11() ? START_VECTOR11 : 0100000) | 0200
+                                                      | (keyHeld_ ? 0 : 0100)
                                                       | (sysWriteFlag_ ? 004 : 0)); // без побочки: флаг не гасим
     case 0176560:        return 0;   // ИРПС (последовательный порт) — не эмулируется
     default:             return mem_.peekWord(addr);

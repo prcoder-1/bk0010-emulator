@@ -10,6 +10,7 @@ void Vp037::reset() {
     hgate_ = false;
     vgate_ = true;
     frameClk_ = 0;
+    lineBase_ = 0;
 }
 
 void Vp037::syncToFrameTop() {
@@ -22,6 +23,24 @@ void Vp037::syncToFrameTop() {
     hgate_ = false;
     vgate_ = false;
     frameClk_ = 0;
+    lineBase_ = 0;
+}
+
+void Vp037::syncToVsync() {
+    // Состояние счётчиков в начале импульса вычисляем один раз прогоном RTL-модели
+    // от верха поля: так оно заведомо согласовано с tick().
+    static const uint32_t kAtVsync = [] {
+        Vp037 v;
+        v.setM256(true);
+        v.syncToFrameTop();
+        v.tick(VSYNC_LINE * CLKIN_PER_LINE);
+        return v.pack();
+    }();
+    const bool m256 = m256_;
+    unpack(kAtVsync);
+    m256_ = m256;               // режим экрана — из регистра, а не из эталона
+    frameClk_ = 0;
+    lineBase_ = VSYNC_LINE;
 }
 
 // Один такт CLKIN = один negedge-фронт в va_037.v. Все счётчики обновляются

@@ -82,10 +82,15 @@ static bool parseNumber(const QJsonValue& v, long& out) {
     return false;
 }
 
-McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool diskRw)
+McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool diskRw,
+                     int machine, int ay)
     : romDir_(std::move(romDir)) {
+    board_.setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+    if (ay >= 0) board_.setAy(ay != 0);
+    // На БК-0011М палитра меняется по ходу кадра — экран рисуется построчно.
+    board_.setScanlineRender(board_.bk11());
     romsOk_ = board_.loadRoms(romDir_);
-    board_.setSmk512(smk512);             // --smk: блок расширения памяти в разъёме МПИ
+    board_.setSmk512(smk512 && !board_.bk11());   // --smk: блок расширения памяти в разъёме МПИ
     board_.reset();
     // --disk <образ>: вставить дискету и отдать управление автозагрузчику ПЗУ
     // контроллера. Монитор к этому моменту поднимаем, как и в безголовом режиме.
@@ -271,12 +276,17 @@ QJsonArray McpServer::toolDefs() const {
                   "`path` defaults to the image's own file.",
         schema({{"path", P("string", "Output image path (default: the attached file itself)")},
                 {"drive", P("integer", "Drive 0..3 (default 0)")}})));
-    t.append(tool("bk_reset", "Power-on reset the machine. `cpu_phase` (0/1) picks the CPU-clock phase "
+    t.append(tool("bk_reset", "Power-on reset the machine. `machine` switches the emulated model: "
+                  "\"bk10\" (БК-0010-01, 3 MHz) or \"bk11m\" (БК-0011М, 4 MHz, 128 KB paged RAM, 16 palettes, "
+                  "BOS ROM; floppy boot is done by BOS itself). `ay` turns the AY-3-8910 sound chip on 0177714 "
+                  "on/off (default: on for bk11m, off for bk10). `cpu_phase` (0/1) picks the CPU-clock phase "
                   "relative to the 037 DRAM window that a real BK draws at random on power-up: 0 (default) "
                   "gives MOV (R0),R1 = 28 ticks, 1 gives 24. `smk` installs/removes the СМК-512 board "
                   "(its 512 KB are cleared, as at power-on). `disk` inserts a floppy image (re-read from the "
                   "host file, so a rebuilt image is picked up) and boots from it; an empty string ejects it.",
-        schema({{"cpu_phase", P("integer", "CPU clock phase vs the 037 window, 0 or 1 (default: keep)")},
+        schema({{"machine", P("string", "\"bk10\" or \"bk11m\" (default: keep)")},
+                {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: keep)")},
+                {"cpu_phase", P("integer", "CPU clock phase vs the 037 window, 0 or 1 (default: keep)")},
                 {"smk", P("boolean", "СМК-512 memory board on/off (default: keep)")},
                 {"disk", P("string", "Floppy image (.bkd/.img) to insert into drive 0 and boot; \"\" = eject (default: keep)")},
                 {"disk_rw", P("boolean", "Insert the image writable (default false = read-only)")},
@@ -633,7 +643,7 @@ QString McpServer::toneReport(uint64_t tick0) const {
             .arg(t.size())
             .arg(board_.speakerLogOn() ? QString() : QString(" (лог фронтов выключен)"));
 
-    const double tickHz = 3.0e6;                       // такт ЦП, Гц
+    const double tickHz = board_.cpuFreqHz();          // такт ЦП, Гц (3 или 4 МГц)
     const uint64_t silenceTicks = (uint64_t)(0.030 * tickHz);
     struct Seg { uint64_t start, end; double freqSum; int n; bool silence; };
     std::vector<Seg> segs;
@@ -881,6 +891,17 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             .arg(dirty ? "had changes" : "no changes since attach"));
     }
     if (name == "bk_reset") {
+        if (args.contains("machine")) {
+            const QString m = args.value("machine").toString().toLower();
+            const bool want11 = m.contains("11");
+            if (!want11 && !m.contains("10")) return fail("machine must be \"bk10\" or \"bk11m\"");
+            if (want11 != board_.bk11()) {
+                board_.setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+                board_.setScanlineRender(want11);
+                romsOk_ = board_.loadRoms(romDir_);
+            }
+        }
+        if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
         if (args.contains("cpu_phase")) board_.setCpuPhase(args.value("cpu_phase").toInt());
         if (args.contains("smk")) {
             // Повторное включение — как установка платы в выключенную машину: ДОЗУ с нуля
@@ -905,6 +926,8 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             }
         }
         if (board_.smk512()) extra += " СМК-512 on.";
+        extra = QString(" %1%2.").arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
+                    .arg(board_.ay() ? ", AY on" : "") + extra;
         RunOutcome r;
         const int frames = args.value("frames").toInt(0);
         if (frames > 0) r = runFrames(frames);
@@ -1165,8 +1188,13 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
     }
     if (name == "bk_screenshot") {
         if (args.value("frames").toInt(0) > 0) runFrames(args.value("frames").toInt(0));
-        board_.screen().setColorMode(!args.value("mono").toBool(false));
-        board_.screen().render(board_.memory());
+        // В построчном режиме кадр уже нарисован лучом (с палитрами по ходу кадра);
+        // перерисовка целиком стёрла бы эти эффекты — только для смены цвет/моно.
+        const bool mono = args.value("mono").toBool(false);
+        if (!board_.scanlineRender() || mono == board_.screen().colorMode()) {
+            board_.screen().setColorMode(!mono);
+            board_.screen().render(board_.memory());
+        }
         QImage img = QImage(reinterpret_cast<const uchar*>(board_.screen().pixels()),
                             bk::Screen::TEX_W, bk::Screen::TEX_H, QImage::Format_ARGB32).copy();
         QString path = args.value("path").toString(), note = "BK screen";
@@ -1223,7 +1251,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             r.reason = "no-run";
             // Буфер — это ПРОШЛОЕ: отматываем начало окна назад на его длительность,
             // иначе разбор на тоны искал бы фронты в ещё не наступивших тактах.
-            const uint64_t span = (uint64_t)(samples.size() * 3.0e6 / rate);
+            const uint64_t span = (uint64_t)(samples.size() * double(board_.cpuFreqHz()) / rate);
             tick0 = (tick0 > span) ? tick0 - span : 0;
         }
 
@@ -1311,10 +1339,13 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             auto it = stateSlots_.find(slot);
             if (it == stateSlots_.end()) return fail("нет слота '" + slot + "'");
             if (!board_.loadStateMem(it->second)) return fail("слот повреждён");
+            board_.setScanlineRender(board_.bk11());   // снимок мог сменить машину
             return textContent(QString("Состояние восстановлено из слота '%1'.\n%2").arg(slot).arg(regsText()));
         }
         if (!board_.loadState(args.value("path").toString().toStdString())) return fail("load failed");
-        return textContent("State restored.\n" + regsText());
+        board_.setScanlineRender(board_.bk11());
+        return textContent(QString("State restored (%1).\n").arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
+                           + regsText());
     }
     if (name == "bk_symbols") {
         int n = loadSymbols(args.value("path").toString());
@@ -1514,9 +1545,10 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             "(the game may pace in free-running mode, or hasn't run yet).");
         uint64_t avg = (fb.back() - fb.front()) / (fb.size() - 1), mn = ~0ull, mx = 0;
         for (size_t i = 1; i < fb.size(); ++i) { uint64_t d = fb[i] - fb[i - 1]; mn = std::min(mn, d); mx = std::max(mx, d); }
-        auto ms = [](uint64_t t) { return t / 3000.0; };
+        const double tpm = board_.cpuFreqHz() / 1000.0;   // тактов в миллисекунде
+        auto ms = [tpm](uint64_t t) { return t / tpm; };
         return textContent(QString("Frames: %1  avg %2 ms (%3 fps)  min %4 ms  max %5 ms  jitter %6 ms")
-            .arg(fb.size()).arg(ms(avg), 0, 'f', 2).arg(avg ? 3.0e6 / avg : 0, 0, 'f', 1)
+            .arg(fb.size()).arg(ms(avg), 0, 'f', 2).arg(avg ? double(board_.cpuFreqHz()) / avg : 0, 0, 'f', 1)
             .arg(ms(mn), 0, 'f', 2).arg(ms(mx), 0, 'f', 2).arg(ms(mx - mn), 0, 'f', 2));
     }
     if (name == "bk_coverage") {
@@ -1606,9 +1638,10 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             std::sort(roots.begin(), roots.end(), [&](int a, int b) { return incl[a] > incl[b]; });
         } else roots.push_back(0);
 
-        QString out = note + QString("Call tree: %1 ticks (%2 frames of 61440)%3. incl% / self% / incl ticks:\n")
-            .arg(total).arg(double(total) / 61440.0, 0, 'f', 1)
-            .arg(args.contains("addr") ? " — subtrees of " + label(focus) : QString());
+        QString out = note + QString("Call tree: %1 ticks (%2 frames of %4)%3. incl% / self% / incl ticks:\n")
+            .arg(total).arg(double(total) / board_.ticksPerFrame(), 0, 'f', 1)
+            .arg(args.contains("addr") ? " — subtrees of " + label(focus) : QString())
+            .arg(board_.ticksPerFrame());
         int hidden = 0;
         std::function<void(int, int)> walk = [&](int n, int d) {
             QString fn = n == 0 ? QString("(top level)") : label(flame[n].func);
@@ -1750,7 +1783,10 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         o.fontHeight = std::clamp(args.value("cell_h").toInt(bk::BK_FONT_HEIGHT), 1, 16);
         o.tolerance = std::clamp(args.value("tolerance").toInt(6), 0, 80);
         o.allowInverse = args.value("inverse").toBool(true);
+        // БК-0011М: шрифт БОС из ПЗУ 325, без «дыры» 0200..0237.
+        if (board_.bk11() && !args.contains("font_addr")) bk::useBk11Font(o, board_.memory());
         if (args.contains("font_addr")) {
+            o.fontBytes = nullptr;
             if (!resolveAddr(args, "font_addr", o.fontAddr, err)) return fail(err);
             o.bkLayout = false;            // своя таблица — без «дыры» 0200..0237
             long fb = 020;
@@ -1876,6 +1912,12 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                        .arg(oct6(bk::Smk512::pageCode(board_.smk().page())))
                        .arg(board_.smk().armed() ? ", строб взведён" : "")
                  : QString())
+        + (board_.bk11() ? QString("\n  БК-0011М  %1  (0177716 память=%2 лента=%3, 0177662=%4)")
+                               .arg(QString::fromStdString(board_.bk11Summary()))
+                               .arg(oct6(board_.memory().pageMap())).arg(oct6(board_.reg716tap()))
+                               .arg(oct6(board_.reg662()))
+                         : QString())
+        + (board_.ay() ? QString("\n  AY-3-8910 %1").arg(QString::fromStdString(board_.aySummary())) : QString())
         + (board_.diskControllerOn() ? fddState() : QString())
         + ((board_.diskControllerOn() && args.value("fdd_log").toBool())
                ? fddLog(std::max(4, args.value("fdd_log_count").toInt(40))) : QString()));
@@ -1890,8 +1932,8 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             if (on) board_.clearIoLog();
             board_.setIoLog(on, args.value("reads").toBool(false), cap, filt);
         }
-        static const std::map<uint16_t, const char*> nm = {
-            {0177660, "kbd.status"}, {0177662, "kbd.data"}, {0177664, "scroll"},
+        const std::map<uint16_t, const char*> nm = {
+            {0177660, "kbd.status"}, {0177662, board_.bk11() ? "palette/screen" : "kbd.data"}, {0177664, "scroll"},
             {0177706, "timer.limit"}, {0177710, "timer.count"}, {0177712, "timer.csr"},
             {0177714, "port(джойстик)"}, {0177716, "system/speaker"}};
         const int count = args.value("count").toInt(60);
@@ -1903,9 +1945,10 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         for (int i = startIdx; i < (int)log.size(); ++i) {
             const auto& e = log[i];
             auto it = nm.find(e.addr);
-            out += QString("  %1 %2 = %3   %4  PC=%5  %6\n")
+            out += QString("  %1 %2 = %3   %4  стр %5:%6  PC=%7  %8\n")
                        .arg(e.isRead ? "R" : "W").arg(oct6(e.addr)).arg(oct6(e.value))
-                       .arg(it != nm.end() ? it->second : "", -16).arg(oct6(e.pc))
+                       .arg(it != nm.end() ? it->second : "", -16)
+                       .arg(e.line, 3).arg(e.word, 2, 10, QChar('0')).arg(oct6(e.pc))
                        .arg(QString::fromStdString(bk::disasm(board_.memory(), e.pc).text));
         }
         if (log.empty())

@@ -38,24 +38,36 @@
 #include <cstdio>
 
 MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverride,
-                       QWidget* parent)
+                       int machineOverride, int ayOverride, QWidget* parent)
     : QMainWindow(parent) {
     board_ = std::make_unique<bk::Board>();
+    // Машина: настройка запоминается между запусками, --machine перекрывает её.
+    const int machine = machineOverride >= 0 ? machineOverride
+                                             : QSettings().value("machine", 0).toInt();
+    board_->setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+    {
+        const bool ay = ayOverride >= 0 ? ayOverride > 0
+            : QSettings().value(board_->bk11() ? "ay11m" : "ay10", board_->bk11()).toBool();
+        board_->setAy(ay);
+    }
+    applyScanline();
     // Блок расширения памяти СМК-512: настройка запоминается между запусками,
     // ключ --smk/--no-smk перекрывает её на один запуск.
     const bool smkOn = smkOverride >= 0 ? smkOverride > 0
                                         : QSettings().value("smk512", false).toBool();
-    board_->setSmk512(smkOn);
-    if (smkOn) {
+    board_->setSmk512(smkOn && !board_->bk11());
+    if (board_->smk512()) {
         // Стоит сказать вслух: с платой карта верхней половины адресов не штатная
         // (в режиме SYS ОЗУ контроллера перекрывает ПЗУ Бейсика), и это объясняет
         // «странности», если пользователь про плату забыл.
         std::fprintf(stderr, "БК-0010: блок расширения памяти СМК-512 подключён (512 Кбайт)\n");
     }
     if (!board_->loadRoms(romDir.toStdString())) {
-        QMessageBox::warning(this, "BK-0010",
-            QString("Не удалось загрузить ПЗУ из:\n%1\nПоложите monit10.rom (и basic10.rom) в эту папку.")
-                .arg(romDir));
+        QMessageBox::warning(this, "БК",
+            QString("Не удалось загрузить ПЗУ из:\n%1\nПоложите в эту папку %2.")
+                .arg(romDir).arg(board_->bk11()
+                    ? "bk11m_324_bos.rom (и bk11m_325_ext, bk11m_327..329_basic*.rom)"
+                    : "monit10.rom (и basic10.rom)"));
     }
     board_->reset();
 
@@ -133,8 +145,23 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     // перезапускает машину — раскладка верхней половины адресов меняется целиком.
     smkAction_ = emu->addAction("Блок расширения памяти &СМК-512 (512 Кбайт)");
     smkAction_->setCheckable(true);
-    smkAction_->setChecked(smkOn);
+    smkAction_->setChecked(board_->smk512());
     connect(smkAction_, &QAction::toggled, this, [this](bool on) { setSmk512(on); });
+
+    // --- Машина: БК-0010-01 или БК-0011М, звуковой сопроцессор ---
+    QMenu* mach = menuBar()->addMenu("&Машина");
+    auto* machGroup = new QActionGroup(this);
+    machGroup->setExclusive(true);
+    machine10Action_ = mach->addAction("БК-00&10-01 (3 МГц, 32 Кбайт ОЗУ)");
+    machine11Action_ = mach->addAction("БК-00&11М (4 МГц, 128 Кбайт ОЗУ, 16 палитр)");
+    for (auto* a : {machine10Action_, machine11Action_}) { a->setCheckable(true); machGroup->addAction(a); }
+    connect(machine10Action_, &QAction::triggered, this, [this] { setMachine(0); });
+    connect(machine11Action_, &QAction::triggered, this, [this] { setMachine(1); });
+    mach->addSeparator();
+    ayAction_ = mach->addAction("Звуковой сопроцессор &AY-3-8910 / YM2149 (порт 0177714)");
+    ayAction_->setCheckable(true);
+    connect(ayAction_, &QAction::toggled, this, [this](bool on) { setAy(on); });
+    syncMachineMenu();
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
@@ -214,8 +241,10 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::onTick() {
     static constexpr int kSlices = 4;   // слайсов на кадр
-    // Длительность слайса в наносекундах: кадр 61440 тактов при 3 МГц = 20,48 мс.
-    static constexpr qint64 kSliceNs = 61440LL * 1000000000LL / (3000000LL * kSlices);
+    // Длительность слайса в наносекундах: кадр 61440 тактов при 3 МГц (81920 при
+    // 4 МГц у БК-0011М) = 20,48 мс.
+    const qint64 kSliceNs = qint64(board_->ticksPerFrame()) * 1000000000LL
+                          / (qint64(board_->cpuFreqHz()) * kSlices);
     // Сколько слайсов должно было пройти к этому моменту реального времени. Догоняем,
     // но не больше kCatchUp за раз — иначе после паузы (или тормоза системы) эмулятор
     // ушёл бы в долгую «отработку долга» и подвис бы интерфейс.
@@ -523,7 +552,9 @@ bool MainWindow::loadBinFromPath(const QString& path) {
     // a single frame, so boot it here first.
     board_->ensureMonitorBooted();
     if (!board_->loadBin(path.toStdString(), true, &addr, &len)) {
-        QMessageBox::warning(this, "BK-0010", QString("Не удалось загрузить %1").arg(path));
+        QMessageBox::warning(this, "БК", board_->bk11()
+            ? QString("Загрузка .BIN на БК-0011М пока не поддерживается: %1").arg(path)
+            : QString("Не удалось загрузить %1").arg(path));
         return false;
     }
     lastBin_ = path;
@@ -555,6 +586,43 @@ void MainWindow::setSmk512(bool on) {
     resetMachine();
     status_->setText(on ? "СМК-512 подключён, машина перезапущена"
                         : "СМК-512 снят, машина перезапущена");
+}
+
+void MainWindow::applyScanline() {
+    board_->setScanlineRender(scanlineOverride_ >= 0 ? scanlineOverride_ > 0 : board_->bk11());
+}
+
+void MainWindow::syncMachineMenu() {
+    for (QAction* a : {machine10Action_, machine11Action_, ayAction_, smkAction_})
+        if (!a) return;
+    QSignalBlocker b1(machine10Action_), b2(machine11Action_), b3(ayAction_), b4(smkAction_);
+    machine10Action_->setChecked(!board_->bk11());
+    machine11Action_->setChecked(board_->bk11());
+    ayAction_->setChecked(board_->ay());
+    smkAction_->setChecked(board_->smk512());
+    smkAction_->setEnabled(!board_->bk11());   // СМК-512 на БК-0011М не эмулируется
+}
+
+void MainWindow::setMachine(int m) {
+    const bool want11 = m == 1;
+    QSettings().setValue("machine", want11 ? 1 : 0);
+    if (want11 == board_->bk11()) { syncMachineMenu(); return; }
+    saveDisks();
+    board_->setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+    board_->setAy(QSettings().value(want11 ? "ay11m" : "ay10", want11).toBool());
+    if (!want11) board_->setSmk512(QSettings().value("smk512", false).toBool());
+    applyScanline();
+    lastBin_.clear();                  // .BIN другой машины перезапускать нельзя
+    syncMachineMenu();
+    resetMachine();
+    updateTitle();
+    status_->setText(QString("Машина: %1 — перезапущена").arg(QString::fromUtf8(bk::Board::machineName(board_->machine()))));
+}
+
+void MainWindow::setAy(bool on) {
+    board_->setAy(on);
+    QSettings().setValue(board_->bk11() ? "ay11m" : "ay10", on);
+    status_->setText(on ? "Звуковой сопроцессор AY-3-8910 подключён" : "Звуковой сопроцессор AY-3-8910 снят");
 }
 
 void MainWindow::setPixelAspect34(bool on) {
@@ -729,7 +797,7 @@ bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
     status_->setText(drive
         ? QString("Дискета в приводе B: %1").arg(QFileInfo(path).fileName())
         : QString("Загрузка с диска: %1%2").arg(QFileInfo(path).fileName())
-              .arg(board_->smk512() ? ", ОЗУ платы СМК-512 подключено"
+              .arg(board_->bk11() ? "" : board_->smk512() ? ", ОЗУ платы СМК-512 подключено"
                                     : " — ВНИМАНИЕ: плата СМК-512 снята, памяти может не хватить"));
     updateTitle();
     return true;
@@ -858,7 +926,7 @@ void MainWindow::saveState() {
     if (board_->saveState(path.toStdString()))
         status_->setText("Состояние сохранено: " + QFileInfo(path).fileName());
     else
-        QMessageBox::warning(this, "BK-0010", "Не удалось сохранить состояние");
+        QMessageBox::warning(this, "БК", "Не удалось сохранить состояние");
 }
 
 void MainWindow::loadState() {
@@ -870,19 +938,18 @@ void MainWindow::loadState() {
         // В снимке лежит и конфигурация машины, поэтому плата СМК могла появиться
         // или исчезнуть. Галку в меню синхронизируем без сигнала: иначе она тут же
         // перезапустила бы машину и стёрла только что восстановленное состояние.
-        if (smkAction_) {
-            QSignalBlocker block(smkAction_);
-            smkAction_->setChecked(board_->smk512());
-        }
+        syncMachineMenu();
+        applyScanline();
+        updateTitle();
         renderScreen();
         if (paused_) overlay_->followPc();
     } else {
-        QMessageBox::warning(this, "BK-0010", "Не удалось восстановить состояние");
+        QMessageBox::warning(this, "БК", "Не удалось восстановить состояние");
     }
 }
 
 void MainWindow::updateTitle() {
-    QString t = "БК-0010 эмулятор-отладчик";
+    QString t = QString("%1 — эмулятор-отладчик").arg(QString::fromUtf8(bk::Board::machineName(board_->machine())));
     if (!lastBin_.isEmpty()) t += " — " + QFileInfo(lastBin_).fileName();
     setWindowTitle(t);
 }

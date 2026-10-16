@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A BK-0010-01 (Soviet PDP-11 clone, K1801VM1 CPU) emulator-debugger in C++17/Qt6
 with OpenGL screen output and a Soft-ICE style debugger. Loads and runs `.BIN`
-game files. See `README.md` for the user-facing feature list and hotkeys, and
+game files. Also emulates the **BK-0011M** (menu «Машина», `--machine bk11m`, MCP
+`bk_reset {machine}`): 4 MHz, 128 KB paged RAM, BOS ROMs, 16 palettes switchable
+mid-frame, the AY-3-8910 on 0177714 — see `docs/bk0011m.md`. See `README.md` for the user-facing feature list and hotkeys, and
 `docs/BK0010-hardware.md` for the verified hardware reference (memory map, I/O
 registers, interrupt vectors, screen encoding, palette, .BIN format, timing).
 
@@ -25,7 +27,8 @@ ctest --test-dir build                 # same, via ctest
   `Speaker` (core) generates samples, `AudioOut` (a `QIODevice` feeding a
   `QAudioSink` in pull mode) plays them. Without Multimedia the app still builds;
   audio is simply skipped and `Speaker` is disabled to avoid buffering.
-- ROMs (`monit10.rom`, `basic10.rom`) live in `roms/`; the path is baked in via
+- ROMs (`monit10.rom`, `basic10.rom`; for the 11M `bk11m_324_bos.rom`, `bk11m_325_ext.rom`,
+  `bk11m_327..329_basic*.rom`, `bk11m_330_mstd.rom`) live in `roms/`; the path is baked in via
   `BK_DEFAULT_ROM_DIR`, overridable with `--roms <dir>` or `BK_ROM_DIR`.
 
 ### Headless verification (no display needed — use this to check changes)
@@ -39,6 +42,8 @@ Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--no-arb037` (disable the КР1801ВП1-037 DRAM-window model, on by default),
 `--cpu-phase 0|1` (CPU clock phase vs the 037 window, see below),
 `--smk` / `--no-smk` (СМК-512 memory-expansion board, off by default),
+`--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
+for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--scanline` (per-scanline rendering — each line drawn with the scroll register value
 that was live when the beam crossed it, driven off the `Vp037` raster; OFF by default,
 see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
@@ -88,6 +93,26 @@ Two layers, deliberately decoupled:
 
 Key cross-cutting facts to know before editing the CPU or screen:
 
+- **Two machines, one `Board`** (`Board::setMachine`, `bk11()`). The 11M differs in: clock
+  (4 MHz; the 037 stays at 6 MHz, so a frame is 81920 ticks and 1 tick = 1.5 CLKIN —
+  `advanceDevices` counts half-CLKINs), memory (`Memory` maps 8 blocks of 8 KB: identity on
+  the 0010, pages/ROM slots on the 11M; the page code in 0177716 is NOT binary,
+  `{1,5,2,3,4,7,0,6}`), 0177716 writes (bit 11 = 1 memory map, 0 tape/speaker/STOP lock),
+  0177662 writes (palette, screen page 5/6, bit 14 = 1 DISABLES the 0100 frame IRQ — on the
+  0010 that write must stay a bus error, the СМК firmware relies on it), start address
+  0140000, ROM writes trap (vector 4) and empty ROM sockets trap on read, no EMT 36 intercept,
+  no `.BIN` loading, no СМК-512. On the 11M `IoBus::ioWrite` gets the UNALIGNED address for
+  byte writes (the odd byte goes to the high half, as in GID).
+- **The emulator frame starts at the 037 nVSYNC pulse** (both machines): `Vp037::syncToVsync`
+  puts the beam on line 277 (21st blanking line, RTL `va_037.v:239-241`), the 0100 IRQ is
+  delivered there, and the visible field starts 43 lines later. `Vp037::fieldLine()` is the
+  field line within the current frame (negative before the field); per-scanline rendering
+  uses it, and a write to 0177662/0177664 first finishes the current line up to
+  `lineWord()` (`Board::flushRaster`, `Screen::renderSpan`) — that is how mid-line palette
+  changes (INSULT, DENON) render.
+- **WAIT idles in time**: `runTicks` no longer skips the rest of the frame on WAIT; it calls
+  `idleTicks` in 64-tick chunks so sound (AY music runs from the frame IRQ), the floppy, the
+  VM1 timer and the beam keep going. Interrupt entry ticks also go through `advanceDevices`.
 - **CPU dispatch** (`Cpu::buildTable`): a 1024-entry table indexed by `ir >> 6`,
   mirroring the reference `bk` emulator's `itab.c`. Instruction semantics/flags are
   ported 1:1 from that emulator (`/home/prcoder/emulators/БК-0010-01/bk`). If you
@@ -106,7 +131,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
   window phase is `setCpuPhase(0|1)` / `--cpu-phase`: a real BK draws it at power-on
   (D8:B and the 037 `PC[2:0]` are never reset) and gets one of two tables; 0 = the user's
   machine (`MOV (R0),R1` = 28). Verified: XOP2 both phases, XOP2N, 2000/2001 RTL programs,
-  and `45com-lo` 45/45 in phase 1 from the same machine (all in `cpu_tests`).
+  and `45com-lo` 45/45 in phase 1 from the same machine (all in `cpu_tests`). `busStep` works
+  in units of 1/12 tick (U): 0010 values are the old quarter-tick ones ×3 (results identical);
+  the 11M window is 64 U and its request/response/phase (15/39/0 U) were fitted to Manwe's
+  BK-0011 table (122/128 forms exact; `docs/bk0011m.md`).
   Memory above 0100000 is NOT behind the 037. IO and СМК RAM answer at once (end = request
   + 4 / 5 / 7 half-ticks for read / write / RMW write — eCat3's model, which reproduces
   Manwe's СМК table 192/192). ROM (К1801РЕ2) is slower on reads by `Board::kRomReadExtra`
@@ -138,7 +166,7 @@ Key cross-cutting facts to know before editing the CPU or screen:
   value. Model it as a separate read path (`Cpu::brFlags()`) — clearing C in PSW instead
   is too broad and breaks games (tried, reverted). `MFPS Rd` is itself a trigger, so it
   does not clear the effect; any other instruction does.
-- **A frame is 61440 CPU ticks (48.83 Hz), not 60000/50 Hz.** `Board::ticksPerFrame()`
+- **A frame is 61440 CPU ticks (48.83 Hz), not 60000/50 Hz** (81920 on the 11M). `Board::ticksPerFrame()`
   derives it from the raster geometry (`Vp037::CLKIN_PER_FRAME / 2`), so the emulator
   frame and the 037 frame coincide exactly and `syncToFrameTop()` truncates nothing.
   Documented in `~/БК0010/БК-docs/11-экран-и-клавиатура.md`.
@@ -149,10 +177,12 @@ Key cross-cutting facts to know before editing the CPU or screen:
 - **`WAIT` + interrupt**: `op_wait()` rewinds PC so the instruction re-executes while
   idle; only `Cpu::interrupt()` clears `waiting_`, and it advances PC past the WAIT so
   the pushed return address is the *next* instruction. Do not clear the wait flag
-  anywhere else (`runTicks` just breaks out) — otherwise `RTI` lands back on the WAIT and
+  anywhere else (`runTicks` only idles through `idleTicks`) — otherwise `RTI` lands back on the WAIT and
   the program hangs. `RESET` must not touch PSW; it resets devices via `Cpu::setResetHook`.
 - **Speaker is 3-bit**: the piezo sums bits 6, 5 and 2 of `0177716` (mask `0144`) into 8
-  levels; `Speaker::feed()` takes a level 0..7, not a bit.
+  levels; `Speaker::feed()` takes a level 0..7, not a bit. The AY-3-8910 (`Ay8910`, emu2149
+  semantics, 1.714 MHz) is mixed into the same mono stream past the piezo RC filter; on
+  0177714 a WORD write selects the register, a BYTE write sends data, both inverted.
 - **Interrupt gating**: reset PSW is `0340` (priority 7, masked) so the monitor ROM
   can install its vectors before the 50 Hz IRQ fires — do not reset to 0, games will
   jump to an unset vector and HALT. `Board::deliverFrameInterrupts` also refuses to
@@ -161,7 +191,8 @@ Key cross-cutting facts to know before editing the CPU or screen:
   the continuous timer; headless mode explicitly runs ~25 frames before `loadBin`.
   `loadBin(run)` sets SP=01000, as the start monitor does (BASIC idles with SP=01762, and a
   program that never sets its own stack would overwrite its own code — 45com-lo).
-- **Screen mapping** (`Screen::render`) ports `scr.c`: video RAM is 0040000, 256
+- **Screen mapping** (`Screen::render`) ports `scr.c`: video RAM is 0040000 (on the 11M —
+  RAM page 5 or 6 by bit 15 of 0177662, `Memory::videoRam()`), 256
   lines × 64 bytes. Color mode = 2 bits/pixel (256 wide, doubled to 512); mono = 1
   bit/pixel (512 wide), LSB first. Palette 0 = {black, blue, green, red}.
 - **The BK pixel is not square, and that lives only in `GlScreen`.** The core buffer is
