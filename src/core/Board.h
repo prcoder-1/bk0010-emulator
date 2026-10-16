@@ -275,7 +275,9 @@ public:
     // имеет смысл включать вместе с addrFilter (0 = без фильтра).
     // line/word — положение луча 037 в момент обращения (строка от верха видимого
     // поля 0..319, слово строки 0..47): по нему видно, где в кадре сменилась палитра.
-    struct IoAccess { uint16_t addr, value, pc; uint64_t tick; bool isRead; int16_t line; uint8_t word; };
+    // isByte/odd — байтовая запись и её настоящий адрес (addr выровнен, odd — старший байт).
+    struct IoAccess { uint16_t addr, value, pc; uint64_t tick; bool isRead; int16_t line; uint8_t word;
+                      bool isByte; bool odd; };
     void setIoLog(bool on, bool logReads = false, size_t cap = 2048, uint16_t addrFilter = 0) {
         ioLogOn_ = on; ioLogReads_ = logReads;
         ioLogCap_ = cap ? cap : 1; ioLogFilter_ = addrFilter;
@@ -400,7 +402,9 @@ private:
     int  renderedLine_ = 0;        // следующая строка кадра, ещё не отрисованная
     int  renderedWord_ = 0;        // в строке renderedLine_ уже нарисованы слова [0, renderedWord_)
     void renderRasterTo(int line, int word);   // догнать отрисовку до точки луча
-    void beginFrameRaster();              // верх кадра: доотрисовать и сбросить счётчик
+    void beginFrameRaster(int over);      // верх кадра: доотрисовать, ресинк луча (+over тактов)
+    void beginFrame();                    // граница кадра по абсолютному счёту тактов
+    uint64_t frameEnd_ = 0;               // такт конца текущего кадра
     // Журнал обменов текущей инструкции (и ловушки за ней) — для модели шины:
     // адрес, запись ли, и кто ответил (BusDram / BusFast / BusRom).
     enum : uint8_t { BusDram = 0, BusFast = 1, BusRom = 2 };
@@ -469,7 +473,6 @@ private:
     void setSpeakerBits(uint16_t v);   // уровень динамика из бит 6,5,2
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()
     bool sliceIdle_ = false;     // CPU went idle (WAIT/HALT) mid-frame — skip its remaining slices
-    int  sliceFrameTicks_ = 0;   // ticks run so far this frame (across slices), for exact boundaries
 
     // Last value written to each I/O-page word (0177600..0177776), for the
     // debugger — hardware often reads back something different than was written.

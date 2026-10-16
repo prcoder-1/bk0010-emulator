@@ -2005,8 +2005,12 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         for (int i = startIdx; i < (int)log.size(); ++i) {
             const auto& e = log[i];
             auto it = nm.find(e.addr);
+            // Байтовая запись: настоящий адрес байта и сам байт («WB 177663 = 013»).
+            const uint16_t shownAddr = static_cast<uint16_t>(e.addr | (e.isByte && e.odd ? 1 : 0));
+            const QString shownVal = e.isByte ? QString("%1").arg(e.value & 0377, 3, 8, QChar('0')).rightJustified(6)
+                                              : oct6(e.value);
             out += QString("  %1 %2 = %3   %4  стр %5:%6  PC=%7  %8\n")
-                       .arg(e.isRead ? "R" : "W").arg(oct6(e.addr)).arg(oct6(e.value))
+                       .arg(e.isRead ? "R " : e.isByte ? "WB" : "W ").arg(oct6(shownAddr)).arg(shownVal)
                        .arg(it != nm.end() ? it->second : "", -16)
                        .arg(e.line, 3).arg(e.word, 2, 10, QChar('0')).arg(oct6(e.pc))
                        .arg(QString::fromStdString(bk::disasm(board_.memory(), e.pc).text));
