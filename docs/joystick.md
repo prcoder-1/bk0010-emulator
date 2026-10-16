@@ -21,7 +21,7 @@ joystick-интерфейс Linux — `/dev/input/js0..js3`, `linux/joystick.h` 
 Единственный источник правды — таблица `bk::kJoyLayouts` в
 [`src/core/Joystick.h`](../src/core/Joystick.h) (ядро, без Qt): ею пользуются GUI
 (`Gamepad`), MCP-сервер (`bk_joystick`) и юнит-тесты. Выбор в GUI — меню
-**Эмуляция → Джойстик (геймпад)** (`Gamepad::Standard` — псевдоним
+**Машина → Джойстик (геймпад)** (`Gamepad::Standard` — псевдоним
 `bk::JoyStandard`); из MCP — аргумент `layout`. Биты порта `0177714` (октально):
 
 | Раскладка | ВВЕРХ | ВНИЗ | ВЛЕВО | ВПРАВО | кнопки «огонь» |
