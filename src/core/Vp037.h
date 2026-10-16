@@ -46,6 +46,14 @@ public:
     // укладываются в кадр целиком.
     void syncToFrameTop();
 
+    // Выставить фазу на начало кадрового синхроимпульса nVSYNC — момент кадрового
+    // прерывания (вектор 0100). По RTL (va_037.v:239-241) импульс идёт, пока
+    // VGATE=1 и LC[5:0] ∈ {42,41,40}: это 21..23-я строки кадрового гашения, т.е.
+    // строки 277..279 от верха видимого поля. Эмулятор начинает кадр отсюда, и до
+    // первой видимой строки остаётся 43 строки — как у живой машины.
+    void syncToVsync();
+    static constexpr int VSYNC_LINE = 277;
+
     // Режим экрана из бита 9 (01000) регистра 0177664: 1 = полный экран (256 строк),
     // 0 = малый экран (видеовыборка только на 64 строках).
     void setM256(bool full) { m256_ = full; }
@@ -73,11 +81,25 @@ public:
     static constexpr int CLKIN_PER_LINE  = 384;
     static constexpr int LINES_PER_FRAME = 320;   // 256 видимых + 64 кадрового гашения
     static constexpr int CLKIN_PER_FRAME = CLKIN_PER_LINE * LINES_PER_FRAME;  // 122880
+    // frameClk_ отсчитывается от точки последней синхронизации: от начала видимого
+    // поля (syncToFrameTop) или от nVSYNC (syncToVsync) — lineBase_ это учитывает.
     int scanline() const {
         // По модулю кадра: на самой границе frameClk_ успевает дойти до 122880, и без
         // приведения получалась бы несуществующая «строка 320».
-        return static_cast<int>(frameClk_ / CLKIN_PER_LINE) % LINES_PER_FRAME;
+        return static_cast<int>(frameClk_ / CLKIN_PER_LINE + lineBase_) % LINES_PER_FRAME;
     }
+    // Строка видимого поля, которую луч проходит в ТЕКУЩЕМ кадре: от nVSYNC до
+    // первой видимой строки — отрицательная (-43..-1), после последней — 256 и выше.
+    // В отличие от scanline() не заворачивается по модулю кадра: по ней построчная
+    // отрисовка понимает, что новый кадр ещё не дошёл до поля.
+    int fieldLine() const {
+        const int l = static_cast<int>(frameClk_ / CLKIN_PER_LINE) + lineBase_;
+        return lineBase_ ? l - LINES_PER_FRAME : l;
+    }
+    // Слово строки, которое луч выбирает сейчас: 0..31 — видимая часть, 32..47 —
+    // строчное гашение (строка начинается с видимых слов, см. syncToFrameTop).
+    static constexpr int CLKIN_PER_WORD = 8;
+    int lineWord() const { return static_cast<int>((frameClk_ % CLKIN_PER_LINE) / CLKIN_PER_WORD); }
 
     // Упаковка фазы развёртки для снимка состояния: где именно стоял луч, влияет на
     // такты ожидания ДОЗУ, а с построчной отрисовкой будет влиять и на картинку.
@@ -102,7 +124,8 @@ private:
     bool     hgate_ = false;  // HGATE    — горизонтальное гашение
     bool     vgate_ = true;   // VGATE    — кадровое гашение (1 = гашение)
     bool     m256_  = true;   // полный (true) / малый (false) экран
-    uint32_t frameClk_ = 0;   // тактов CLKIN от начала кадра (для scanline())
+    uint32_t frameClk_ = 0;   // тактов CLKIN от последней синхронизации (для scanline())
+    int      lineBase_ = 0;   // строка от верха поля, с которой начат отсчёт frameClk_
 };
 
 } // namespace bk

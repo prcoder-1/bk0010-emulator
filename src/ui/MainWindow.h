@@ -32,8 +32,11 @@ public:
     // сохранённую настройку (ключ командной строки перекрывает её, но не
     // перезаписывает: настройка меняется только переключателем в меню).
     // aspectOverride — то же для неквадратных пикселей БК (--aspect34/--no-aspect34).
+    // machineOverride: 0 — БК-0010-01, 1 — БК-0011М, -1 — сохранённая настройка;
+    // ayOverride — звуковой сопроцессор (-1 — настройка этой машины).
     explicit MainWindow(const QString& romDir, int smkOverride = -1,
-                        int aspectOverride = -1, QWidget* parent = nullptr);
+                        int aspectOverride = -1, int machineOverride = -1,
+                        int ayOverride = -1, QWidget* parent = nullptr);
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
@@ -49,6 +52,13 @@ public:
     void setCpuPhase(int p) { if (board_) board_->setCpuPhase(p); }
     void setSmk512(bool on);            // подключить/снять плату и перезапустить машину
     void setPixelAspect34(bool on);     // пиксель БК блоком 4x3 точек хоста
+    // Смена машины — как включение другой машины: ПЗУ, частота, карта памяти;
+    // настройка сохраняется между запусками.
+    void setMachine(int m);
+    void setAy(bool on);                // звуковой сопроцессор AY-3-8910 на 0177714
+    // Построчная отрисовка: -1 — по машине (БК-0011М — вкл), 0/1 — принудительно.
+    void setScanlineOverride(int v) { scanlineOverride_ = v; applyScanline(); }
+    void setMstd(bool on) { if (board_ && on != board_->memory().mstd()) { board_->setMstd(on); resetMachine(); } }
 
 protected:
     bool event(QEvent* e) override;
@@ -110,6 +120,12 @@ private:
     QTimer* timer_ = nullptr;
     QLabel* status_ = nullptr;
     QAction* smkAction_ = nullptr;   // галка «СМК-512» — синхронизируется при загрузке снимка
+    QAction* machine10Action_ = nullptr;   // радиопункты меню «Машина»
+    QAction* machine11Action_ = nullptr;
+    QAction* ayAction_ = nullptr;          // галка «AY-3-8910»
+    int  scanlineOverride_ = -1;
+    void applyScanline();
+    void syncMachineMenu();                // галки меню — по состоянию платы (без сигналов)
     QAction* aspectAction_ = nullptr;   // галка «Пиксели 3:4»
     QString lastBin_;
     QString lastDisk_;      // последний вставленный образ диска

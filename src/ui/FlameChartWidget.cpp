@@ -47,7 +47,7 @@ void FlameChartWidget::paintEvent(QPaintEvent*) {
     bk::Trace& tr = board_->trace();
     const uint64_t now = tr.flameTick();
     p.setPen(QColor(200, 210, 255));
-    double winMs = winTicks_ / 3000.0;
+    double winMs = winTicks_ / (board_->cpuFreqHz() / 1000.0);
     p.drawText(10, 16, QString::fromUtf8(
         "Хронология вызовов — X = время (%1 мс в окне), Y = глубина стека; вправо = сейчас")
         .arg(winMs, 0, 'f', winMs >= 10 ? 0 : 1));

@@ -70,6 +70,25 @@ static bool g_arb037 = true;
 // включении питания; 0 (по умолчанию) — `MOV (R0),R1` = 28 тактов, 1 — 24.
 static int  g_cpuPhase = 0;
 static bool g_scanline = false;   // --scanline: построчная отрисовка экрана
+// --machine bk10|bk11m (--bk10, --bk11m): эмулируемая машина. -1 — ключ не задан
+// (в GUI берётся сохранённая настройка, в безголовом режиме и MCP — БК-0010-01).
+static int  g_machine = -1;
+// --ay / --no-ay: звуковой сопроцессор AY-3-8910 на 0177714. -1 — по машине
+// (на БК-0011М включён, на БК-0010 выключен) или сохранённая настройка GUI.
+static int  g_ay = -1;
+// --no-scanline: выключить построчную отрисовку (на БК-0011М она по умолчанию ВКЛ).
+static bool g_noScanline = false;
+// --mstd: вставить блок МСТД (ПЗУ 330) в окно 0160000 БК-0011М.
+static bool g_mstd = false;
+
+// Разбор значения --machine: bk10 / 0010 / bk0010 → 0; bk11m / 0011m / bk0011m → 1.
+static int parseMachine(const QString& v) {
+    const QString s = v.toLower();
+    if (s.contains("11")) return 1;
+    if (s.contains("10")) return 0;
+    std::fprintf(stderr, "Неизвестная машина «%s» (bk10 | bk11m)\n", qPrintable(v));
+    return -1;
+}
 // --smk / --no-smk: блок расширения памяти СМК-512. -1 — ключ не задан (в GUI
 // берётся сохранённая настройка, в безголовом режиме и в MCP — выключено).
 static int  g_smk = -1;
@@ -101,10 +120,13 @@ static int runHeadless(const QString& romDir, const QString& bin,
         if (fc.size() == 2) keys.push_back({fc[0].toInt(), fc[1].toInt(nullptr, 0)});
     }
     bk::Board board;
+    board.setMachine(g_machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+    if (g_ay >= 0) board.setAy(g_ay != 0);
+    board.setMstd(g_mstd);
     board.setArbitration(g_arb037);
     board.setCpuPhase(g_cpuPhase);
-    board.setScanlineRender(g_scanline);
-    board.setSmk512(g_smk > 0);
+    board.setScanlineRender((g_scanline || board.bk11()) && !g_noScanline);
+    board.setSmk512(g_smk > 0 && !board.bk11());
     if (!board.loadRoms(romDir.toStdString())) {
         std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
         return 2;
@@ -348,14 +370,21 @@ int main(int argc, char** argv) {
             if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
             bool smk = false;
             std::string disk; bool diskRw = false;
+            int machine = 0, ay = -1;
             for (int j = 1; j < argc; ++j) {
+                if (std::string(argv[j]) == "--machine" && j + 1 < argc)
+                    machine = std::max(0, parseMachine(QString::fromLocal8Bit(argv[j + 1])));
+                else if (std::string(argv[j]) == "--bk11m") machine = 1;
+                else if (std::string(argv[j]) == "--bk10") machine = 0;
+                else if (std::string(argv[j]) == "--ay") ay = 1;
+                else if (std::string(argv[j]) == "--no-ay") ay = 0;
                 if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
                 else if (std::string(argv[j]) == "--smk") smk = true;
                 else if (std::string(argv[j]) == "--disk" && j + 1 < argc) disk = argv[j + 1];
                 else if (argv[j][0] != '-' && bk::Fdd::looksLikeImage(argv[j])) disk = argv[j];
                 else if (std::string(argv[j]) == "--disk-rw") diskRw = true;
             }
-            McpServer server(romDir.toStdString(), smk, disk, diskRw);
+            McpServer server(romDir.toStdString(), smk, disk, diskRw, machine, ay);
             return server.run();
         }
     }
@@ -409,6 +438,13 @@ int main(int argc, char** argv) {
         else if (args[i] == "--hotchart" && i + 1 < args.size()) { hcShot = args[++i]; headless = true; }
         else if (args[i] == "--mono") color = false;
         else if (args[i] == "--scanline") g_scanline = true;
+        else if (args[i] == "--no-scanline") g_noScanline = true;
+        else if (args[i] == "--machine" && i + 1 < args.size()) g_machine = parseMachine(args[++i]);
+        else if (args[i] == "--bk10") g_machine = 0;
+        else if (args[i] == "--bk11m") g_machine = 1;
+        else if (args[i] == "--ay") g_ay = 1;
+        else if (args[i] == "--no-ay") g_ay = 0;
+        else if (args[i] == "--mstd") g_mstd = true;
         else if (args[i] == "--no-arb037") g_arb037 = false;
         else if (args[i] == "--cpu-phase" && i + 1 < args.size()) g_cpuPhase = args[++i].toInt() & 1;
         else if (args[i] == "--disk" && i + 1 < args.size()) g_disk = args[++i];
@@ -440,7 +476,7 @@ int main(int argc, char** argv) {
     // платы просто некуда грузить. Поэтому образ включает СМК-512 сам, если ключ
     // не задан явно; --no-smk по-прежнему сильнее. Сохранённую настройку GUI это
     // не переписывает — плата включается только на этот запуск.
-    if (!g_disk.isEmpty() && g_smk < 0) {
+    if (!g_disk.isEmpty() && g_smk < 0 && g_machine != 1) {
         g_smk = 1;
         std::fprintf(stderr, "Дискета: включён блок расширения памяти СМК-512 "
                              "(отключить — ключом --no-smk)\n");
@@ -453,7 +489,9 @@ int main(int argc, char** argv) {
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
                            dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList);
 
-    MainWindow w(romDir, g_smk, g_aspect34);
+    MainWindow w(romDir, g_smk, g_aspect34, g_machine, g_ay);
+    w.setScanlineOverride(g_noScanline ? 0 : g_scanline ? 1 : -1);
+    w.setMstd(g_mstd);
     w.setArbitration(g_arb037);
     w.setCpuPhase(g_cpuPhase);
     w.setDiskWritable(g_diskRw);

@@ -111,7 +111,8 @@ std::vector<Glyph> buildFont(const Memory& mem, const OcrOptions& o) {
         Glyph g{};
         g.code = code;
         for (int r = 0; r < h; ++r)
-            g.rows[r] = mem.peekByte(static_cast<uint16_t>(o.fontAddr + idx * o.fontHeight + r));
+            g.rows[r] = o.fontBytes ? o.fontBytes[idx * o.fontHeight + r]
+                                    : mem.peekByte(static_cast<uint16_t>(o.fontAddr + idx * o.fontHeight + r));
         font.push_back(g);
     };
     if (o.bkLayout) {
@@ -329,6 +330,16 @@ std::string OcrResult::text(char unknownChar) const {
         out += '\n';
     }
     return out;
+}
+
+bool useBk11Font(OcrOptions& o, const Memory& mem) {
+    const uint8_t* ext = mem.rom11(Memory::ROM_EXT);
+    if (!ext) return false;
+    o.fontBytes = ext + (BK11_FONT_ADDR - BK11_FONT_ROM_BASE);
+    o.bkLayout = false;
+    o.fontBase = 020;
+    o.fontCount = 0360;
+    return true;
 }
 
 } // namespace bk

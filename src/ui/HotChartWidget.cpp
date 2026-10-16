@@ -223,7 +223,8 @@ void HotChartWidget::paintEvent(QPaintEvent*) {
             uint64_t avg = (win.back() - win.front()) / (win.size() - 1);
             uint64_t mn = ~0ull, mx = 0;
             for (size_t i = 1; i < win.size(); ++i) { uint64_t d = win[i] - win[i - 1]; mn = std::min(mn, d); mx = std::max(mx, d); }
-            double avgMs = avg / 3000.0, fps = avg ? 3.0e6 / double(avg) : 0.0, jitMs = (mx - mn) / 3000.0;
+            const double tpm = board_->cpuFreqHz() / 1000.0;   // тактов в миллисекунде
+            double avgMs = avg / tpm, fps = avg ? board_->cpuFreqHz() / double(avg) : 0.0, jitMs = (mx - mn) / tpm;
             p.setPen(QColor(150, 185, 240));
             p.drawText(plot.left() + 4, plot.top() + fm.ascent() + 2,
                        QString::fromUtf8("кадры: %1  ~%2 мс (%3 к/с)  разброс %4 мс")

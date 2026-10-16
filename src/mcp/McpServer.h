@@ -19,8 +19,10 @@ public:
     QString fddState() const;
     QString fddLog(int limit) const;      // сводка по контроллеру НГМД для bk_io_state
 
+    // machine: 0 — БК-0010-01, 1 — БК-0011М; ay: -1 — по машине, 0/1 — явно.
     explicit McpServer(std::string romDir, bool smk512 = false,
-                       std::string disk = {}, bool diskRw = false);
+                       std::string disk = {}, bool diskRw = false,
+                       int machine = 0, int ay = -1);
 
     // Run the stdio message loop until EOF. Returns a process exit code.
     int run();

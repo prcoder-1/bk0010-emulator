@@ -55,7 +55,14 @@ struct OcrOptions {
     int      fontHeight = BK_FONT_HEIGHT;
     bool     bkLayout = true; // «дыра» кодов 0200..0237, как в таблице ПЗУ
     int      fontCount = 0;   // 0 = вывести из раскладки
+    // Глифы прямо из образа ПЗУ, мимо памяти БК (глиф кода fontBase — первый). На
+    // БК-0011М шрифт лежит в ПЗУ 325, которое видно только при ПЗУ-странице 1 в окне 1.
+    const uint8_t* fontBytes = nullptr;
 };
+
+// Шрифт БК-0011М: ПЗУ 325 (расширение БОС), глиф кода 020 — по адресу 0133176 при
+// ПЗУ-странице 1 в окне 0120000, дальше подряд по 10 байт для кодов 020..0377.
+enum : uint16_t { BK11_FONT_ADDR = 0133176, BK11_FONT_ROM_BASE = 0120000 };
 
 struct OcrCell {
     uint16_t code = 0;        // распознанный экранный код
@@ -84,6 +91,10 @@ struct OcrResult {
 };
 
 OcrResult ocrScreen(const Memory& mem, const std::vector<uint8_t>& bits, const OcrOptions& opt);
+
+// Настроить опции на шрифт БК-0011М (ПЗУ 325, сплошная таблица 020..0377).
+// false — ПЗУ 325 не загружено.
+bool useBk11Font(OcrOptions& o, const Memory& mem);
 
 // Подобрать режим (узкий/широкий) и вертикальное смещение 0..cellH-1 по лучшей
 // оценке. Если base.wide задан явно (fixedMode), режим не перебирается; если

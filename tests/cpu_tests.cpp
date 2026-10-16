@@ -10,6 +10,8 @@
 #include "ScreenOcr.h"
 #include "Speaker.h"
 #include "Fdd.h"
+#include "Ay8910.h"
+#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
@@ -1932,6 +1934,252 @@ int main() {
                   "All: 0177714 = ОЗУ | порт");
             CHECK(b.memory().readWord(0177706) == 0, "All: 0177706 (внутри ВМ1) ОЗУ не закрыт");
             std::filesystem::remove(img);
+        }
+    }
+
+
+    // ======================= БК-0011М ===========================================
+    // ---- Растр: кадр эмулятора начинается с nVSYNC (RTL va_037.v:239-241) -------
+    {
+        Vp037 v;
+        v.syncToVsync();
+        CHECK(v.vgate(), "nVSYNC — внутри кадрового гашения");
+        CHECK((v.lc() & 077) >= 40 && (v.lc() & 077) <= 42, "nVSYNC: LC[5:0] в 42..40 (SYNC2)");
+        CHECK(v.scanline() == Vp037::VSYNC_LINE && v.fieldLine() == -43,
+              "от синхроимпульса до первой видимой строки 43 строки");
+        v.tick(43 * Vp037::CLKIN_PER_LINE);
+        CHECK(v.fieldLine() == 0 && v.scanline() == 0 && !v.vgate() && v.lineWord() == 0,
+              "через 43 строки луч в начале видимого поля");
+        v.tick(256 * Vp037::CLKIN_PER_LINE);
+        CHECK(v.fieldLine() == 256 && v.vgate(), "после 256 видимых строк — снова гашение");
+        v.tick(10 * Vp037::CLKIN_PER_WORD);
+        CHECK(v.lineWord() == 10, "слово строки считается по 8 CLKIN");
+    }
+    // ---- Частота и кадр -----------------------------------------------------
+    {
+        Board b; b.setMachine(Machine::Bk0011m);
+        CHECK(b.cpuFreqHz() == 4000000, "11М: ЦП 4 МГц");
+        CHECK(b.ticksPerFrame() == 81920, "11М: кадр 81920 тактов (037 по-прежнему 6 МГц)");
+        CHECK(b.frameRateHz() > 48.8 && b.frameRateHz() < 48.9, "11М: кадровая частота та же 48,83 Гц");
+        b.reset();
+        b.memory().pokeWord(01000, 000777);   // BR .
+        b.cpu().reset(01000, 0340);
+        b.runTicks(b.ticksPerFrame() / 2);
+        CHECK(b.vp037().scanline() >= 158 && b.vp037().scanline() <= 162,
+              "11М: 1 такт = 1,5 CLKIN — за полкадра луч проходит полкадра");
+    }
+    // ---- Простой по WAIT: время идёт ----------------------------------------
+    {
+        Board b; b.reset();
+        b.memory().pokeWord(01000, 000001);   // WAIT
+        b.cpu().reset(01000, 0340);           // прерывания закрыты — разбудить некому
+        const uint64_t t0 = b.totalTicks();
+        const int ran = b.runTicks(20000);
+        CHECK(ran >= 20000 && b.totalTicks() - t0 >= 20000,
+              "WAIT: остаток отрезка проходит в простое, такты (звук, таймер, луч) идут");
+        CHECK(b.cpu().waiting(), "WAIT: флаг ожидания снимает только прерывание");
+    }
+    {
+        Board b; b.setMachine(Machine::Bk0011m);
+        if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            std::printf("SKIP: ПЗУ БК-0011М не найдены в %s — тесты 11М пропущены\n", BK_DEFAULT_ROM_DIR);
+        } else {
+            b.reset();
+            Memory& m = b.memory();
+            CHECK(b.cpu().pc() == 0140000, "11М: пуск с 0140000 (БОС)");
+            CHECK((m.readWord(0177716) & 0177600) == 0140200, "11М: 0177716 читается как 0140000 | 0200");
+            // ---- Страницы: код -> страница {1,5,2,3,4,7,0,6}, оба окна ----
+            for (int pg = 0; pg < 8; ++pg) m.ram11()[pg * Memory::PAGE11_BYTES] = static_cast<uint8_t>(0100 + pg);
+            bool allOk = true;
+            for (int code = 0; code < 8; ++code) {
+                m.writeWord(0177716, static_cast<uint16_t>(04000 | code << 12 | code << 8));
+                const int pg = Memory::pageForCode(code);
+                if (m.readByte(040000) != 0100 + pg || m.readByte(0100000) != 0100 + pg) allOk = false;
+                if (Memory::codeForPage(pg) != code) allOk = false;
+            }
+            CHECK(allOk, "11М: все 8 кодов страниц в обоих окнах");
+            m.writeWord(0177716, 04000 | 03);          // биты ПЗУ 0 и 1 сразу
+            CHECK(m.window1Rom() == 0 && m.readWord(0100000) == 010103, "11М: бит 0 главнее — ПЗУ-стр. 0 (328)");
+            m.writeWord(0177716, 04000 | 02);
+            CHECK(m.readWord(0100000) == 000240 && m.readWord(0120000) == 000207,
+                  "11М: ПЗУ-стр. 1 — БЕЙСИК 327 + расширение БОС 325");
+            CHECK(m.readWord(0140000) == 0106427, "11М: БОС (324) на 0140000 всегда");
+            // Ленточная запись (бит 11 = 0) карту не трогает.
+            m.writeWord(0177716, 0100);
+            CHECK(m.window1Rom() == 1 && b.reg716tap() == 0100, "11М: бит 11 = 0 — регистр ленты/динамика");
+            // Байт в старшую половину 0177716 — как у GID: сдвиг в старший байт.
+            m.writeByte(0177717, 0130);                // 0130 << 8 = 054000: окно0 код 5, бит 11
+            CHECK(m.window0Page() == Memory::pageForCode(5) && m.window1Rom() < 0,
+                  "11М: байтовая запись в 0177717 — старший байт регистра памяти");
+
+            // ---- Пустая ПЗУ-страница и запись в ПЗУ — зависание (вектор 4) ----
+            {
+                b.reset();
+                m.pokeWord(04, 02000); m.pokeWord(06, 0340);
+                m.pokeWord(02000, 000777);                         // BR .
+                loadProg(m, 01000, {012737, 004010, 0177716,        // MOV #4010,@#177716 (ПЗУ-стр. 2)
+                                    013700, 0100000,                // MOV @#100000,R0
+                                    000777});
+                b.cpu().reset(01000, 0340);
+                b.stepInstruction(); b.stepInstruction();
+                CHECK(b.cpu().pc() == 02000, "11М: чтение пустой ПЗУ-страницы — вектор 4");
+            }
+            // ---- 0177662: палитра, экран, кадровый таймер ----
+            {
+                b.reset();
+                m.pokeWord(04, 02000); m.pokeWord(06, 0340);
+                m.pokeWord(02000, 000777);
+                loadProg(m, 01000, {012737, 0102400, 0177662,       // MOV #102400,@#177662
+                                    000240, 000777});
+                b.cpu().reset(01000, 0340);
+                b.stepInstruction(); b.stepInstruction();
+                CHECK(b.cpu().pc() == 01010, "11М: запись в 0177662 принимается (без вектора 4)");
+                CHECK(b.screen().palette() == 5 && m.videoPage() == 6, "11М: палитра 5, экран — страница 6");
+                CHECK(m.readWord(0177662) == 0, "11М: 0177662 на чтение — по-прежнему код клавиши");
+                loadProg(m, 01000, {000005, 000777});           // RESET
+                b.cpu().reset(01000, 0340);
+                b.stepInstruction();
+                CHECK(b.reg662() == 0102400, "11М: команда RESET регистр палитры не трогает");
+            }
+            {
+                // Кадровое прерывание 0100 разрешается битом 14 = 0.
+                b.reset();
+                m.pokeWord(0100, 03000); m.pokeWord(0102, 0340);
+                loadProg(m, 03000, {005203, 000002});            // INC R3; RTI
+                m.pokeWord(01000, 000777);
+                b.cpu().reset(01000, 0);
+                b.cpu().r[6] = 01000;
+                b.cpu().r[3] = 0;
+                m.writeWord(0177662, 040000);                   // таймер выключен
+                for (int i = 0; i < 3; ++i) b.runFrame();
+                CHECK(b.cpu().r[3] == 0, "11М: бит 14 = 1 — кадровых прерываний нет");
+                m.writeWord(0177662, 0);
+                for (int i = 0; i < 3; ++i) b.runFrame();
+                if (b.cpu().r[3] != 3) std::printf("  R3=%o PC=%o PSW=%o\n", b.cpu().r[3], b.cpu().pc(), b.cpu().psw);
+                CHECK(b.cpu().r[3] == 3, "11М: бит 14 = 0 — прерывание 0100 раз в кадр");
+            }
+            {
+                // СТОП блокируется битом 12 ленточного регистра.
+                b.reset();
+                m.pokeWord(04, 02000); m.pokeWord(06, 0340);
+                m.pokeWord(02000, 000777);
+                m.pokeWord(01000, 000777);
+                b.cpu().reset(01000, 0340);
+                m.writeWord(0177716, 010000);
+                b.pressStop(); b.stepInstruction();
+                CHECK(b.cpu().pc() == 01000, "11М: бит 12 0177716 — СТОП заблокирован");
+                m.writeWord(0177716, 0);
+                b.pressStop(); b.stepInstruction();
+                CHECK(b.cpu().pc() == 02000, "11М: без блокировки СТОП — вектор 4");
+            }
+            // ---- Палитра по ходу строки: смена видна с того слова, где луч ----
+            {
+                b.reset();
+                b.setScanlineRender(true);
+                for (size_t i = 0; i < Memory::PAGE11_BYTES; ++i) m.ram11()[5 * Memory::PAGE11_BYTES + i] = 0377;
+                m.pokeWord(01000, 000777);
+                b.cpu().reset(01000, 0340);
+                m.writeWord(0177662, 017 << 8);                  // палитра 15: цвет 3 — белый
+                b.runFrameSlice(0, 1000);                        // верх кадра (nVSYNC)
+                while (!(b.vp037().fieldLine() == 100 && b.vp037().lineWord() >= 16)) b.stepInstruction();
+                const int splitWord = b.vp037().lineWord();
+                m.writeWord(0177662, 0);                         // палитра 0: цвет 3 — красный
+                while (b.vp037().fieldLine() <= 101) b.stepInstruction();
+                const uint32_t* px = b.screen().pixels();
+                const uint32_t left = px[100 * Screen::TEX_W] & 0xFFFFFF;
+                const uint32_t right = px[100 * Screen::TEX_W + Screen::TEX_W - 1] & 0xFFFFFF;
+                const uint32_t above = px[99 * Screen::TEX_W + Screen::TEX_W - 1] & 0xFFFFFF;
+                const uint32_t below = px[101 * Screen::TEX_W] & 0xFFFFFF;
+                CHECK(left == 0xFFFFFF && right == 0xFF0000, "11М: смена палитры посреди строки делит строку");
+                CHECK(above == 0xFFFFFF && below == 0xFF0000, "11М: строки выше — старой палитрой, ниже — новой");
+                CHECK(splitWord >= 16 && splitWord < 32 &&
+                      (px[100 * Screen::TEX_W + splitWord * 16 - 1] & 0xFFFFFF) == 0xFFFFFF,
+                      "11М: до слова, где стоял луч, — старая палитра");
+            }
+            // ---- Модель шины 11М: среднее время команд в ДОЗУ (таблица Manwe) ----
+            {
+                auto avg = [&](uint16_t ir) {
+                    for (uint16_t a = 010000; a < 040000; a += 2) m.pokeWord(a, 033000);
+                    for (int i = 0; i < 112; ++i) m.pokeWord(static_cast<uint16_t>(01000 + 2 * i), ir);
+                    b.cpu().reset(01000, 0340);
+                    b.cpu().r[1] = 024000; b.cpu().r[2] = 026000;
+                    for (int i = 0; i < 16; ++i) b.stepInstruction();
+                    long t = 0;
+                    for (int i = 0; i < 96; ++i) t += b.stepInstruction();
+                    return double(t) / 96;
+                };
+                b.reset();
+                CHECK(avg(010102) == 16.0, "11М: MOV R1,R2 = 16 тактов (Manwe)");
+                CHECK(avg(011102) == 32.0, "11М: MOV (R1),R2 = 32");
+                CHECK(avg(010112) == 32.0, "11М: MOV R1,(R2) = 32");
+                CHECK(avg(010122) == 40.0, "11М: MOV R1,(R2)+ = 40");
+                CHECK(avg(011112) == 48.0, "11М: MOV (R1),(R2) = 48");
+                CHECK(avg(021112) == 48.0, "11М: CMP (R1),(R2) = 48");
+            }
+            // ---- AY-3-8910 на 0177714: слово — номер регистра, байт — данные, инверсно ----
+            {
+                b.reset();
+                CHECK(b.ay(), "11М: AY по умолчанию подключён");
+                auto ayw = [&](int r, int v) {
+                    m.writeWord(0177714, static_cast<uint16_t>(~r));
+                    m.writeByte(0177714, static_cast<uint8_t>(~v));
+                };
+                ayw(0, 100); ayw(1, 0); ayw(7, 076); ayw(8, 15);
+                const uint8_t* r = b.ayChip().regs();
+                CHECK(r[0] == 100 && r[7] == 076 && r[8] == 15 && b.ayChip().address() == 8,
+                      "AY: запись словом выбирает регистр, байтом — данные (инверсные линии)");
+                m.writeByte(0177715, 0);                  // нечётный байт: младший 0 -> данные 0377
+                CHECK(r[8] == 037, "AY: байт в 0177715 пишет ~0 = 0377 (по маске регистра)");
+                Ay8910 ay;
+                ay.writeReg(0, 100); ay.writeReg(1, 0); ay.writeReg(7, 076); ay.writeReg(8, 15);
+                int edges = 0; bool hi = false;
+                for (int i = 0; i < 44100; ++i) {
+                    ay.advance(1.0 / 44100);
+                    const bool h = ay.takeSample() > 0.5 * (1.0 / 3.0) * 0.5;
+                    if (h && !hi) ++edges;
+                    hi = h;
+                }
+                const double f = Ay8910::DEFAULT_CLOCK / (16.0 * 100);
+                CHECK(edges > f * 0.98 && edges < f * 1.02, "AY: частота тона = clock / (16 · TP)");
+                ay.writeReg(8, 0);
+                double mn = 1, mx = 0;
+                for (int i = 0; i < 4410; ++i) { ay.advance(1.0 / 44100); const double v = ay.takeSample(); mn = std::min(mn, v); mx = std::max(mx, v); }
+                CHECK(mx - mn < 1e-9, "AY: громкость 0 — тишина");
+            }
+            // ---- Снимок BK11ST1: ОЗУ 128К и регистры 11М ----
+            {
+                b.reset();
+                for (int i = 0; i < 60; ++i) b.runFrame();
+                std::vector<uint8_t> st;
+                b.saveStateMem(st);
+                std::vector<uint8_t> ram(m.ram11(), m.ram11() + Memory::RAM11_BYTES);
+                const uint16_t pc = b.cpu().pc(), pm = m.pageMap(), p662 = b.reg662();
+                for (int i = 0; i < 30; ++i) b.runFrame();
+                m.ram11()[7 * Memory::PAGE11_BYTES + 5] ^= 0377;
+                Board c; c.loadRoms(BK_DEFAULT_ROM_DIR);   // БК-0010: машину переключит сам снимок
+                CHECK(c.loadStateMem(st) && c.bk11(), "снимок 11М переключает машину");
+                CHECK(std::equal(ram.begin(), ram.end(), c.memory().ram11()) && c.cpu().pc() == pc
+                      && c.memory().pageMap() == pm && c.reg662() == p662,
+                      "снимок 11М: ОЗУ, PC, страницы и палитра восстановлены");
+                CHECK(!c.loadBin("/nonexistent.bin", true), "11М: загрузка .BIN отклоняется");
+            }
+            // ---- Старт БОС: БЕЙСИК и «Ok» на экране, OCR по шрифту 11М ----
+            {
+                Board fresh; fresh.setMachine(Machine::Bk0011m); fresh.loadRoms(BK_DEFAULT_ROM_DIR);
+                fresh.reset();
+                fresh.setScanlineRender(true);
+                for (int i = 0; i < 150; ++i) fresh.runFrame();
+                Memory& m = fresh.memory();
+                std::vector<uint8_t> bits;
+                screenBitmap(m, fresh.peekReg(0177664), bits);
+                OcrOptions o;
+                CHECK(useBk11Font(o, m), "OCR: шрифт 11М из ПЗУ 325");
+                o.wide = true;
+                o.y0 = 0;   // заголовок БОС — буквы двойной высоты, сбивает автоподбор; сетка от 0
+                const std::string txt = ocrAuto(m, bits, o, true, true).text();
+                if (txt.find("Ok") == std::string::npos) std::printf("  OCR:\n%s\n", txt.c_str());
+                CHECK(txt.find("Ok") != std::string::npos, "11М: БОС поднимает БЕЙСИК — на экране Ok");
+            }
         }
     }
 

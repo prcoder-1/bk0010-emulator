@@ -23,6 +23,7 @@ add_library(bkcore STATIC
     src/core/Screen.cpp
     src/core/ScreenOcr.cpp
     src/core/Speaker.cpp
+    src/core/Ay8910.cpp
     src/core/Vp037.cpp
     src/core/Smk.cpp
     src/core/Fdd.cpp

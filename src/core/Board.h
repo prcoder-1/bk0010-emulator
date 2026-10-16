@@ -24,6 +24,11 @@ namespace bk {
 enum class DataType : uint8_t { Byte = 0, Word = 1, String = 2, Ptr = 3 };
 struct DataItem { DataType type; uint16_t len; };
 
+// Эмулируемая машина. БК-0011М отличается всем, что вокруг процессора: 4 МГц,
+// 128 Кбайт страничного ОЗУ, свои ПЗУ (БОС с 0140000), регистр палитры/экрана
+// 0177662 на запись, кадровое прерывание с запретом. См. docs/bk0011m.md.
+enum class Machine : uint8_t { Bk0010 = 0, Bk0011m = 1 };
+
 // The BK-0010 "motherboard": wires the CPU, memory, screen and the internal
 // I/O registers together and drives the emulation. Pure C++ (no Qt) so it can
 // run in a worker thread owned by the GUI.
@@ -31,8 +36,17 @@ class Board : public IoBus {
 public:
     Board();
 
+    // Выбор машины. Перегружает ПЗУ (если каталог уже известен) и требует reset().
+    // По умолчанию звуковой сопроцессор включается только на БК-0011М — setAy()
+    // после этого вызова его переопределяет.
+    void setMachine(Machine m);
+    Machine machine() const { return machine_; }
+    bool bk11() const { return machine_ == Machine::Bk0011m; }
+    static const char* machineName(Machine m) { return m == Machine::Bk0011m ? "БК-0011М" : "БК-0010-01"; }
+    int  cpuFreqHz() const { return cpuFreqHz_; }
+
     bool loadRoms(const std::string& romDir);
-    void reset();                       // power-on reset (start vector 0100000)
+    void reset();                       // power-on reset (start vector 0100000 / 0140000)
 
     // Run at least `ticks` CPU ticks worth of instructions. Returns ticks run.
     int  runTicks(int ticks);
@@ -48,7 +62,12 @@ public:
     // частота»; подтверждается и конфигом bkemu-QT: -framerate 48.828). Берём величину
     // прямо из геометрии 037 — 320 строк x 384 такта CLKIN, 1 такт ЦП = 2 CLKIN, —
     // чтобы кадр эмулятора и кадр видеоконтроллера совпадали точно.
-    int  ticksPerFrame() const { return Vp037::CLKIN_PER_FRAME / 2; }
+    // На БК-0011М 037 по-прежнему тактируется 6 МГц, а ЦП — 4 МГц: кадр той же
+    // длительности 20,48 мс содержит 81920 тактов.
+    int  ticksPerFrame() const {
+        return static_cast<int>(int64_t(Vp037::CLKIN_PER_FRAME) * cpuFreqHz_ / CLKIN_HZ);
+    }
+    static constexpr int CLKIN_HZ = 6000000;   // такт 037 (CLC)
     // Кадровая частота, Гц (нецелая: 3'000'000 / 61440 = 48,83).
     double frameRateHz() const { return double(cpuFreqHz_) / ticksPerFrame(); }
 
@@ -62,6 +81,12 @@ public:
     // сбрасываются) и даёт одну из двух таблиц времён команд: 0 — `MOV (R0),R1` = 28
     // (по умолчанию; так сняты эталонные XOP2/XOP2N), 1 — то же = 24.
     void setCpuPhase(int p) { cpuPhase_ = p & 1; }
+    // Параметры окна 037 для БК-0011М в U (1/12 такта ЦП): задержка запроса, задержка
+    // ответа после решения, смещения решений для фаз 0 и 1. Для калибровки и тестов.
+    void setBusModel11(int reqU, int respU, int phase0U, int phase1U) {
+        bus11Req_ = reqU; bus11Resp_ = respU; bus11Phase_[0] = phase0U; bus11Phase_[1] = phase1U;
+        if (bk11()) { busReqU_ = reqU; busRespU_ = respU; }
+    }
     int  cpuPhase() const { return cpuPhase_; }
 
     // Построчная отрисовка: экран формируется по мере движения луча (модель Vp037),
@@ -132,7 +157,27 @@ public:
     // расширения СМК-512 асинхронно обнуляет регистр режима — SYS, страница 0.
     // Без этого машина после «СТОП» осталась бы с ОЗУ платы на месте ПЗУ и
     // обработать вектор было бы нечем (docs/smk512.md).
-    void pressStop() { stopPending_ = true; if (smkOn_) smk_.reset(); }
+    // На БК-0011М клавишу блокирует бит 12 ленточного регистра 0177716.
+    void pressStop() {
+        if (bk11() && (reg716tap_ & 010000)) return;
+        stopPending_ = true; if (smkOn_) smk_.reset();
+    }
+
+    // --- БК-0011М ---
+    // Однострочные сводки для отладчика и MCP: карта памяти/палитра/экран/таймер
+    // БК-0011М и регистры звукового сопроцессора.
+    std::string bk11Summary() const;
+    std::string aySummary() const;
+    uint16_t reg662() const { return reg662_; }        // 0177662 на запись: палитра/экран/таймер
+    uint16_t reg716tap() const { return reg716tap_; }  // 0177716 (бит 11 = 0): лента/динамик
+    // Блок МСТД (ПЗУ 330) в окне 0160000. Его первое слово 000240, поэтому БОС
+    // при пуске отдаёт ему управление — по умолчанию блок не вставлен.
+    void setMstd(bool on) { mem_.setMstd(on); }
+    // Звуковой сопроцессор AY-3-8910 / YM2149 на параллельном порту 0177714.
+    void setAy(bool on) { ayOn_ = on; sound_.setAy(on ? &ay_ : nullptr); }
+    const Ay8910& ayChip() const { return ay_; }
+    Ay8910&       ayChip()       { return ay_; }
+    bool ay() const { return ayOn_; }
 
     // True while an unread code sits in the register (ready flag set).
     bool keyReady() const { return (kbdStatus_ & 0200) != 0; }
@@ -224,7 +269,9 @@ public:
     // включает запись ЧТЕНИЙ (опрос джойстика/клавиатуры — это чтения, без них их
     // не видно). Монитор непрерывно опрашивает 0177660/0177662, поэтому чтения
     // имеет смысл включать вместе с addrFilter (0 = без фильтра).
-    struct IoAccess { uint16_t addr, value, pc; uint64_t tick; bool isRead; };
+    // line/word — положение луча 037 в момент обращения (строка от верха видимого
+    // поля 0..319, слово строки 0..47): по нему видно, где в кадре сменилась палитра.
+    struct IoAccess { uint16_t addr, value, pc; uint64_t tick; bool isRead; int16_t line; uint8_t word; };
     void setIoLog(bool on, bool logReads = false, size_t cap = 2048, uint16_t addrFilter = 0) {
         ioLogOn_ = on; ioLogReads_ = logReads;
         ioLogCap_ = cap ? cap : 1; ioLogFilter_ = addrFilter;
@@ -288,6 +335,9 @@ public:
     // побитовый перебор джойстика с откатом).
     void saveStateMem(std::vector<uint8_t>& out) const;
     bool loadStateMem(const std::vector<uint8_t>& in);
+    // Снимок БК-0011М (магия BK11ST1). loadStateMem переключает машину по магии.
+    void saveState11(std::vector<uint8_t>& out) const;
+    bool loadState11(const std::vector<uint8_t>& in);
 
     // IoBus
     bool ioRead(uint16_t addr, uint16_t& value) override;
@@ -333,7 +383,8 @@ private:
     bool arb037_ = true;           // моделировать арбитраж 037 (по умолчанию ВКЛ)
     bool scanlineRender_ = false;  // построчная отрисовка экрана
     int  renderedLine_ = 0;        // следующая строка кадра, ещё не отрисованная
-    void renderScanlinesUpTo(int line);   // догнать отрисовку до строки `line`
+    int  renderedWord_ = 0;        // в строке renderedLine_ уже нарисованы слова [0, renderedWord_)
+    void renderRasterTo(int line, int word);   // догнать отрисовку до точки луча
     void beginFrameRaster();              // верх кадра: доотрисовать и сбросить счётчик
     // Журнал обменов текущей инструкции (и ловушки за ней) — для модели шины:
     // адрес, запись ли, и кто ответил (BusDram / BusFast / BusRom).
@@ -352,7 +403,22 @@ private:
     // целиком в ПЗУ (tests/hw/ROMSOB.BIN) на реальной БК-0010-01 — 18,00 тактов вместо
     // 17 у памяти, отвечающей сразу; ROMIO.BIN допускает 1..14.
     static constexpr int kRomReadExtra = 4;
-    int  busFrac_ = 0;
+    int  busFrac_ = 0;             // дробная часть момента запроса, U (1/12 такта)
+    // Параметры окна 037 в U. БК-0010: окно 8 CLKIN = 4 такта = 48 U, запрос 5/4 такта,
+    // ответ 11/4 такта, решения на 3 или 9 U по модулю 48 (фаза 1 или 0). БК-0011М:
+    // окно 8 CLKIN = 64 U; запрос/ответ/фаза — по замерам (setBusModel11).
+    int  busReqU_ = 15, busRespU_ = 33;
+    // БК-0011М: подобрано по таблице Manwe (BK0010-11-instructions-speed.xlsx, код и
+    // данные в ДОЗУ) — 122 из 128 форм MOV/CMP/ADD точно, остальные 6 короче на 8
+    // тактов. Совпадение даёт целое семейство, важна сумма запрос+ответ ≈ 54 U; запрос
+    // оставлен, как у БК-0010. Фаза 0 — класс, в который попала машина Manwe, фаза 1 —
+    // другой класс (25 расхождений), как два варианта таблиц у БК-0010.
+    int  bus11Phase_[2] = {0, 1};  // смещение решений БК-0011М для --cpu-phase 0 / 1
+    int  bus11Req_ = 15, bus11Resp_ = 39;
+    int  busWinU() const { return bk11() ? 64 : 48; }
+    int  busPhaseU() const { return bk11() ? bus11Phase_[cpuPhase_] : (cpuPhase_ ? 3 : 9); }
+    // Период совпадения окна и тактов ЦП: 4 такта у БК-0010, 16 у БК-0011М (3 окна).
+    int  busPeriodTicks() const { return bk11() ? 16 : 4; }
     int  prevTeDram_ = 0;
     int  prevTeFast_ = 0;
     int  busSkew_ = 0;
@@ -367,7 +433,17 @@ private:
     int  enterInterrupt(uint16_t vector, bool iako);
     int  interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks);
 
+    Machine machine_ = Machine::Bk0010;
     int cpuFreqHz_ = 3000000;   // тактовая частота ЦП
+    uint16_t reg662_ = 047400;  // БК-0011М: 0177662 на запись (палитра 15, таймер выкл, экран 5)
+    uint16_t reg716tap_ = 0;    // БК-0011М: 0177716 при бите 11 = 0
+    void apply662();            // палитра и экранная страница из reg662_
+    void flushRaster();         // дорисовать растр до текущего положения луча
+    int  vpHalf_ = 0;           // остаток полутактов CLKIN (1 такт ЦП = 1,5 CLKIN на 11М)
+    bool ayOn_ = false;         // звуковой сопроцессор на 0177714
+    // Микросхема НГМД выдаёт слово раз в 64 мкс: 192 такта при 3 МГц, 256 при 4 МГц.
+    uint64_t fddPeriod() const { return static_cast<uint64_t>(cpuFreqHz_ / 15625); }
+    void setSpeakerBits(uint16_t v);   // уровень динамика из бит 6,5,2
     int framesSinceReset_ = 0;   // for ensureMonitorBooted()
     bool sliceIdle_ = false;     // CPU went idle (WAIT/HALT) mid-frame — skip its remaining slices
     int  sliceFrameTicks_ = 0;   // ticks run so far this frame (across slices), for exact boundaries
@@ -444,6 +520,8 @@ private:
     void deliverFrameInterrupts(); // взвести кадровый запрос 50 Гц и попробовать выдать
     int  tryDeliverInterrupts();   // выдать взведённые запросы; возвращает такты входа
     int  stepCore();               // one instruction + sound/trace bookkeeping
+    void advanceDevices(int t);    // время для периферии: луч, звук, диск, клавиатура
+    int  idleTicks(int t);         // простой по WAIT: время идёт без команд
 
     // EMT 36 handler: reads the tape/disk parameter block (address in R1) and
     // performs a file read/write against the host CWD instead of tape/disk.
@@ -451,6 +529,7 @@ private:
     bool handleEmt36();
 
     Speaker sound_;
+    Ay8910  ay_;                // звуковой сопроцессор на 0177714 (если ayOn_)
     Trace   trace_;
 };
 
