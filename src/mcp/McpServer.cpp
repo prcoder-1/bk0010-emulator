@@ -90,7 +90,7 @@ McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool dis
     // На БК-0011М палитра меняется по ходу кадра — экран рисуется построчно.
     board_.setScanlineRender(board_.bk11());
     romsOk_ = board_.loadRoms(romDir_);
-    board_.setSmk512(smk512 && !board_.bk11());   // --smk: блок расширения памяти в разъёме МПИ
+    board_.setSmk512(smk512);             // --smk: блок расширения памяти в разъёме МПИ
     board_.reset();
     // --disk <образ>: вставить дискету и отдать управление автозагрузчику ПЗУ
     // контроллера. Монитор к этому моменту поднимаем, как и в безголовом режиме.

@@ -187,6 +187,8 @@ Board::Board() {
         // Журналу НГМД нужен адрес команды, которая лезет в его регистры.
         if (diskOn_ && (a == 0177130 || a == 0177132)) kngmd_.fdd().setContextPc(curInstrPc_);
     });
+    // Смена режима СМК-512 на БК-0011М переключает и окно 1 машины (сигнал ВЭД).
+    smk_.setModeHook([this]() { syncSmk11(); });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
 }
@@ -198,8 +200,10 @@ Board::Board() {
 // на окно 037 медленнее чтения из В-В (docs/slow-memory-timing.md).
 uint8_t Board::busClass(uint16_t addr, bool write) const {
     if (bk11()) {
-        // БК-0011М: всё ОЗУ (и страницы в окне 1) — ДОЗУ за 037; ПЗУ и пустые розетки — ПЗУ.
+        // БК-0011М: всё ОЗУ (и страницы в окне 1) — ДОЗУ за 037; ПЗУ и пустые розетки — ПЗУ;
+        // ОЗУ СМК-512 отвечает сразу, как и на БК-0010.
         if (addr >= 0177600) return BusFast;
+        if (smkOn_ && smkRamAccess(addr, write)) return BusFast;
         if (diskOn_ && addr >= Kngmd::ROM_FIRST && addr <= Kngmd::ROM_LAST) return BusRom;
         return mem_.isRam(addr) ? BusDram : BusRom;
     }
@@ -437,8 +441,8 @@ void Board::setMachine(Machine m) {
     busReqU_  = bk11() ? bus11Req_  : 15;
     busRespU_ = bk11() ? bus11Resp_ : 33;
     sound_.setCpuFreq(cpuFreqHz_);
-    if (bk11() && smkOn_) setSmk512(false);   // СМК-512 на БК-0011М не эмулируем
     mem_.setBk11(bk11());
+    syncSmk11();
     setAy(bk11());
     if (!romDir_.empty()) loadRoms(romDir_);
 }
@@ -470,6 +474,14 @@ bool Board::loadRoms(const std::string& romDir) {
 }
 
 void Board::reset() {
+    // БК-0011М с СМК-512: контроллер с ПЗУ на шине всегда (см. controllerOn); без
+    // платы и без дискет — снять.
+    if (bk11() && smkOn_) controllerOn();
+    else if (diskOn_) {
+        bool any = false;
+        for (int d = 0; d < Fdd::DRIVES; ++d) any |= kngmd_.fdd().attached(d);
+        if (!any) { diskOn_ = false; updateMpi(); }
+    }
     mem_.reset();
     // Адрес начального пуска процессор берёт из ячейки 0177716. Обычно там ПЗУ БК
     // с адресом 0100000, но контроллер с собственной прошивкой зеркалит своё ПЗУ
@@ -529,7 +541,7 @@ void Board::reset() {
     ay_.reset();
     vp037_.reset();
     vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
-    if (smkOn_) smk_.powerOn();        // включение питания: ДОЗУ чисто, режим SYS
+    if (smkOn_) { smk_.powerOn(); smkStartMode(); }   // включение питания: ДОЗУ чисто
     trace_.reset();
 }
 
@@ -615,10 +627,10 @@ void Board::updateMpi() {
     mem_.setMpi(mux_.empty() ? nullptr : &mux_);
 }
 
-bool Board::attachDisk(int drive, const std::string& path, bool readOnly, int sides) {
-    // Какое ПЗУ ставить, решает конфигурация машины: у платы СМК-512 своя прошивка
-    // (v2.05 с ROM-BIOS, roms/smk512.rom) — именно её ждут системы для БК-0010 с
-    // расширением памяти; у простого КНГМД — драйвер 326.
+// Прошивка контроллера в окно 0160000. Какое ПЗУ ставить, решает конфигурация
+// машины: у платы СМК-512 своя прошивка (v2.05 с ROM-BIOS, roms/smk512.rom) — именно
+// её ждут системы для БК-0010 с расширением памяти; у простого КНГМД — драйвер 326.
+bool Board::loadControllerRom() {
     if (!kngmd_.romLoaded()) {
         bool ok = false;
         if (!diskRom_.empty()) {
@@ -635,6 +647,25 @@ bool Board::attachDisk(int drive, const std::string& path, bool readOnly, int si
             return false;
         }
     }
+    return true;
+}
+
+// Контроллер на шину. На БК-0011М с СМК-512 он стоит и без дискет: плата — это и
+// контроллер НГМД со своим ПЗУ, а БОС ищет дисковод записью в 0177130 (запись СМК
+// принимает) и при успехе зовёт загрузчик 0160000. Не будь там ПЗУ, БОС ушёл бы в
+// пустоту вместо БЕЙСИКа.
+bool Board::controllerOn() {
+    if (!loadControllerRom()) return false;
+    if (!diskOn_) {
+        diskOn_ = true;
+        fddNextTick_ = totalTicks_ + fddPeriod();
+        updateMpi();
+    }
+    return true;
+}
+
+bool Board::attachDisk(int drive, const std::string& path, bool readOnly, int sides) {
+    if (!loadControllerRom()) return false;
     if (!kngmd_.fdd().attach(drive, path, readOnly, sides)) {
         std::fprintf(stderr, "КНГМД: не удалось открыть образ %s\n", path.c_str());
         return false;
@@ -650,6 +681,7 @@ bool Board::attachDisk(int drive, const std::string& path, bool readOnly, int si
 void Board::detachDisk(int drive) {
     kngmd_.fdd().detach(drive);
     for (int d = 0; d < Fdd::DRIVES; ++d) if (kngmd_.fdd().attached(d)) return;
+    if (bk11() && smkOn_) return;         // СМК на 11М — контроллер остаётся (см. controllerOn)
     diskOn_ = false;                      // приводов не осталось — контроллер с шины
     updateMpi();
 }
@@ -674,10 +706,15 @@ bool Board::bootFromDisk() {
     return true;
 }
 
+void Board::smkStartMode() {
+    if (bk11() && !smkFirmware()) smk_.setMode(Smk512::STD11, 0);
+}
+
 void Board::setSmk512(bool on) {
     if (on == smkOn_) return;
     smkOn_ = on;
-    if (on) smk_.powerOn(); else smk_.release();
+    if (on) { smk_.powerOn(); smkStartMode(); } else smk_.release();
+    syncSmk11();
     updateMpi();
 }
 
@@ -816,6 +853,13 @@ void Board::saveState11(std::vector<uint8_t>& out) const {
                              static_cast<uint16_t>(prevTeDram_),
                              static_cast<uint16_t>(prevTeFast_)};
     put(bus, sizeof bus);
+    // Хвост СМК-512 (как у БК-0010): конфигурация всегда, ДОЗУ — если плата стоит.
+    const uint16_t smk[4] = {static_cast<uint16_t>(smkOn_ ? 1 : 0),
+                             static_cast<uint16_t>(smk_.mode()),
+                             static_cast<uint16_t>(smk_.page()),
+                             static_cast<uint16_t>(smk_.armed() ? 1 : 0)};
+    put(smk, sizeof smk);
+    if (smkOn_) put(smk_.ram().data(), Smk512::RAM_BYTES);
 }
 
 bool Board::loadState11(const std::vector<uint8_t>& in) {
@@ -832,6 +876,14 @@ bool Board::loadState11(const std::vector<uint8_t>& in) {
     uint8_t ayRegs[16];
     get(dev, sizeof dev); get(ext, sizeof ext); get(&v037, sizeof v037);
     get(m11, sizeof m11); get(ayRegs, sizeof ayRegs); get(bus, sizeof bus);
+    uint16_t smk[4] = {0, 0, 0, 0};
+    if (in.size() >= off + sizeof smk) get(smk, sizeof smk);   // снимки без хвоста — без платы
+    setSmk512(smk[0] != 0);
+    if (smkOn_) {
+        smk_.setMode(static_cast<Smk512::Mode>(smk[1] & 7), smk[2]);
+        if (smk[3]) smk_.writeCtrl(Smk512::STROBE);
+        if (in.size() >= off + Smk512::RAM_BYTES) get(smk_.ram().data(), Smk512::RAM_BYTES);
+    }
     vp037_.unpack(v037);
     scroll_ = dev[0]; kbdStatus_ = dev[1]; kbdData_ = dev[2];
     keyIntPending_ = false; keyIntDeferAt_ = 0;
@@ -1367,7 +1419,8 @@ std::string Board::bk11Summary() const {
     char b[160];
     const int rom = mem_.window1Rom();
     char w1[24];
-    if (rom >= 0) std::snprintf(w1, sizeof w1, "ПЗУ%d", rom);
+    if (mem_.window1Off()) std::snprintf(w1, sizeof w1, "откл(СМК)");
+    else if (rom >= 0) std::snprintf(w1, sizeof w1, "ПЗУ%d", rom);
     else std::snprintf(w1, sizeof w1, "стр%d", mem_.window1Page());
     std::snprintf(b, sizeof b, "окно0=стр%d окно1=%s пал=%d экран=стр%d таймер=%s СТОП=%s",
                   mem_.window0Page(), w1, (reg662_ >> 8) & 15, mem_.videoPage(),

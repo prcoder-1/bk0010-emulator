@@ -65,11 +65,12 @@ void Memory::applyMap() {
     ramBlk(0, 0, 0); ramBlk(1, 0, 1);
     const int w0 = pageForCode(pageReg_ >> 12);
     ramBlk(2, w0, 0); ramBlk(3, w0, 1);
-    switch (romPageForReg(pageReg_)) {
+    switch (win1Off_ ? -2 : romPageForReg(pageReg_)) {
     case -1: { const int w1 = pageForCode(pageReg_ >> 8); ramBlk(4, w1, 0); ramBlk(5, w1, 1); break; }
     case 0:  romBlk(4, ROM_BASIC2); romBlk(5, ROM_BASIC3); break;
     case 1:  romBlk(4, ROM_BASIC1); romBlk(5, ROM_EXT);    break;
-    default: romBlk(4, -1); romBlk(5, -1); break;            // ПЗУ-страницы 2, 3 — пустые розетки
+    default: romBlk(4, -1); romBlk(5, -1); break;            // ПЗУ-страницы 2, 3 — пустые розетки;
+                                                             // -2 — окно отключено ВЭД (СМК-512)
     }
     romBlk(6, ROM_BOS);
     romBlk(7, mstd_ ? ROM_MSTD : -1);

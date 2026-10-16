@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include <functional>
 #include "Memory.h"
 
 namespace bk {
@@ -59,12 +60,28 @@ public:
 
     void powerOn();                    // включение питания: SYS, страница 0, ОЗУ обнулено
     void reset();                      // СБРОС по шине: SYS, страница 0, ОЗУ сохраняется
+    // Поставить режим и страницу напрямую — то, что сделала бы прошивка контроллера
+    // (на БК-0011М она при пуске сама переводит плату в Std11). Строб снимается.
+    void setMode(Mode m, int page = 0);
+    // Вызывается при каждой смене режима или страницы — БК-0011М по ней пересчитывает
+    // карту памяти (сигнал ВЭД, см. upperRamOff).
+    void setModeHook(std::function<void()> h) { modeHook_ = std::move(h); }
     void release() { ram_.clear(); ram_.shrink_to_fit(); }
 
     // Запись в регистр управления 0177130 (трёхтактный протокол, см. writeCtrl).
     void writeCtrl(uint16_t value);
 
     Mode mode() const { return mode_; }
+    // Сигнал ВЭД (P4O, контакт А22 МПИ): «откл. верхнее ОЗУ БК-0011М» в режимах SYS,
+    // Std10, ОЗУ10 и All (Табл. 1, строка «-/- верх.ОЗУ-11М»). Контроллер тянет
+    // линию разрешения ПЗУ ЛВС, и схема 11М считает, что в окне 1 включено ПЗУ —
+    // ОЗУ окна 1 (0100000..0137777) отключается. На БК-0010 контакт ни к чему.
+    static bool upperRamOff(Mode m) { return m == SYS || m == STD10 || m == RAM10 || m == ALL; }
+    bool upperRamOff() const { return upperRamOff(mode_); }
+    // Сигнал M11 (контакт Б6): отключение ПЗУ БОС БК-0011М — Std10, All, ОЗУ11, Hlt11.
+    // Отдельно не моделируется: во всех этих режимах плата сама отвечает по
+    // 0140000..0157777, а её ОЗУ у нас главнее ПЗУ машины.
+    static bool monitor11Off(Mode m) { return m == STD10 || m == ALL || m == RAM11 || m == HLT11; }
     int  page() const { return page_; }
     bool armed() const { return armed_; }   // строб взведён, ждём код режима
     // Пока идёт трёхтактный протокол, плата БЛОКИРУЕТ регистры НГМД: строб
@@ -119,6 +136,8 @@ private:
     uint8_t page_  = 0;
     bool    armed_ = false;
     bool    fddBlocked_ = false;
+    std::function<void()> modeHook_;
+    void modeChanged() { if (modeHook_) modeHook_(); }
 };
 
 } // namespace bk

@@ -145,9 +145,15 @@ public:
     void setPageMap(uint16_t reg);            // запись в 0177716 с битом 11
     uint16_t pageMap() const { return pageReg_; }
     int  window0Page() const { return pageForCode(pageReg_ >> 12); }
-    int  window1Page() const { return romPageForReg(pageReg_) < 0 ? pageForCode(pageReg_ >> 8) : -1; }
-    int  window1Rom() const { return romPageForReg(pageReg_); }
+    int  window1Page() const {
+        return (!win1Off_ && romPageForReg(pageReg_) < 0) ? pageForCode(pageReg_ >> 8) : -1;
+    }
+    int  window1Rom() const { return win1Off_ ? -1 : romPageForReg(pageReg_); }
     void setVideoPage(int page) { videoPage_ = page & 7; }
+    // Окно 1 отключено внешним сигналом (ВЭД от СМК-512): ни ОЗУ, ни ПЗУ машины там
+    // не отвечают — отвечает только плата, где она подключила свои сегменты.
+    void setWindow1Off(bool off) { if (off != win1Off_) { win1Off_ = off; applyMap(); } }
+    bool window1Off() const { return win1Off_; }
     int  videoPage() const { return videoPage_; }
     // Образ ПЗУ БК-0011М в слоте (8 Кбайт) или nullptr, если слот пуст.
     const uint8_t* rom11(int slot) const {
@@ -185,6 +191,7 @@ private:
     uint8_t  attr_[8] = {0};             // Ram / Rom / Absent (только для БК-0011М)
     bool     bk11_ = false;
     bool     mstd_ = false;
+    bool     win1Off_ = false;           // окно 1 отключено сигналом ВЭД (СМК-512)
     uint16_t pageReg_ = 0;               // последнее значение регистра памяти 0177716
     int      videoPage_ = 5;
     std::vector<uint8_t> ram11_;         // 128 Кбайт ОЗУ БК-0011М

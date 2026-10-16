@@ -54,13 +54,14 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     // Блок расширения памяти СМК-512: настройка запоминается между запусками,
     // ключ --smk/--no-smk перекрывает её на один запуск.
     const bool smkOn = smkOverride >= 0 ? smkOverride > 0
-                                        : QSettings().value("smk512", false).toBool();
-    board_->setSmk512(smkOn && !board_->bk11());
+                                        : QSettings().value(smkKey(), false).toBool();
+    board_->setSmk512(smkOn);
     if (board_->smk512()) {
         // Стоит сказать вслух: с платой карта верхней половины адресов не штатная
         // (в режиме SYS ОЗУ контроллера перекрывает ПЗУ Бейсика), и это объясняет
         // «странности», если пользователь про плату забыл.
-        std::fprintf(stderr, "БК-0010: блок расширения памяти СМК-512 подключён (512 Кбайт)\n");
+        std::fprintf(stderr, "%s: блок расширения памяти СМК-512 подключён (512 Кбайт)\n",
+                     bk::Board::machineName(board_->machine()));
     }
     if (!board_->loadRoms(romDir.toStdString())) {
         QMessageBox::warning(this, "БК",
@@ -582,7 +583,7 @@ void MainWindow::resetMachine() {
 // сохраняется между запусками; ключ --smk её не перезаписывает.
 void MainWindow::setSmk512(bool on) {
     board_->setSmk512(on);
-    QSettings().setValue("smk512", on);
+    QSettings().setValue(smkKey(), on);
     resetMachine();
     status_->setText(on ? "СМК-512 подключён, машина перезапущена"
                         : "СМК-512 снят, машина перезапущена");
@@ -600,7 +601,6 @@ void MainWindow::syncMachineMenu() {
     machine11Action_->setChecked(board_->bk11());
     ayAction_->setChecked(board_->ay());
     smkAction_->setChecked(board_->smk512());
-    smkAction_->setEnabled(!board_->bk11());   // СМК-512 на БК-0011М не эмулируется
 }
 
 void MainWindow::setMachine(int m) {
@@ -610,7 +610,8 @@ void MainWindow::setMachine(int m) {
     saveDisks();
     board_->setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
     board_->setAy(QSettings().value(want11 ? "ay11m" : "ay10", want11).toBool());
-    if (!want11) board_->setSmk512(QSettings().value("smk512", false).toBool());
+    // Плата — своя настройка у каждой машины (на БК-0011М её ставят реже).
+    board_->setSmk512(QSettings().value(smkKey(), false).toBool());
     applyScanline();
     lastBin_.clear();                  // .BIN другой машины перезапускать нельзя
     syncMachineMenu();
@@ -797,7 +798,7 @@ bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
     status_->setText(drive
         ? QString("Дискета в приводе B: %1").arg(QFileInfo(path).fileName())
         : QString("Загрузка с диска: %1%2").arg(QFileInfo(path).fileName())
-              .arg(board_->bk11() ? "" : board_->smk512() ? ", ОЗУ платы СМК-512 подключено"
+              .arg(board_->smk512() ? ", ОЗУ платы СМК-512 подключено" : board_->bk11() ? ""
                                     : " — ВНИМАНИЕ: плата СМК-512 снята, памяти может не хватить"));
     updateTitle();
     return true;
