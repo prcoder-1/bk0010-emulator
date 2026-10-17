@@ -83,7 +83,7 @@ static bool parseNumber(const QJsonValue& v, long& out) {
 }
 
 McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool diskRw,
-                     int machine, int ay)
+                     int machine, int ay, std::string hdd, bool hddRw)
     : romDir_(std::move(romDir)) {
     board_.setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
     if (ay >= 0) board_.setAy(ay != 0);
@@ -101,6 +101,8 @@ McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool dis
             board_.bootFromDisk();
         }
     }
+    // --hdd <образ.hdi>: винчестер на плате СМК-512; грузит с него прошивка платы.
+    if (!hdd.empty() && board_.attachHdd(0, hdd, !hddRw)) board_.bootFromHdd();
     board_.trace().setEnabled(true);      // collect hot-spot data from the start
     board_.trace().setFlameEnabled(true); // maintain the shadow call stack (bk_backtrace)
     board_.setSpeakerLog(true);           // фронты динамика — для разбора звука в bk_audio
@@ -126,6 +128,10 @@ QString McpServer::machineText() {
         .arg(board_.ay() ? "вкл" : "выкл").arg(board_.smk512() ? "вкл" : "выкл")
         .arg(board_.scanlineRender() ? "по лучу" : "покадровая");
     if (board_.diskAttached(0)) s += QString(" Дискета A: %1.").arg(QString::fromStdString(board_.diskPath(0)));
+    for (int u = 0; u < bk::Ide::DRIVES; ++u)
+        if (board_.hddAttached(u))
+            s += QString(" Винчестер %1: %2.").arg(u ? "slave" : "master")
+                     .arg(QString::fromStdString(board_.ide().drive(u).path()));
     if (!romsOk_) s += QString(" ⚠ ПЗУ %1 не загружены из %2.").arg(b11 ? "БК-0011М" : "БК-0010")
                            .arg(QString::fromStdString(romDir_));
     return s;
@@ -151,6 +157,35 @@ QString McpServer::fddLog(int limit) const {
                       : e.kind == bk::Fdd::LogEntry::Kind::Lost   ? "ПОТЕРЯ " : "сост.  ";
         out += QString("\n  %1 %2  дор %3 ст %4 гол %5  из %6")
                    .arg(k).arg(oct6(e.value)).arg(e.track).arg(e.side).arg(e.head).arg(oct6(e.pc));
+    }
+    return out;
+}
+
+// Регистры НЖМД — в логике ATA (как их видит накопитель); процессор читает их по
+// 0177740–0177757 проинвертированными.
+QString McpServer::hddState() const {
+    QString out;
+    for (int u = 0; u < bk::Ide::DRIVES; ++u) {
+        const bk::HddDrive& d = board_.ide().drive(u);
+        if (!d.attached()) continue;
+        using R = bk::HddDrive;
+        const uint16_t st = d.peek(R::STATUS_CMD);
+        out += QString("\n  НЖМД %1 %2 «%3», C/H/S %4/%5/%6 (%7 Мбайт)%8"
+                       "\n            статус %9 [%10%11%12%13%14], ошибка %15, счётчик %16, сектор %17, "
+                       "цилиндр %18, головка %19; последняя команда %20, LBA %21")
+            .arg(u ? "slave " : "master").arg(QString::fromStdString(d.path()))
+            .arg(QString::fromStdString(d.model()))
+            .arg(d.cylinders()).arg(d.heads()).arg(d.sectors()).arg(d.totalSectors() / 2048)
+            .arg(d.readOnly() ? QString(", только чтение, записано в память секторов: %1").arg(d.dirtySectors())
+                              : QString(", запись в файл"))
+            .arg(QString("%1").arg(st, 2, 16, QChar('0')))
+            .arg((st & R::ST_BSY) ? "BSY " : "").arg((st & R::ST_DRDY) ? "DRDY " : "")
+            .arg((st & R::ST_DRQ) ? "DRQ " : "").arg((st & R::ST_DSC) ? "DSC " : "")
+            .arg((st & R::ST_ERR) ? "ERR" : "")
+            .arg(d.peek(R::ERR_FEAT), 2, 16, QChar('0'))
+            .arg(d.peek(R::COUNT)).arg(d.peek(R::SECTOR))
+            .arg((d.peek(R::CYL_HI) << 8) | d.peek(R::CYL_LO)).arg(d.peek(R::HEAD) & 017)
+            .arg(QString("%1").arg(d.lastCommand(), 2, 16, QChar('0'))).arg(d.lastLba());
     }
     return out;
 }
@@ -308,13 +343,18 @@ QJsonArray McpServer::toolDefs() const {
                   "relative to the 037 DRAM window that a real BK draws at random on power-up: 0 (default) "
                   "gives MOV (R0),R1 = 28 ticks, 1 gives 24. `smk` installs/removes the СМК-512 board "
                   "(its 512 KB are cleared, as at power-on). `disk` inserts a floppy image (re-read from the "
-                  "host file, so a rebuilt image is picked up) and boots from it; an empty string ejects it.",
+                  "host file, so a rebuilt image is picked up) and boots from it; an empty string ejects it. "
+                  "`hdd` attaches a hard-disk image in GID's HDI format (512-byte ATA IDENTIFY header + raw "
+                  "sectors) as the IDE master on the СМК-512 board (installing the board and its smk512.rom "
+                  "firmware) and boots from it; an empty string detaches it.",
         schema({{"machine", P("string", "\"bk10\" or \"bk11m\" (default: keep)")},
                 {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: keep)")},
                 {"cpu_phase", P("integer", "CPU clock phase vs the 037 window, 0 or 1 (default: keep)")},
                 {"smk", P("boolean", "СМК-512 memory board on/off (default: keep)")},
                 {"disk", P("string", "Floppy image (.bkd/.img) to insert into drive 0 and boot; \"\" = eject (default: keep)")},
                 {"disk_rw", P("boolean", "Insert the image writable (default false = read-only)")},
+                {"hdd", P("string", "Hard-disk image (.hdi) to attach as IDE master and boot; \"\" = detach (default: keep)")},
+                {"hdd_rw", P("boolean", "Attach the HDD image writable (default false: BK writes stay in memory)")},
                 {"frames", P("integer", "Run this many frames after reset/boot (default 0)")}})));
     t.append(tool("bk_machine", "Show or switch the emulated machine. Without `machine` it reports the "
                   "current model (БК-0010-01 or БК-0011М), CPU clock, frame length, AY / СМК-512 state and the "
@@ -983,6 +1023,23 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                 extra = QString(" Disk %1, booting.").arg(path);
             } else {
                 extra = " Disk ejected.";
+            }
+        }
+        if (args.contains("hdd")) {
+            const QString path = args.value("hdd").toString();
+            board_.detachHdd(0);
+            if (!path.isEmpty()) {
+                if (!board_.smk512()) board_.setSmk512(true);
+                std::string err;
+                if (!board_.attachHdd(0, path.toStdString(), !args.value("hdd_rw").toBool(false), &err))
+                    return fail("cannot attach HDD " + path + ": " + QString::fromStdString(err));
+                board_.bootFromHdd();
+                const bk::HddDrive& d = board_.ide().drive(0);
+                extra += QString(" HDD %1 (C/H/S %2/%3/%4), booting.").arg(path)
+                             .arg(d.cylinders()).arg(d.heads()).arg(d.sectors());
+            } else {
+                board_.reset();
+                extra += " HDD detached.";
             }
         }
         if (board_.smk512()) extra += " СМК-512 on.";
@@ -1980,6 +2037,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         + (board_.ay() ? QString("\n  AY-3-8910 %1").arg(QString::fromStdString(board_.aySummary())) : QString())
         + (board_.ay2Active() ? QString("\n  AY №2     %1").arg(QString::fromStdString(board_.aySummary(1))) : QString())
         + (board_.diskControllerOn() ? fddState() : QString())
+        + (board_.ide().any() ? hddState() : QString())
         + ((board_.diskControllerOn() && args.value("fdd_log").toBool())
                ? fddLog(std::max(4, args.value("fdd_log_count").toInt(40))) : QString()));
     }

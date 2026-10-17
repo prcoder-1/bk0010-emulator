@@ -17,12 +17,14 @@
 class McpServer {
 public:
     QString fddState() const;
+    QString hddState() const;             // сводка по винчестерам для bk_io_state
     QString fddLog(int limit) const;      // сводка по контроллеру НГМД для bk_io_state
 
     // machine: 0 — БК-0010-01, 1 — БК-0011М (по умолчанию); ay: -1 — по машине, 0/1 — явно.
     explicit McpServer(std::string romDir, bool smk512 = true,
                        std::string disk = {}, bool diskRw = false,
-                       int machine = 1, int ay = -1);
+                       int machine = 1, int ay = -1,
+                       std::string hdd = {}, bool hddRw = false);
 
     // Run the stdio message loop until EOF. Returns a process exit code.
     int run();

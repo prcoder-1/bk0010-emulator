@@ -35,6 +35,7 @@ bk_vram       {"width": 128}                          // или ASCII-арт, е
 
 ```jsonc
 bk_reset   {"machine": "bk11m", "disk": "…/INSULT.IMG", "frames": 1300}  // БОС сам грузится с диска
+bk_reset   {"hdd": "…/maxvel.hdi", "frames": 600}  // винчестер HDI на СМК-512: прошивка платы грузит MKDOS
 bk_io_log  {"enable": true, "addr": "0177662"}   // записи палитры с положением луча: «стр 192:32»
 bk_run     {"max_frames": 2}
 bk_io_log  {}

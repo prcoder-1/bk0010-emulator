@@ -27,6 +27,7 @@ add_library(bkcore STATIC
     src/core/Vp037.cpp
     src/core/Smk.cpp
     src/core/Fdd.cpp
+    src/core/Hdd.cpp
     src/core/Kngmd.cpp
     src/core/Board.cpp
     src/core/Vm1Timing.cpp

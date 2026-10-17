@@ -50,11 +50,14 @@ public:
     // обращение к регистру данных 0177132 сбрасывает флаг готовности TR, поэтому
     // отладчику, дизассемблеру и экрану нужен отдельный путь (mpiPeek), иначе
     // простой показ регистра в дампе ломал бы обмен с диском.
-    // addr выровнен по слову вызывающим. true — обращение обслужил контроллер.
+    // addr — адрес, как его выставил процессор: ВМ1 не обнуляет A0 и при словном
+    // обращении, и плата СМК по нему выбирает регистры НЖМД 0177741/0177743
+    // (драйвер в её ПЗУ пишет CLR @#177743). Выравнивает устройство само.
+    // true — обращение обслужил контроллер.
     virtual bool mpiRead(uint16_t addr, uint16_t& value) = 0;
     // То же, но БЕЗ побочных эффектов — для отладочного просмотра.
     virtual bool mpiPeek(uint16_t addr, uint16_t& value) const = 0;
-    // addr НЕ выровнен при isByte. true — контроллер поглотил запись (БК её не видит).
+    // addr не выровнен (см. mpiRead). true — контроллер поглотил запись (БК её не видит).
     virtual bool mpiWrite(uint16_t addr, uint16_t value, bool isByte) = 0;
     // Отладочная запись: игнорирует ограничения «только чтение/только запись».
     virtual bool mpiPoke(uint16_t addr, uint16_t value, bool isByte) = 0;
@@ -161,13 +164,23 @@ public:
     }
     uint8_t*       ram11()       { return ram11_.data(); }
     const uint8_t* ram11() const { return ram11_.data(); }
+    // Что сейчас в блоке адресов blk (0..7, по 8 Кбайт) на БК-0011М — для визуализатора:
+    // смещение в ram11() либо слот ПЗУ; -1 — не то (или не БК-0011М).
+    int blockRamOffset(int blk) const {
+        if (!bk11_ || attr_[blk & 7] != Ram) return -1;
+        return static_cast<int>(blk_[blk & 7] - ram11_.data());
+    }
+    int blockRomSlot(int blk) const {
+        if (!bk11_ || attr_[blk & 7] != Rom) return -1;
+        return static_cast<int>((blk_[blk & 7] - rom11_.data()) / ROM11_BYTES);
+    }
     // Блок адресов 8 Кбайт отвечает ДОЗУ (ОЗУ БК)? Для модели шины.
     bool isRam(uint16_t addr) const {
         return bk11_ ? (addr < ADDR_IO_PAGE && attr_[addr >> 13] == Ram) : addr < ADDR_RAM_END;
     }
 
 private:
-    uint16_t busRead(uint16_t addr);   // чтение слова процессором, addr выровнен
+    uint16_t busRead(uint16_t raw);    // чтение слова процессором; raw — адрес с A0
     // Ячейка по текущей карте блоков (на БК-0010 карта тождественна mem_).
     uint8_t*       at(uint16_t a)       { return blk_[a >> 13] + (a & 017777); }
     const uint8_t* at(uint16_t a) const { return blk_[a >> 13] + (a & 017777); }

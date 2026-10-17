@@ -1,5 +1,7 @@
 #include "MemVisWidget.h"
 #include <algorithm>
+#include <array>
+#include <iterator>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -10,6 +12,8 @@
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QLabel>
+#include <QFontMetrics>
+#include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 
@@ -48,10 +52,41 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     int imgW = word16 ? (bytesPerRow / 2) : (bytesPerRow * pxPerByte);
     if (imgW <= 0) return;
 
-    // Источник: память самой БК или ДОЗУ платы СМК-512 (страница или все 16 подряд).
-    const bool smkMode = (smkPage != SRC_BK) && board_->smk512()
+    // Источник: память самой БК, ДОЗУ платы СМК-512 (страница или все 16 подряд) или
+    // ОЗУ БК-0011М (страница или все 8, в общем виде — ещё и ПЗУ).
+    const bool smkMode = (src == Src::SmkAll || src == Src::SmkPage) && board_->smk512()
                       && board_->smk().ram().size() >= bk::Smk512::RAM_BYTES;
     const uint8_t* smkRam = smkMode ? board_->smk().ram().data() : nullptr;
+    const int smkPage = (src == Src::SmkPage)
+                      ? std::clamp(page, 0, static_cast<int>(bk::Smk512::PAGES) - 1) : -1;
+    const bool b11Mode = (src == Src::Bk11All || src == Src::Bk11Page) && mem.bk11();
+    const bool b11All = b11Mode && src == Src::Bk11All;
+
+    // БК-0011М: линейный буфер — 8 страниц ОЗУ, за ними (в общем виде с ПЗУ) загруженные
+    // ПЗУ-слоты в порядке карты: ПЗУ-стр. 0, ПЗУ-стр. 1, БОС, МСТД. romLin[слот] — где
+    // слот начинается в буфере (-1 — его там нет).
+    using M = bk::Memory;
+    const uint8_t* lin11 = nullptr;
+    size_t lin11Size = 0;
+    std::vector<uint8_t> flat11;
+    int romLin[M::ROM11_SLOTS];
+    std::fill(std::begin(romLin), std::end(romLin), -1);
+    if (b11Mode) {
+        lin11 = mem.ram11();
+        lin11Size = M::RAM11_BYTES;
+        if (b11All && !hideRom) {
+            static const int kOrder[] = {M::ROM_BASIC2, M::ROM_BASIC3, M::ROM_BASIC1,
+                                         M::ROM_EXT, M::ROM_BOS, M::ROM_MSTD};
+            flat11.assign(mem.ram11(), mem.ram11() + M::RAM11_BYTES);
+            for (int slot : kOrder)
+                if (const uint8_t* r = mem.rom11(slot)) {
+                    romLin[slot] = static_cast<int>(flat11.size());
+                    flat11.insert(flat11.end(), r, r + M::ROM11_BYTES);
+                }
+            lin11 = flat11.data();
+            lin11Size = flat11.size();
+        }
+    }
 
     // Build the sequence of *visible* byte addresses, compacting out the hidden
     // regions (ROM and/or video RAM). Hidden memory takes up no space in the view:
@@ -62,7 +97,12 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     const int scrStart = 0040000, romStart = 0100000;
     std::vector<int> vis;
     int scrBoundary = -1, romBoundary = -1; // compacted index where each region begins
-    if (smkMode) {
+    if (b11Mode) {
+        const size_t from = b11All ? 0 : static_cast<size_t>(std::clamp(page, 0, 7)) * M::PAGE11_BYTES;
+        const size_t to = b11All ? lin11Size : from + M::PAGE11_BYTES;
+        vis.reserve(to - from);
+        for (size_t o = from; o < to; ++o) vis.push_back(static_cast<int>(o));
+    } else if (smkMode) {
         const size_t from = (smkPage >= 0)
                           ? static_cast<size_t>(smkPage) * bk::Smk512::PAGE_BYTES : 0;
         const size_t to = (smkPage >= 0) ? from + bk::Smk512::PAGE_BYTES
@@ -111,6 +151,33 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     const int livePageBase = smkMode
         ? static_cast<int>(board_->smk().page() * bk::Smk512::PAGE_BYTES) : -1;
 
+    // Тепловая карта для БК-0011М: кусок буфера (HEAT_CH байт) -> до трёх адресов БК,
+    // где он виден сейчас (страница 0 может стоять ещё и в окне 0, одна страница — в
+    // обоих окнах). Куски, которые сейчас перебивает устройство МПИ (СМК, КНГМД), и
+    // страница регистров не в счёт: обращения туда до памяти 11М не доходят.
+    constexpr int HEAT_CH = 0200;
+    std::vector<std::array<int32_t, 3>> alias11;
+    if (b11Mode && heatmap) {
+        alias11.assign(lin11Size / HEAT_CH, {-1, -1, -1});
+        const bk::MpiDevice* mpi = mem.mpi();
+        for (int blk = 0; blk < 8; ++blk) {
+            int base = mem.blockRamOffset(blk);
+            if (base < 0) {
+                const int slot = mem.blockRomSlot(blk);
+                base = (slot >= 0) ? romLin[slot] : -1;
+            }
+            if (base < 0) continue;
+            for (int o = 0; o < static_cast<int>(M::ROM11_BYTES); o += HEAT_CH) {
+                const int a = blk * static_cast<int>(M::ROM11_BYTES) + o;
+                if (a >= bk::ADDR_IO_PAGE) break;
+                uint16_t v;
+                if (mpi && a >= bk::ADDR_RAM_END && mpi->mpiPeek(static_cast<uint16_t>(a), v)) continue;
+                for (int32_t& x : alias11[(base + o) / HEAT_CH])
+                    if (x < 0) { x = a; break; }
+            }
+        }
+    }
+
     int rows = (static_cast<int>(vis.size()) + bytesPerRow - 1) / bytesPerRow;
     if (rows < 1) rows = 1;
     int imgH = rows;
@@ -153,11 +220,22 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     // индекс линейный, и адрес у него есть только на подключённой странице и
     // только там, где текущий режим открыл окно.
     auto srcByte = [&](int i) -> uint8_t {
-        return smkMode ? smkRam[i] : mem.peekByte(static_cast<uint16_t>(i));
+        return b11Mode ? lin11[i] : smkMode ? smkRam[i] : mem.peekByte(static_cast<uint16_t>(i));
     };
     auto heatOf = [&](int i, double& hr, double& hw, double& he, double& act) {
-        if (!smkMode) { heatAt(static_cast<uint16_t>(i), hr, hw, he, act); return; }
+        if (!smkMode && !b11Mode) { heatAt(static_cast<uint16_t>(i), hr, hw, he, act); return; }
         hr = hw = he = act = 0.0;
+        if (b11Mode) {
+            if (alias11.empty()) return;
+            for (int32_t a : alias11[i / HEAT_CH]) {
+                if (a < 0) break;
+                double r, w, e, c;
+                heatAt(static_cast<uint16_t>(a + i % HEAT_CH), r, w, e, c);
+                hr = std::max(hr, r); hw = std::max(hw, w);
+                he = std::max(he, e); act = std::max(act, c);
+            }
+            return;
+        }
         const int off = i - livePageBase;
         if (off < 0 || off >= static_cast<int>(bk::Smk512::PAGE_BYTES)) return;
         const int32_t a = liveAddr[off];
@@ -273,7 +351,9 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         double y = double(idx) / bytesPerRow / imgH * height();
         if (y >= 0 && y < height()) { p.setPen(c); p.drawLine(0, int(y), width(), int(y)); }
     };
-    if (!smkMode) {
+    if (b11Mode) {
+        if (b11All) drawMarks11(p, romLin, imgH);
+    } else if (!smkMode) {
         boundary(scrBoundary, QColor(80, 160, 255, 120));  // 0040000 video RAM
         boundary(romBoundary, QColor(255, 160, 80, 120));  // 0100000 ROM
     } else if (smkPage >= 0) {
@@ -291,8 +371,61 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     }
 }
 
-MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
-    setWindowTitle("Визуализация памяти БК-0010");
+// Разметка общего вида БК-0011М: границы страниц и ПЗУ-слотов с подписями слева.
+// Зелёным — то, что процессор видит сейчас (с адресом), синим — экранная страница вне
+// окон, ярче оранжевым — начало ПЗУ.
+void MemCanvas::drawMarks11(QPainter& p, const int* romLin, int imgH) {
+    using M = bk::Memory;
+    const M& mem = board_->memory();
+    struct Mark { int idx; QString text; QColor color; };
+    std::vector<Mark> marks;
+    const QColor live(120, 230, 160, 200), plain(255, 160, 80, 110);
+    auto at = [](int addr) { return QString(" · %1").arg(addr, 6, 8, QChar('0')); };
+    const int w0 = mem.window0Page(), w1 = mem.window1Page(), vp = mem.videoPage();
+    for (int pg = 0; pg < 8; ++pg) {
+        QString t = QString("стр %1").arg(pg);
+        QColor c = plain;
+        if (pg == 0)  t += at(0);
+        if (pg == w0) t += at(0040000);
+        if (pg == w1) t += at(0100000);
+        if (pg == 0 || pg == w0 || pg == w1) c = live;
+        if (pg == vp) { t += " · экран"; if (c != live) c = QColor(80, 160, 255, 200); }
+        marks.push_back({pg * static_cast<int>(M::PAGE11_BYTES), t, c});
+    }
+    static const struct { int slot; const char* name; } kRom[] = {
+        {M::ROM_BASIC2, "ПЗУ 328 БЕЙСИК"}, {M::ROM_BASIC3, "ПЗУ 329 БЕЙСИК"},
+        {M::ROM_BASIC1, "ПЗУ 327 БЕЙСИК"}, {M::ROM_EXT, "ПЗУ 325 расш. БОС"},
+        {M::ROM_BOS, "ПЗУ 324 БОС"},       {M::ROM_MSTD, "ПЗУ 330 МСТД"}};
+    bool firstRom = true;
+    for (const auto& r : kRom) {
+        if (romLin[r.slot] < 0) continue;
+        QString t = QString::fromUtf8(r.name);
+        QColor c = firstRom ? QColor(255, 160, 80, 200) : QColor(255, 180, 60, 90);
+        for (int blk = 0; blk < 8; ++blk)
+            if (mem.blockRomSlot(blk) == r.slot) { t += at(blk * static_cast<int>(M::ROM11_BYTES)); c = live; break; }
+        marks.push_back({romLin[r.slot], t, c});
+        firstRom = false;
+    }
+
+    QFont f = p.font();
+    f.setPixelSize(10);
+    p.setFont(f);
+    const QFontMetrics fm(f);
+    int lastBottom = -1;
+    for (const Mark& m : marks) {
+        const double y = double(m.idx) / bytesPerRow / imgH * height();
+        if (m.idx > 0) { p.setPen(m.color); p.drawLine(0, int(y), width(), int(y)); }
+        const int ty = int(y) + 1;
+        if (ty < lastBottom) continue;          // не налезаем на предыдущую подпись
+        const QRect box(2, ty, fm.horizontalAdvance(m.text) + 6, fm.height());
+        p.fillRect(box, QColor(0, 0, 0, 160));
+        p.setPen(QColor(m.color.red(), m.color.green(), m.color.blue()));
+        p.drawText(box.adjusted(3, 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft, m.text);
+        lastBottom = box.bottom() + 1;
+    }
+}
+
+MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent), board_(board) {
     canvas_ = new MemCanvas(board, this);
 
     auto* bpp = new QComboBox;
@@ -306,15 +439,10 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     addr->setPrefix("адрес 0"); addr->setSingleStep(0100); addr->setValue(0);
     auto* row = new QSpinBox; row->setRange(8, 512); row->setValue(64); row->setPrefix("шир ");
 
-    // Источник картинки: сама БК или ДОЗУ платы СМК-512. Пункты по страницам есть
-    // всегда, но выбирать их без платы нечего — тогда список просто заблокирован.
-    auto* src = new QComboBox;
-    src->addItem("Память БК");
-    src->addItem("СМК: все 16 страниц");
-    for (size_t i = 0; i < bk::Smk512::PAGES; ++i)
-        src->addItem(QString::fromUtf8("СМК: страница %1").arg(i));
-    src->setEnabled(board->smk512());
-    if (!board->smk512()) src->setToolTip("Блок расширения памяти СМК-512 не установлен");
+    // Источник картинки: адреса процессора, ОЗУ БК-0011М или ДОЗУ платы СМК-512.
+    // Список собирает syncSources() — под текущую машину и плату.
+    src_ = new QComboBox;
+    auto* src = src_;
 
     auto apply = [=] {
         static const int bppVals[5] = {1, 2, 4, 8, 16};
@@ -325,12 +453,13 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
         canvas_->hideScreen = !showScreen->isChecked();
         canvas_->startAddr = addr->value();
         canvas_->bytesPerRow = row->value();
-        const int si = src->currentIndex();
-        canvas_->smkPage = (si == 0) ? MemCanvas::SRC_BK
-                         : (si == 1) ? MemCanvas::SRC_SMK_ALL : si - 2;
-        // В режиме ДОЗУ прятать нечего и начальный адрес БК ни при чём.
-        const bool bkSrc = (si == 0);
-        showRom->setEnabled(bkSrc);
+        const int code = src->currentData().toInt();   // Src << 8 | страница
+        canvas_->src = static_cast<MemCanvas::Src>(code >> 8);
+        canvas_->page = code & 0377;
+        // В постраничных режимах экран прятать нечего и начальный адрес БК ни при чём;
+        // ПЗУ есть только в общем виде БК-0011М.
+        const bool bkSrc = canvas_->src == MemCanvas::Src::Bk;
+        showRom->setEnabled(bkSrc || canvas_->src == MemCanvas::Src::Bk11All);
         showScreen->setEnabled(bkSrc);
         addr->setEnabled(bkSrc);
         canvas_->update();
@@ -358,12 +487,50 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent) {
     controls->setContentsMargins(0, 0, 0, 0);
     lay->addLayout(controls);
     lay->addWidget(canvas_, 1);
-    apply();
+    apply_ = apply;
+    syncSources();
     resize(560, 640);
+}
+
+void MemVisWidget::syncSources() {
+    using Src = MemCanvas::Src;
+    const bool b11 = board_->bk11(), smk = board_->smk512();
+    const int key = (b11 ? 1 : 0) | (smk ? 2 : 0);
+    if (key == srcMachine_) return;
+    const bool machineChanged = srcMachine_ < 0 || ((srcMachine_ ^ key) & 1);
+    srcMachine_ = key;
+    const QVariant prev = src_->currentData();
+    {
+        const QSignalBlocker block(src_);
+        auto code = [](Src s, int pg = 0) { return (static_cast<int>(s) << 8) | pg; };
+        src_->clear();
+        src_->addItem("Память БК (адреса ЦП)", code(Src::Bk));
+        if (b11) {
+            src_->addItem("11М: вся память", code(Src::Bk11All));
+            for (int i = 0; i < 8; ++i)
+                src_->addItem(QString("11М: страница %1").arg(i), code(Src::Bk11Page, i));
+        }
+        if (smk) {
+            src_->addItem("СМК: все 16 страниц", code(Src::SmkAll));
+            for (int i = 0; i < static_cast<int>(bk::Smk512::PAGES); ++i)
+                src_->addItem(QString("СМК: страница %1").arg(i), code(Src::SmkPage, i));
+        }
+        // Сменилась машина — на 11М сразу вся память; иначе прежний выбор, если он ещё есть.
+        int idx = machineChanged ? -1 : src_->findData(prev);
+        if (idx < 0) idx = b11 ? 1 : 0;
+        src_->setCurrentIndex(idx);
+        src_->setEnabled(src_->count() > 1);
+    }
+    setWindowTitle(QString("Визуализация памяти %1")
+                   .arg(QString::fromUtf8(Board::machineName(board_->machine()))));
+    if (apply_) apply_();
 }
 
 // Throttle the periodic repaint to ~16 Hz. Rebuilding the ~48 KB heatmap image
 // every 50 Hz tick is costly and steals time from the emulation on this same GUI
 // thread; the access-age fade is slow enough that 16 Hz looks identical.
 // Interactive control changes call canvas_->update() directly and are unaffected.
-void MemVisWidget::refresh() { if (++refreshTick_ >= 3) { refreshTick_ = 0; canvas_->update(); } }
+void MemVisWidget::refresh() {
+    syncSources();   // машину и плату могут сменить при открытом окне
+    if (++refreshTick_ >= 3) { refreshTick_ = 0; canvas_->update(); }
+}

@@ -563,6 +563,7 @@ void Board::reset() {
     else if (diskOn_) {
         bool any = false;
         for (int d = 0; d < Fdd::DRIVES; ++d) any |= kngmd_.fdd().attached(d);
+        any |= smkOn_ && ide_.any();     // винчестер грузит прошивка контроллера
         if (!any) { diskOn_ = false; updateMpi(); }
     }
     mem_.reset();
@@ -570,6 +571,7 @@ void Board::reset() {
     // приводах): иначе после работы с диском на другой машине в ней оставались
     // флаги и поиск маркера, и загрузчик БОС на 11М дискету уже не находил.
     kngmd_.fdd().reset();
+    ide_.reset(true);
     // Адрес начального пуска процессор берёт из ячейки 0177716. Обычно там ПЗУ БК
     // с адресом 0100000, но контроллер с собственной прошивкой зеркалит своё ПЗУ
     // на эту ячейку и уводит старт на себя (§17.9) — так грузится машина с СМК.
@@ -680,7 +682,21 @@ bool Board::MpiMux::smkVersion(uint16_t addr, uint16_t& value) const {
     return true;
 }
 
-bool Board::MpiMux::mpiRead(uint16_t addr, uint16_t& value) {
+// Регистры НЖМД на шине БК. Буферы платы инвертируют данные в обе стороны (единице
+// на шине БК соответствует низкий уровень, на шине IDE — высокий; БК-docs §15.12).
+// Восьмиразрядный регистр приходит на младшие линии, старшие — единицы IDE, то есть
+// нули для БК (как у GID). Регистры по нечётным адресам 0177741/0177743 отдаём в обе
+// половины слова: MOVB @#177743 берёт старшую, MOV — младшую, а как именно ведут
+// себя неподключённые линии старшего байта на живой плате, неизвестно.
+uint16_t Board::MpiMux::hddBus(uint16_t addr, uint16_t v) {
+    const uint16_t x = static_cast<uint16_t>(~v);
+    return (addr & 1) ? static_cast<uint16_t>((x & 0xff) * 0x101) : x;
+}
+
+bool Board::MpiMux::mpiRead(uint16_t raw, uint16_t& value) {
+    HddDrive::Reg r;
+    if (ide && Ide::decodeSmk(raw, r)) { value = hddBus(raw, ide->read(r)); return true; }
+    const uint16_t addr = raw & ~1;
     if (fdc && (addr == Kngmd::REG_CTRL || addr == Kngmd::REG_DATA))
         return fdc->mpiRead(addr, value);          // регистры микросхемы НГМД
     if (smkRam(addr)) return smk->mpiRead(addr, value);
@@ -690,7 +706,10 @@ bool Board::MpiMux::mpiRead(uint16_t addr, uint16_t& value) {
     return smk && smk->mpiRead(addr, value);       // слово версии СМК и прочее
 }
 
-bool Board::MpiMux::mpiPeek(uint16_t addr, uint16_t& value) const {
+bool Board::MpiMux::mpiPeek(uint16_t raw, uint16_t& value) const {
+    HddDrive::Reg r;
+    if (ide && Ide::decodeSmk(raw, r)) { value = hddBus(raw, ide->peek(r)); return true; }
+    const uint16_t addr = raw & ~1;
     if (fdc && (addr == Kngmd::REG_CTRL || addr == Kngmd::REG_DATA))
         return fdc->mpiPeek(addr, value);
     if (smkRam(addr)) return smk->mpiPeek(addr, value);
@@ -700,7 +719,11 @@ bool Board::MpiMux::mpiPeek(uint16_t addr, uint16_t& value) const {
     return smk && smk->mpiPeek(addr, value);
 }
 
-bool Board::MpiMux::mpiWrite(uint16_t addr, uint16_t value, bool isByte) {
+bool Board::MpiMux::mpiWrite(uint16_t raw, uint16_t value, bool isByte) {
+    HddDrive::Reg r;
+    if (ide && Ide::decodeSmk(raw, r)) { ide->write(r, static_cast<uint16_t>(~value)); return true; }
+    // Остальным устройствам — по старому договору: слово по чётному адресу.
+    const uint16_t addr = isByte ? raw : static_cast<uint16_t>(raw & ~1);
     // Регистр управления на живой плате ОДИН, поэтому запись достаётся обоим:
     // СМК защёлкивает режим, дисковод исполняет команду.
     //
@@ -725,7 +748,10 @@ bool Board::MpiMux::mpiWrite(uint16_t addr, uint16_t value, bool isByte) {
     return taken;
 }
 
-bool Board::MpiMux::mpiPoke(uint16_t addr, uint16_t value, bool isByte) {
+bool Board::MpiMux::mpiPoke(uint16_t raw, uint16_t value, bool isByte) {
+    HddDrive::Reg r;
+    if (ide && Ide::decodeSmk(raw, r)) { ide->write(r, static_cast<uint16_t>(~value)); return true; }
+    const uint16_t addr = isByte ? raw : static_cast<uint16_t>(raw & ~1);
     if (smk && smk->mpiPoke(addr, value, isByte)) return true;
     return fdc && fdc->mpiPoke(addr, value, isByte);
 }
@@ -733,6 +759,7 @@ bool Board::MpiMux::mpiPoke(uint16_t addr, uint16_t value, bool isByte) {
 void Board::updateMpi() {
     mux_.smk = smkOn_  ? &smk_   : nullptr;
     mux_.fdc = diskOn_ ? &kngmd_ : nullptr;
+    mux_.ide = (smkOn_ && ide_.any()) ? &ide_ : nullptr;
     mem_.setMpi(mux_.empty() ? nullptr : &mux_);
 }
 
@@ -747,8 +774,9 @@ bool Board::loadControllerRom() {
         } else {
             // По умолчанию — драйвер 326: с ним поднимается больше образов, чем с
             // фирменной прошивкой СМК (та нужна дискам, которые зовут её ROM-BIOS,
-            // и включается ключом --disk-rom smk). См. docs/floppy.md.
-            ok = kngmd_.loadRom(romDir_ + "/disk326.rom");
+            // и включается ключом --disk-rom smk). См. docs/floppy.md. Но драйвер
+            // НЖМД есть только в прошивке СМК — с винчестером ставим её.
+            ok = kngmd_.loadRom(romDir_ + (ide_.any() ? "/smk512.rom" : "/disk326.rom"));
         }
         if (!ok) {
             std::fprintf(stderr, "КНГМД: нет прошивки в %s (нужен smk512.rom или disk326.rom)\n",
@@ -812,6 +840,43 @@ bool Board::bootFromDisk() {
     cpu_.r[7] = Kngmd::BOOT_ENTRY;
     cpu_.psw = 0;                          // как при запуске программы из монитора:
                                            // плотный опросный цикл драйвер закрывает сам
+    return true;
+}
+
+bool Board::attachHdd(int unit, const std::string& path, bool readOnly, std::string* err) {
+    std::string why;
+    if (!ide_.drive(unit).attach(path, readOnly, unit == 1, &why)) {
+        std::fprintf(stderr, "НЖМД: %s — %s\n", path.c_str(), why.c_str());
+        if (err) *err = why;
+        return false;
+    }
+    // Прошивку контроллера выбирали без винчестера (драйвер 326) — заменить на СМК.
+    if (diskRom_.empty() && kngmd_.romLoaded() && !kngmd_.romStart()) kngmd_.unloadRom();
+    if (!controllerOn()) {
+        ide_.drive(unit).detach();
+        if (err) *err = "нет прошивки контроллера (roms/smk512.rom)";
+        return false;
+    }
+    updateMpi();
+    return true;
+}
+
+void Board::detachHdd(int unit) {
+    ide_.drive(unit).detach();
+    if (ide_.any()) return;
+    // Прошивка СМК стояла ради винчестера — вернуть драйвер 326 (его поставит
+    // следующий loadControllerRom); контроллер без дискет снять, как в detachDisk.
+    if (diskRom_.empty() && kngmd_.romStart()) kngmd_.unloadRom();
+    bool any = false;
+    for (int d = 0; d < Fdd::DRIVES; ++d) any |= kngmd_.fdd().attached(d);
+    if (bk11() && smkOn_) controllerOn();
+    else if (!any) diskOn_ = false;
+    updateMpi();
+}
+
+bool Board::bootFromHdd() {
+    if (!smkOn_ || !ide_.any() || !diskOn_ || !kngmd_.romStart()) return false;
+    reset();
     return true;
 }
 

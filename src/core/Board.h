@@ -12,6 +12,7 @@
 #include "Vm1Timing.h"
 #include "Smk.h"
 #include "Kngmd.h"
+#include "Hdd.h"
 #include "Trace.h"
 #include "Symbols.h"
 
@@ -135,6 +136,20 @@ public:
     // Передать управление автозагрузчику в ПЗУ контроллера (точка входа 0160000).
     // Монитор к этому моменту должен быть поднят — см. ensureMonitorBooted().
     bool bootFromDisk();
+
+    // Винчестер IDE платы СМК-512 (образ HDI, docs/hdd.md): unit 0 — master, 1 — slave.
+    // Регистры НЖМД 0177740–0177757 стоят на шине, пока плата установлена и подключён
+    // хотя бы один образ. Драйвер НЖМД есть только в фирменной прошивке СМК, поэтому
+    // без явного setDiskRom контроллер с винчестером получает roms/smk512.rom.
+    // readOnly: записанное БК остаётся в памяти поверх файла. Ошибка — в err.
+    bool attachHdd(int unit, const std::string& path, bool readOnly = true, std::string* err = nullptr);
+    void detachHdd(int unit);
+    bool hddAttached(int unit = 0) const { return ide_.drive(unit).attached(); }
+    const Ide& ide() const { return ide_; }
+    Ide&       ide()       { return ide_; }
+    // Загрузка с винчестера: включение питания — прошивка СМК перехватывает пуск и
+    // сама грузит систему (MBR с блока 0). false — нет платы, образа или прошивки.
+    bool bootFromHdd();
 
     // Run enough frames for the monitor ROM to initialise (vectors, stack,
     // display driver) if it hasn't yet. A game must not be started before this,
@@ -369,6 +384,7 @@ private:
     // Сигнал ВЭД платы → карта памяти 11М (окно 1 отключено в SYS/Std10/ОЗУ10/All).
     void syncSmk11() { mem_.setWindow1Off(bk11() && smkOn_ && smk_.upperRamOff()); }
     Kngmd  kngmd_;                 // контроллер НГМД: ПЗУ драйвера + 1801ВП1-128
+    Ide    ide_;                   // канал IDE платы СМК-512 (винчестеры)
     bool   diskOn_ = false;        // контроллер НГМД на шине
     uint64_t fddNextTick_ = 0;     // такт следующего поворота диска (раз в 64 мкс)
     std::string diskRom_;          // выбранная прошивка контроллера (пусто — авто)
@@ -387,6 +403,7 @@ private:
     public:
         Smk512* smk = nullptr;
         Kngmd*  fdc = nullptr;
+        Ide*    ide = nullptr;     // только вместе с smk: регистры НЖМД — узел платы
         bool empty() const { return !smk && !fdc; }
         bool mpiRead(uint16_t addr, uint16_t& value) override;
         bool mpiPeek(uint16_t addr, uint16_t& value) const override;
@@ -396,6 +413,7 @@ private:
         bool smkRam(uint16_t addr) const;      // ДОЗУ платы подключено по этому адресу?
         bool smkRomCell(uint16_t addr) const;  // здесь по Табл. 1 видно ПЗУ контроллера
         bool smkVersion(uint16_t addr, uint16_t& value) const;   // слово версии платы 0167776
+        static uint16_t hddBus(uint16_t addr, uint16_t v);      // регистр НЖМД -> шина БК
     };
     MpiMux mux_;
     void updateMpi();
