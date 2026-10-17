@@ -2627,9 +2627,11 @@ int main() {
         const std::string pe  = writeBin("bk_te.bin",  02000, {012700, 1, 0104051, 000777});
         const std::string pd  = writeBin("bk_td.bin",  02000, {000777, 0104051});
         const std::string pv  = writeBin("bk_tv.bin",  02000, {012737, 03000, 030, 0104051, 000777});
+        const std::string pbv = writeBin("bk_tbv.bin", 02000, {012737, 0152112, 030, 0104051, 000777});
         CHECK(Board::binTargetsBk11(pe) && !Board::binTargetsBk11(pd) && !Board::binTargetsBk11(pv),
               ".BIN: нечётный EMT (вызов БОС) в достижимом коде — БК-0011М; в данных или со своим EMT — нет");
-        for (const auto& p : {pe, pd, pv}) std::filesystem::remove(p);
+        CHECK(Board::binTargetsBk11(pbv), ".BIN: вектор EMT в ПЗУ БОС — не свой обработчик");
+        for (const auto& p : {pe, pd, pv, pbv}) std::filesystem::remove(p);
         Board b; b.setMachine(Machine::Bk0011m);
         if (b.loadRoms(BK_DEFAULT_ROM_DIR)) {
             b.reset();

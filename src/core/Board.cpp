@@ -1394,14 +1394,19 @@ uint16_t binEntry(uint16_t addr, const std::vector<uint8_t>& d) {
     return (w >= addr && w < end && run >= 4) ? w : addr;
 }
 
-// Ставит ли программа вектор EMT (запись по абсолютному адресу 030).
+// Ставит ли программа вектор EMT (запись по абсолютному адресу 030). MOV #n,@#30 с n в
+// ПЗУ БОС (0140000–0157777) — не свой обработчик, а восстановление вектора БОС
+// (MOV #152112,@#30, затем вызовы БОС).
 bool emtSetsOwnVector(const std::vector<uint8_t>& d) {
     for (size_t i = 0; i + 1 < d.size() / 2; ++i) {
         const uint16_t w = binWord(d, i);
         if ((w & 0170077) != 0010037) continue;           // MOV src,@#n
         const unsigned src = (w >> 6) & 077;
         const bool ext = src == 027 || src == 037 || (src >> 3) >= 6;
-        if (binWord(d, i + 1 + (ext ? 1 : 0)) == 030) return true;
+        if (binWord(d, i + 1 + (ext ? 1 : 0)) != 030) continue;
+        const uint16_t n = binWord(d, i + 1);
+        if (src == 027 && n >= 0140000 && n < 0160000) continue;
+        return true;
     }
     return false;
 }
