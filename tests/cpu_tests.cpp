@@ -2330,6 +2330,74 @@ int main() {
                       "2AY: второй чип в снимке");
                 b.reset();
                 CHECK(!b.ay2Active(), "2AY: сброс отключает второй чип");
+                // TurboSound: слово, у которого в логическом значении разряды 3–7 единичные,
+                // выбирает чип (leCSIcon, «200%»: MOV #0 / MOV #1,@#177714 — логически 0377/0376);
+                // обычный `~рег` дальше идёт в выбранный чип.
+                m.writeWord(0177714, 1);
+                ayw(0, 22);
+                CHECK(b.ay2Active() && b.ayTurboChip() == 1 && b.ayChip(1).regs()[0] == 22
+                      && b.ayChip(0).regs()[0] == 0, "2AY: TurboSound — слово 1 (логически 0376) выбирает второй чип");
+                m.writeWord(0177714, 0);
+                ayw(0, 33);
+                CHECK(b.ayTurboChip() == 0 && b.ayChip(0).regs()[0] == 33 && b.ayChip(1).regs()[0] == 22,
+                      "2AY: TurboSound — слово 0 (логически 0377) выбирает первый чип");
+                // Маска «Грифона» главнее выбора TurboSound (так пишет общий плеер leCSIcon).
+                m.writeWord(0177714, 1);
+                ayw2(040000, 0, 44);
+                CHECK(b.ayChip(0).regs()[0] == 44 && b.ayChip(1).regs()[0] == 22,
+                      "2AY: разряд 15 = 0 выбирает первый чип и после выбора TurboSound второго");
+                // Без платы на два AY выбор чипа не действует — всё в первый.
+                b.setAy2(false);
+                m.writeWord(0177714, 1);
+                ayw(0, 55);
+                ayw2(0100000, 1, 7);
+                CHECK(!b.ay2Active() && b.ayChip(0).regs()[0] == 55 && b.ayChip(0).regs()[1] == 7,
+                      "2AY выключен: выбор чипа не действует, всё идёт в первый AY");
+                b.setAy2(true);
+            }
+            // ---- Covox на 0177714 ----
+            {
+                b.reset();
+                CHECK(b.ay() && b.ay2() && b.covox(), "11М: AY, второй AY и Covox по умолчанию включены");
+                Board z;
+                z.setMachine(Machine::Bk0010);
+                CHECK(!z.ay() && !z.ay2() && !z.covox(), "БК-0010: AY, второго AY и Covox по умолчанию нет");
+                auto ayw = [&](int r, int v) {
+                    m.writeWord(0177714, static_cast<uint16_t>(~r));
+                    m.writeByte(0177714, static_cast<uint8_t>(~v));
+                };
+                for (int i = 0; i < 4; ++i) ayw(0, i);
+                CHECK(b.covoxMode() == Board::CovoxMode::AyMuted,
+                      "Covox с AY: слова вперемешку с байтами — протокол AY, ЦАП молчит");
+                for (int i = 0; i < 8; ++i) m.writeByte(0177714, static_cast<uint8_t>(0200 + i));
+                CHECK(b.covoxMode() == Board::CovoxMode::Active && b.covoxSample() == 0207,
+                      "Covox: только байты — звучит");
+                for (int i = 0; i < 8; ++i) m.writeWord(0177714, static_cast<uint16_t>(010200 + i));
+                CHECK(b.covoxMode() == Board::CovoxMode::Active && b.covoxSample() == 0207,
+                      "Covox: только слова — звучит младший байт");
+                m.writeByte(0177715, 0377);
+                CHECK(b.covoxSample() == 0207, "Covox: байт по нечётному адресу ЦАП не меняет");
+                b.setAy(false);
+                m.writeByte(0177714, 0123);
+                CHECK(b.covoxMode() == Board::CovoxMode::Active && b.covoxSample() == 0123,
+                      "Covox без AY: любая запись сразу идёт в ЦАП");
+                // Пока программа читает порт (джойстик, мышь), записи в него — не звук.
+                (void)m.readWord(0177714);
+                m.writeWord(0177714, 010);
+                CHECK(b.covoxMode() == Board::CovoxMode::PortInput, "Covox: порт опрашивают — ЦАП молчит");
+                b.runTicks(2 * 81920);
+                // Ступеньки ЦАП слышны: размах на выходе звука.
+                b.sound().clear();
+                for (int i = 0; i < 2000; ++i) {
+                    m.writeByte(0177714, static_cast<uint8_t>((i / 20) & 1 ? 0300 : 0100));
+                    b.runTicks(100);
+                }
+                std::vector<int16_t> pcm(b.sound().available());
+                pcm.resize(b.sound().read(pcm.data(), pcm.size()));
+                int lo = 0, hi = 0;
+                for (int16_t v : pcm) { lo = std::min<int>(lo, v); hi = std::max<int>(hi, v); }
+                CHECK(pcm.size() > 1000 && hi - lo > 8000, "Covox: меандр в ЦАП слышен на выходе звука");
+                b.setAy(true);
             }
             // ---- Снимок BK11ST1: ОЗУ 128К и регистры 11М ----
             {

@@ -21,6 +21,10 @@ public:
     void setAy(Ay8910* ay) { ay_ = ay; ayDc_ = 0.0; }
     // Второй чип платы на два AY (nullptr — нет); подключается на ходу, без щелчка.
     void setAy2(Ay8910* ay) { ay2_ = ay; }
+    // Covox: уровень ЦАП (-1..1), который держится до следующей записи; в отсчёт идёт
+    // среднее за его длительность. Со своим DC-блокером, как у AY.
+    void setCovox(bool on) { covox_ = on; covoxLevel_ = 0.0; covoxAcc_ = 0.0; covoxDc_ = 0.0; }
+    void setCovoxLevel(double v) { covoxLevel_ = v; }
 
     // Advance by `ticks` CPU ticks with the speaker driven to `level` (0..7).
     // Пьезодинамик БК слышит сумму ТРЁХ бит регистра 0177716 (маска 0144): бит 6 —
@@ -52,6 +56,8 @@ private:
     Ay8910* ay_ = nullptr;
     Ay8910* ay2_ = nullptr;
     double ayDc_ = 0.0;         // DC-трекер выхода AY (выход однополярный)
+    bool covox_ = false;
+    double covoxLevel_ = 0.0, covoxAcc_ = 0.0, covoxDc_ = 0.0;
     std::deque<int16_t> buf_;   // FIFO of generated samples (O(1) push/pop at both ends)
     std::mutex mtx_;
 };

@@ -542,6 +542,8 @@ void Board::setMachine(Machine m) {
     mem_.setBk11(bk11());
     syncSmk11();
     setAy(bk11());
+    setAy2(bk11());           // БК-0011М по умолчанию — с платой на два AY и Covox
+    setCovox(bk11());
     if (!romDir_.empty()) loadRoms(romDir_);
 }
 
@@ -649,8 +651,12 @@ void Board::reset() {
     if (bk11()) { mem_.setPageMap(0); apply662(); }
     else screen_.setPalette(0);
     ay_.reset(); ay2_.reset();
-    ay2Seen_ = false; aySel_ = 1;
-    sound_.setAy2(nullptr);
+    ay2Seen_ = false; aySel_ = 1; tsChip_ = 0;
+    syncSound();
+    covoxHist_ = 0; covoxN_ = 0; covoxL_ = 0200;
+    covoxMode_ = CovoxMode::Idle;
+    portReadAt_ = 0;
+    sound_.setCovoxLevel(0.0);
     vp037_.reset();
     vp037_.setM256(scroll_ & 01000);   // бит 9 — полный/малый экран
     if (smkOn_) { smk_.powerOn(); smkStartMode(); }   // включение питания: ДОЗУ чисто
@@ -1036,7 +1042,8 @@ void Board::saveState11(std::vector<uint8_t>& out) const {
     const uint16_t m11[8] = {mem_.pageMap(), reg716tap_, reg662_, static_cast<uint16_t>(vpHalf_),
                              static_cast<uint16_t>(ayOn_ ? 1 : 0), ay_.address(),
                              static_cast<uint16_t>(mem_.mstd() ? 1 : 0),
-                             static_cast<uint16_t>((ay2Seen_ ? 1 : 0) | (aySel_ << 1) | (ay2_.address() << 8))};
+                             static_cast<uint16_t>((ay2Seen_ ? 1 : 0) | (aySel_ << 1) | (tsChip_ << 3)
+                                                   | (ay2_.address() << 8))};
     put(m11, sizeof m11);
     put(ay_.regs(), 16);
     const uint16_t bus[4] = {static_cast<uint16_t>((totalTicks_ + busSkew_) % busPeriodTicks()),
@@ -1089,6 +1096,7 @@ bool Board::loadState11(const std::vector<uint8_t>& in) {
     keyHeld_  = ext[1] != 0;
     ay2Seen_ = hasAy2 && (m11[7] & 1);
     aySel_ = hasAy2 ? static_cast<uint8_t>((m11[7] >> 1) & 3) : 1;
+    tsChip_ = hasAy2 ? static_cast<uint8_t>((m11[7] >> 3) & 1) : 0;
     ay2_.reset();
     for (int r = 0; r < 16; ++r) ay2_.writeReg(static_cast<uint8_t>(r), ay2Regs[r]);
     ay2_.writeAddress(static_cast<uint8_t>((m11[7] >> 8) & 017));
@@ -1749,7 +1757,10 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
     case REG_CPU_MODE:   value = 0177740 | (cpuMode_ & 7); return true;
     case REG_CPU_IVEC:   value = 0177777; return true;     // только запись; читается как все единицы
     case REG_CPU_ERROR:  value = 0177440; return true;     // флаги сбрасываются на выборке каждой команды
-    case REG_PORT:       value = joystick_; return true;   // джойстик на парал. порту
+    case REG_PORT:                                         // джойстик на парал. порту
+        value = joystick_;
+        portReadAt_ = totalTicks_ + 1;                     // для Covox: порт опрашивают
+        return true;
     case REG_SYS: {
         if (bk11()) {
             // БК-0011М (БК-docs §20.3): старший байт — адрес пуска 0140000, бит 7 всегда 1,
@@ -1838,6 +1849,21 @@ std::string Board::aySummary(int chip) const {
 // программа для одного AY пишет `~рег` целиком, старший байт 0377 — ни один чип не
 // выбран, и GID такую запись теряет; у нас она идёт в первый чип. Второй чип
 // подключается к звуку, когда программа впервые выберет его отдельно (демо «200%»).
+void Board::setAy2(bool on) {
+    ay2On_ = on;
+    if (!on) { ay2Seen_ = false; aySel_ = 1; tsChip_ = 0; }
+    syncSound();
+}
+
+void Board::setCovox(bool on) {
+    covoxOn_ = on;
+    covoxHist_ = 0; covoxN_ = 0; covoxL_ = 0200;
+    covoxMode_ = CovoxMode::Idle;
+    sound_.setCovox(on);
+}
+
+// AY на порту: слово — номер регистра, байт — данные; линии инверсные, поэтому дальше
+// всё в «логических» значениях l = ~value.
 void Board::ayWrite(uint16_t value, uint16_t wide, bool isByte) {
     if (isByte) {
         const uint8_t d = static_cast<uint8_t>(~wide & 0377);
@@ -1845,12 +1871,53 @@ void Board::ayWrite(uint16_t value, uint16_t wide, bool isByte) {
         if (aySel_ & 2) ay2_.writeData(d);
         return;
     }
-    const bool c1 = !(value & 0100000), c2 = !(value & 040000);
-    if (c2 && !c1 && !ay2Seen_) { ay2Seen_ = true; sound_.setAy2(&ay2_); }
-    aySel_ = static_cast<uint8_t>((c1 || !c2 ? 1 : 0) | (c2 && ay2Seen_ ? 2 : 0));
-    const uint8_t a = static_cast<uint8_t>(~value & 017);
+    const uint16_t l = static_cast<uint16_t>(~value);
+    if (!ay2On_) { aySel_ = 1; ay_.writeAddress(static_cast<uint8_t>(l & 017)); return; }
+    // TurboSound: разряды 3–7 единичны — это выбор чипа (разряд 0: 1 — первый), не номер
+    // регистра (номера 0–17 с ним не пересекаются). Так его видит ПЛИС «Мультизвука».
+    if ((l & 0370) == 0370) {
+        tsChip_ = (l & 1) ? 0 : 1;
+        aySel_ = tsChip_ ? 2 : 1;
+        if (tsChip_ && !ay2Seen_) { ay2Seen_ = true; syncSound(); }
+        return;
+    }
+    // «Грифон»: разряды 15/14 слова (в логическом значении — единицы) выбирают чипы, оба —
+    // запись в оба. Ни одного — обычная запись для одного AY: в чип, выбранный TurboSound.
+    const uint16_t g = l & 0140000;
+    aySel_ = g ? static_cast<uint8_t>(((g & 0100000) ? 1 : 0) | ((g & 040000) ? 2 : 0))
+               : static_cast<uint8_t>(tsChip_ ? 2 : 1);
+    // Подмешиваем второй чип, только когда его выбрали одного: запись «в оба» делают и
+    // программы, которые пишут в порт не для AY (CSIDOS опрашивает мышь MOV #10,@#177714).
+    if (aySel_ == 2 && !ay2Seen_) { ay2Seen_ = true; syncSound(); }
+    const uint8_t a = static_cast<uint8_t>(l & 017);
     if (aySel_ & 1) ay_.writeAddress(a);
     if (aySel_ & 2) ay2_.writeAddress(a);
+}
+
+// Covox: ЦАП на линиях порта. Пока стоит и AY, ЦАП включается только после того, как
+// по ширине последних восьми записей ясно, что это не протокол AY (слова вперемешку с
+// байтами): иначе каждый выбор регистра щёлкал бы в динамике. Без AY — любая запись.
+void Board::covoxWrite(uint16_t wide, bool isByte) {
+    covoxHist_ = static_cast<uint8_t>((covoxHist_ << 1) | (isByte ? 1 : 0));
+    if (covoxN_ < 8) ++covoxN_;
+    const uint8_t mask = static_cast<uint8_t>((1u << covoxN_) - 1);
+    const uint8_t h = covoxHist_ & mask;
+    auto mute = [&](CovoxMode m) {
+        if (covoxMode_ != m) { covoxMode_ = m; sound_.setCovoxLevel(0.0); }
+    };
+    if (ayOn_ && ((h != 0 && h != mask) || covoxN_ < 4)) { mute(CovoxMode::AyMuted); return; }
+    // Covox — только выход. Программа, которая в это же время читает порт, работает с
+    // джойстиком или мышью (CSIDOS: MOV @#177714,R2 / CLR / MOV #10 — стробы мыши), и её
+    // записи — не звук: иначе опрос трещал бы в динамике.
+    if (portReadAt_ && totalTicks_ + 1 - portReadAt_ < static_cast<uint64_t>(ticksPerFrame())) {
+        mute(CovoxMode::PortInput);
+        return;
+    }
+    // ЦАП висит на младших линиях регистра порта: его меняет слово и байт по чётному
+    // адресу, а байт по нечётному — нет (как в эталонном bk, covox.c, и моно-Covox GID).
+    if (!isByte || (wide & 0377) || !(wide >> 8)) covoxL_ = static_cast<uint8_t>(wide);
+    covoxMode_ = CovoxMode::Active;
+    sound_.setCovoxLevel((covoxL_ - 128.0) / 128.0);
 }
 
 bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
@@ -1907,6 +1974,7 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // нечётному адресу приходит в старший байт, младший тогда 0 → данные 0377.
             ayWrite(value, wide, isByte);
         }
+        if (covoxOn_) covoxWrite(wide, isByte);
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
     case REG_KBD_DATA:

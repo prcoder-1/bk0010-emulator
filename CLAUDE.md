@@ -54,7 +54,7 @@ ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, ove
 `--no-smk`),
 `--hdd <img.hdi>` / `--hdd-b` / `--hdd-rw` (IDE hard disk on the СМК-512, `docs/hdd.md`),
 `--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
-for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
+for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--scanline` (per-scanline rendering — each line drawn with the palette/screen values live
 when the beam crossed it and the scroll latched for the field, driven off the `Vp037` raster; OFF by default,
 see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
@@ -228,10 +228,15 @@ Key cross-cutting facts to know before editing the CPU or screen:
 - **Speaker is 3-bit**: the piezo sums bits 6, 5 and 2 of `0177716` (mask `0144`) into 8
   levels; `Speaker::feed()` takes a level 0..7, not a bit. The AY-3-8910 (`Ay8910`, emu2149
   semantics, 1.714 MHz) is mixed into the same mono stream past the piezo RC filter; on
-  0177714 a WORD write selects the register, a BYTE write sends data, both inverted. A second
-  AY (`ay2_`) is selected by bits 15/14 = 0 of the address word (GID "Gryphon" mode); `~reg`
-  with neither bit clear goes to the first chip, and the second joins the mix only once a
-  program selects it alone (`Board::ayWrite`).
+  0177714 a WORD write selects the register, a BYTE write sends data, both inverted. The "2AY"
+  board (`--2ay`, default ON on the 11M with the AY and Covox) understands BOTH chip-select
+  protocols at once (`Board::ayWrite`): TurboSound — a word whose logical value has bits 3–7 set
+  selects the chip by bit 0 (1 = first); Gryphon — bits 15/14 = 0 of the address word (both →
+  both); a plain `~reg` goes to the TurboSound-selected chip. The second chip joins the mix only
+  once selected ALONE (CSIDOS polls the mouse with MOV #10,@#177714 = "both"). Covox (`--covox`)
+  is a mono DAC on the port's LOW byte (odd-byte writes don't touch it); it stays silent while
+  writes mix words and bytes (AY protocol, the Multizvuk auto-detect) and within a frame of a
+  read of 0177714 (joystick/mouse polling). Details in `docs/sound.md`.
 - **Interrupt gating**: reset PSW is `0340` (priority 7, masked) so the monitor ROM
   can install its vectors before the 50 Hz IRQ fires — do not reset to 0, games will
   jump to an unset vector and HALT. `Board::deliverFrameInterrupts` also refuses to

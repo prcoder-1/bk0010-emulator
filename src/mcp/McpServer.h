@@ -24,7 +24,8 @@ public:
     explicit McpServer(std::string romDir, bool smk512 = true,
                        std::string disk = {}, bool diskRw = false,
                        int machine = 1, int ay = -1,
-                       std::string hdd = {}, bool hddRw = false);
+                       std::string hdd = {}, bool hddRw = false,
+                       int ay2 = -1, int covox = -1);
 
     // Run the stdio message loop until EOF. Returns a process exit code.
     int run();

@@ -78,6 +78,9 @@ static int  g_machine = -1;
 // --ay / --no-ay: звуковой сопроцессор AY-3-8910 на 0177714. -1 — по машине
 // (на БК-0011М включён, на БК-0010 выключен) или сохранённая настройка GUI.
 static int  g_ay = -1;
+// --2ay / --no-2ay и --covox / --no-covox: второй AY (плата «2AY») и Covox на 0177714.
+// -1 — по машине (на БК-0011М включены, на БК-0010 выключены) или настройка GUI.
+static int  g_ay2 = -1, g_covox = -1;
 // --no-scanline: выключить построчную отрисовку (на БК-0011М она по умолчанию ВКЛ).
 static bool g_noScanline = false;
 // --mstd: вставить блок МСТД (ПЗУ 330) в окно 0160000 БК-0011М.
@@ -128,6 +131,8 @@ static int runHeadless(const QString& romDir, const QString& bin,
     bk::Board board;
     board.setMachine(g_machine == 0 ? bk::Machine::Bk0010 : bk::Machine::Bk0011m);
     if (g_ay >= 0) board.setAy(g_ay != 0);
+    if (g_ay2 >= 0) board.setAy2(g_ay2 != 0);
+    if (g_covox >= 0) board.setCovox(g_covox != 0);
     board.setMstd(g_mstd);
     board.setArbitration(g_arb037);
     board.setCpuPhase(g_cpuPhase);
@@ -404,6 +409,9 @@ static void printHelp(const char* prog) {
         "  --bk10, --bk11m        то же коротко\n"
         "  --ay, --no-ay          звуковой сопроцессор AY-3-8910 на порту 0177714\n"
         "                         (по умолчанию: на БК-0011М вкл, на БК-0010 выкл)\n"
+        "  --2ay, --no-2ay        второй AY — плата «2AY», выбор чипа по TurboSound и\n"
+        "                         «Грифону» (по умолчанию: на БК-0011М вкл, на БК-0010 выкл)\n"
+        "  --covox, --no-covox    Covox — ЦАП на порту 0177714 (то же по умолчанию)\n"
         "  --smk, --no-smk        блок расширения памяти СМК-512 (512 Кбайт; по умолчанию вкл)\n"
         "  --mstd                 БК-0011М: вставить тестовый блок МСТД в окно 0160000\n"
         "  --roms <каталог>       каталог ПЗУ (иначе BK_ROM_DIR или каталог при сборке)\n"
@@ -484,7 +492,7 @@ int main(int argc, char** argv) {
             bool smk = true;               // СМК-512 по умолчанию стоит
             std::string disk; bool diskRw = false;
             std::string hdd; bool hddRw = false;
-            int machine = 1, ay = -1;      // по умолчанию — БК-0011М
+            int machine = 1, ay = -1, ay2 = -1, covox = -1;   // по умолчанию — БК-0011М
             for (int j = 1; j < argc; ++j) {
                 if (std::string(argv[j]) == "--machine" && j + 1 < argc)
                     machine = std::max(0, parseMachine(QString::fromLocal8Bit(argv[j + 1])));
@@ -492,6 +500,10 @@ int main(int argc, char** argv) {
                 else if (std::string(argv[j]) == "--bk10") machine = 0;
                 else if (std::string(argv[j]) == "--ay") ay = 1;
                 else if (std::string(argv[j]) == "--no-ay") ay = 0;
+                else if (std::string(argv[j]) == "--2ay") ay2 = 1;
+                else if (std::string(argv[j]) == "--no-2ay") ay2 = 0;
+                else if (std::string(argv[j]) == "--covox") covox = 1;
+                else if (std::string(argv[j]) == "--no-covox") covox = 0;
                 if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
                 else if (std::string(argv[j]) == "--smk") smk = true;
                 else if (std::string(argv[j]) == "--no-smk") smk = false;
@@ -503,7 +515,7 @@ int main(int argc, char** argv) {
                 else if (std::string(argv[j]) == "--hdd-rw") hddRw = true;
             }
             if (!hdd.empty()) smk = true;  // винчестер — узел платы СМК-512
-            McpServer server(romDir.toStdString(), smk, disk, diskRw, machine, ay, hdd, hddRw);
+            McpServer server(romDir.toStdString(), smk, disk, diskRw, machine, ay, hdd, hddRw, ay2, covox);
             return server.run();
         }
     }
@@ -563,6 +575,10 @@ int main(int argc, char** argv) {
         else if (args[i] == "--bk11m") g_machine = 1;
         else if (args[i] == "--ay") g_ay = 1;
         else if (args[i] == "--no-ay") g_ay = 0;
+        else if (args[i] == "--2ay") g_ay2 = 1;
+        else if (args[i] == "--no-2ay") g_ay2 = 0;
+        else if (args[i] == "--covox") g_covox = 1;
+        else if (args[i] == "--no-covox") g_covox = 0;
         else if (args[i] == "--mstd") g_mstd = true;
         else if (args[i] == "--no-arb037") g_arb037 = false;
         else if (args[i] == "--cpu-phase" && i + 1 < args.size()) g_cpuPhase = args[++i].toInt() & 1;
@@ -638,7 +654,7 @@ int main(int argc, char** argv) {
         return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
                            dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList);
 
-    MainWindow w(romDir, g_smk, g_aspect34, g_machine, g_ay);
+    MainWindow w(romDir, g_smk, g_aspect34, g_machine, g_ay, g_ay2, g_covox);
     w.setScanlineOverride(g_noScanline ? 0 : g_scanline ? 1 : -1);
     w.setMstd(g_mstd);
     w.setArbitration(g_arb037);
