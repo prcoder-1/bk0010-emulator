@@ -104,6 +104,10 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
                     [this] { openDisk(0); }, QKeySequence("Ctrl+B"));
     file->addAction("Вставить образ диска в привод &B…", this, [this] { openDisk(1); });
     file->addSeparator();
+    file->addAction("Подключить &винчестер (HDI)…", this, [this] { openHdd(0); });
+    file->addAction("Подключить второй винчестер (slave)…", this, [this] { openHdd(1); });
+    file->addAction("Отключить винчестеры", this, &MainWindow::detachHdds);
+    file->addSeparator();
     file->addAction("В&ыход", this, &QWidget::close, QKeySequence::Quit);
 
     QMenu* emu = menuBar()->addMenu("&Эмуляция");
@@ -800,6 +804,46 @@ bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
                                     : " — ВНИМАНИЕ: плата СМК-512 снята, памяти может не хватить"));
     updateTitle();
     return true;
+}
+
+// Винчестер — узел платы СМК-512 (регистры НЖМД 0177740–0177757), а грузит с него
+// прошивка платы, перехватывающая пуск. Поэтому master подключается с включением
+// питания, а slave — на ходу, как вторая дискета.
+void MainWindow::openHdd(int unit) {
+    const QString path = QFileDialog::getOpenFileName(
+        this, unit ? "Подключить второй винчестер (slave)" : "Подключить винчестер",
+        lastHdd_.isEmpty() ? lastDisk_ : lastHdd_,
+        "Образы винчестеров HDI (*.hdi *.HDI *.Hdi);;Все файлы (*)");
+    if (path.isEmpty()) return;
+    attachHdd(path, unit, unit == 0);
+}
+
+bool MainWindow::attachHdd(const QString& path, int unit, bool boot) {
+    if (!board_->smk512()) { board_->setSmk512(true); syncMachineMenu(); }
+    std::string err;
+    if (!board_->attachHdd(unit, path.toStdString(), !hddRw_, &err)) {
+        status_->setText(QString("Винчестер не подключён: %1").arg(QString::fromStdString(err)));
+        return false;
+    }
+    lastHdd_ = path;
+    if (boot) { lastBin_.clear(); resetMachine(); }
+    const bk::HddDrive& d = board_->ide().drive(unit);
+    status_->setText(QString("Винчестер %1: %2 — %3/%4/%5, %6 Мбайт%7%8")
+        .arg(unit ? "slave" : "master").arg(QFileInfo(path).fileName())
+        .arg(d.cylinders()).arg(d.heads()).arg(d.sectors())
+        .arg(d.totalSectors() / 2048)
+        .arg(hddRw_ ? "" : ", только чтение (запись — в памяти)")
+        .arg(boot ? ", загрузка" : ""));
+    updateTitle();
+    return true;
+}
+
+void MainWindow::detachHdds() {
+    if (!board_->hddAttached(0) && !board_->hddAttached(1)) return;
+    board_->detachHdd(0);
+    board_->detachHdd(1);
+    resetMachine();
+    status_->setText("Винчестеры отключены, машина перезапущена");
 }
 
 void MainWindow::openMemVis() {

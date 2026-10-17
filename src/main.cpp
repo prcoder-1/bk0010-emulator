@@ -105,6 +105,10 @@ static QString g_disk, g_diskB;
 static bool    g_diskRw = false;
 static int     g_diskSides = 0;      // 0 — по размеру образа, 1 или 2 — принудительно
 static QString g_diskRom;            // --disk-rom smk|326|<файл>: прошивка контроллера
+// --hdd / --hdd-b <образ.hdi>: винчестер (master / slave) на плате СМК-512. Как и
+// дискета, по умолчанию только на чтение; --hdd-rw пишет изменения в файл.
+static QString g_hdd, g_hddB;
+static bool    g_hddRw = false;
 
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
@@ -154,6 +158,18 @@ static int runHeadless(const QString& romDir, const QString& bin,
         }
         board.bootFromDisk();
         std::printf("headless: загрузка с диска %s\n", qPrintable(g_disk));
+    }
+    // Винчестер: прошивка СМК перехватывает пуск и грузит систему с него сама, поэтому
+    // после подключения образа — включение питания.
+    if (!g_hdd.isEmpty() || !g_hddB.isEmpty()) {
+        if (!g_diskRom.isEmpty()) board.setDiskRom(g_diskRom.toStdString());
+        if (!g_hddB.isEmpty() && !board.attachHdd(1, g_hddB.toStdString(), !g_hddRw)) return 7;
+        if (!g_hdd.isEmpty() && !board.attachHdd(0, g_hdd.toStdString(), !g_hddRw)) return 7;
+        if (board.bootFromHdd())
+            std::printf("headless: загрузка с винчестера %s\n", qPrintable(g_hdd.isEmpty() ? g_hddB : g_hdd));
+        else
+            std::fprintf(stderr, "headless: винчестер подключён, но прошивка контроллера не "
+                                 "перехватывает пуск (--disk-rom?) — загрузки с него не будет\n");
     }
     if (!bin.isEmpty() && !board.loadBin(bin.toStdString(), true)) {
         std::fprintf(stderr, "headless: failed to load bin %s\n", qPrintable(bin));
@@ -229,14 +245,15 @@ static int runHeadless(const QString& romDir, const QString& bin,
         if (board.smk512()) {
             MemCanvas ca(&board);
             ca.resize(560, 640);
-            ca.smkPage = MemCanvas::SRC_SMK_ALL;
+            ca.src = MemCanvas::Src::SmkAll;
             QString allPath = memvisShot; allPath.replace(".png", "_smkall.png");
             ca.grab().save(allPath);
             std::printf("headless: wrote memvis (СМК, все 16 страниц) %s\n", qPrintable(allPath));
 
             MemCanvas cp(&board);
             cp.resize(560, 640);
-            cp.smkPage = board.smk().page();
+            cp.src = MemCanvas::Src::SmkPage;
+            cp.page = board.smk().page();
             QString pgPath = memvisShot; pgPath.replace(".png", "_smkpage.png");
             cp.grab().save(pgPath);
             std::printf("headless: wrote memvis (СМК, страница %d) %s\n",
@@ -247,6 +264,23 @@ static int runHeadless(const QString& romDir, const QString& bin,
             QString srPath = memvisShot; srPath.replace(".png", "_smkram.png");
             sr.grab().save(srPath);
             std::printf("headless: wrote ДОЗУ СМК по страницам %s\n", qPrintable(srPath));
+        }
+        // БК-0011М: всё ОЗУ (8 страниц), оно же с ПЗУ-слотами и экранная страница.
+        if (board.bk11()) {
+            auto shot11 = [&](MemCanvas::Src s, int page, bool rom, const char* suffix, const char* what) {
+                MemCanvas c(&board);
+                c.resize(560, 640);
+                c.src = s;
+                c.page = page;
+                c.hideRom = !rom;
+                QString path = memvisShot; path.replace(".png", suffix);
+                c.grab().save(path);
+                std::printf("headless: wrote memvis (%s) %s\n", what, qPrintable(path));
+            };
+            shot11(MemCanvas::Src::Bk11All, 0, false, "_11all.png", "11М, всё ОЗУ");
+            shot11(MemCanvas::Src::Bk11All, 0, true, "_11allrom.png", "11М, ОЗУ и ПЗУ");
+            shot11(MemCanvas::Src::Bk11Page, board.memory().videoPage(), false, "_11page.png",
+                   "11М, экранная страница");
         }
     }
     if (!hpShot.isEmpty()) {
@@ -357,10 +391,11 @@ static int runHeadless(const QString& romDir, const QString& bin,
 static void printHelp(const char* prog) {
     std::printf("Эмулятор-отладчик БК-0010-01 / БК-0011М\n\n"
                 "Запуск:\n"
-                "  %s [ключи] [игра.bin | диск.bkd | диск.img]\n\n", prog);
+                "  %s [ключи] [игра.bin | диск.bkd | диск.img | винчестер.hdi]\n\n", prog);
     std::fputs(
         "Позиционный аргумент: .bkd и .img (в любом регистре) — образ дискеты, с него сразу\n"
-        "идёт загрузка; любой другой файл — программа в формате .BIN (только БК-0010-01).\n"
+        "идёт загрузка; .hdi — образ винчестера (то же, что --hdd); любой другой файл —\n"
+        "программа в формате .BIN (только БК-0010-01).\n"
         "\n"
         "Машина:\n"
         "  --machine bk10|bk11m   эмулируемая машина; по умолчанию БК-0011М (в GUI — выбор\n"
@@ -378,6 +413,12 @@ static void printHelp(const char* prog) {
         "  --disk-rw              образы без защиты записи (изменения пишутся в файл)\n"
         "  --disk-sides 1|2       число сторон (по умолчанию — по размеру образа)\n"
         "  --disk-rom smk|326|<файл>  прошивка контроллера: smk512.rom, disk326.rom или своя\n"
+        "\n"
+        "Винчестер (IDE платы СМК-512, образы HDI эмулятора GID):\n"
+        "  --hdd <образ.hdi>      подключить винчестер (master) и загрузиться с него;\n"
+        "                         включает СМК-512 и её прошивку smk512.rom\n"
+        "  --hdd-b <образ.hdi>    второй винчестер (slave)\n"
+        "  --hdd-rw               изменения пишутся в файл образа (иначе — только в память)\n"
         "\n"
         "Тайминг и экран:\n"
         "  --cpu-phase 0|1        фаза такта ЦП относительно окна 037 (по умолчанию 0)\n"
@@ -404,7 +445,8 @@ static void printHelp(const char* prog) {
         "Прочее:\n"
         "  --server               MCP-сервер (JSON-RPC 2.0 по stdio) для отладки через Claude;\n"
         "                         понимает --roms, --machine, --bk10/--bk11m, --ay/--no-ay,\n"
-        "                         --smk/--no-smk, --disk, --disk-rw и позиционный образ диска\n"
+        "                         --smk/--no-smk, --disk, --disk-rw, --hdd, --hdd-rw\n"
+        "                         и позиционный образ диска или винчестера\n"
         "  --keytest              самопроверка перевода клавиш Qt в коды БК\n"
         "  -h, --help             эта справка\n"
         "\n"
@@ -440,6 +482,7 @@ int main(int argc, char** argv) {
             if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
             bool smk = true;               // СМК-512 по умолчанию стоит
             std::string disk; bool diskRw = false;
+            std::string hdd; bool hddRw = false;
             int machine = 1, ay = -1;      // по умолчанию — БК-0011М
             for (int j = 1; j < argc; ++j) {
                 if (std::string(argv[j]) == "--machine" && j + 1 < argc)
@@ -454,8 +497,12 @@ int main(int argc, char** argv) {
                 else if (std::string(argv[j]) == "--disk" && j + 1 < argc) disk = argv[j + 1];
                 else if (argv[j][0] != '-' && bk::Fdd::looksLikeImage(argv[j])) disk = argv[j];
                 else if (std::string(argv[j]) == "--disk-rw") diskRw = true;
+                else if (std::string(argv[j]) == "--hdd" && j + 1 < argc) hdd = argv[j + 1];
+                else if (argv[j][0] != '-' && bk::looksLikeHdi(argv[j])) hdd = argv[j];
+                else if (std::string(argv[j]) == "--hdd-rw") hddRw = true;
             }
-            McpServer server(romDir.toStdString(), smk, disk, diskRw, machine, ay);
+            if (!hdd.empty()) smk = true;  // винчестер — узел платы СМК-512
+            McpServer server(romDir.toStdString(), smk, disk, diskRw, machine, ay, hdd, hddRw);
             return server.run();
         }
     }
@@ -526,6 +573,9 @@ int main(int argc, char** argv) {
             g_diskRom = (v == "smk") ? "smk512.rom" : (v == "326") ? "disk326.rom" : v;
         }
         else if (args[i] == "--disk-rw") g_diskRw = true;
+        else if (args[i] == "--hdd" && i + 1 < args.size()) g_hdd = args[++i];
+        else if (args[i] == "--hdd-b" && i + 1 < args.size()) g_hddB = args[++i];
+        else if (args[i] == "--hdd-rw") g_hddRw = true;
         else if (args[i] == "--smk") g_smk = 1;
         else if (args[i] == "--no-smk") g_smk = 0;
         else if (args[i] == "--aspect34") g_aspect34 = 1;
@@ -538,6 +588,7 @@ int main(int argc, char** argv) {
         // всё остальное — игра в формате .BIN.
         else if (!args[i].startsWith("--")) {
             if (bk::Fdd::looksLikeImage(args[i].toStdString())) g_disk = args[i];
+            else if (bk::looksLikeHdi(args[i].toStdString())) g_hdd = args[i];
             else binToLoad = args[i];
         }
     }
@@ -565,6 +616,17 @@ int main(int argc, char** argv) {
                              "(отключить — ключом --no-smk)\n");
     }
 
+    // Винчестер — узел платы СМК-512: без неё регистров НЖМД на шине нет.
+    if (!g_hdd.isEmpty() || !g_hddB.isEmpty()) {
+        if (g_smk == 0) {
+            std::fprintf(stderr, "Винчестер подключается к плате СМК-512 — уберите --no-smk\n");
+            return 2;
+        }
+        if (g_smk < 0 && !smkSaved)
+            std::fprintf(stderr, "Винчестер: включён блок расширения памяти СМК-512\n");
+        g_smk = 1;
+    }
+
     if (args.contains("--keytest"))
         return runKeyTest();
 
@@ -582,6 +644,9 @@ int main(int argc, char** argv) {
     if (!g_disk.isEmpty()) w.insertDiskAndBoot(g_disk, 0);
     else if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
     if (!g_diskB.isEmpty()) w.insertDiskAndBoot(g_diskB, 1);
+    w.setHddWritable(g_hddRw);
+    if (!g_hddB.isEmpty()) w.attachHdd(g_hddB, 1, g_hdd.isEmpty());
+    if (!g_hdd.isEmpty()) w.attachHdd(g_hdd, 0, true);
 
     return app.exec();
 }

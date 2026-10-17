@@ -46,6 +46,11 @@ public:
     // --disk-rw: образы вставляются без защиты записи; изменённые пишутся обратно в
     // файл при выходе и перед заменой дискеты
     void setDiskWritable(bool on) { diskRw_ = on; }
+    // Подключить образ винчестера (HDI) к плате СМК-512: unit 0 — master, 1 — slave.
+    // boot — включить питание, чтобы прошивка платы загрузилась с винчестера. Плату
+    // ставит сама на этот запуск, если её нет (настройку не меняет).
+    bool attachHdd(const QString& path, int unit = 0, bool boot = true);
+    void setHddWritable(bool on) { hddRw_ = on; }   // --hdd-rw: изменения — в файл
 
     // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
@@ -132,6 +137,10 @@ private:
     QString lastBin_;
     QString lastDisk_;      // последний вставленный образ диска
     bool diskRw_ = false;
+    QString lastHdd_;       // последний подключённый образ винчестера
+    bool hddRw_ = false;
+    void openHdd(int unit);
+    void detachHdds();
     void saveDisks();
     BkKeymap keymap_;
     Gamepad gamepad_;           // джойстик на порту 0177714 через SDL2-геймпад

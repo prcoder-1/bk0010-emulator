@@ -111,11 +111,12 @@ bool Memory::loadRomFile(uint16_t addr, const char* path, size_t expectedLen) {
 // регистры в режиме SYS (зеркало ПЗУ) и в All (сегмент 3). Исключение —
 // периферийный блок ВМ1 0177700..0177712: его процессор читает изнутри, мимо
 // выводов AD (ad_rd = 0 в vm1_qbus.v), так что плата там ни на что не влияет.
-uint16_t Memory::busRead(uint16_t addr) {
+uint16_t Memory::busRead(uint16_t raw) {
+    const uint16_t addr = raw & ~1;
     const bool io = addr >= ADDR_IO_PAGE && io_;
     if (mpi_ && addr >= ADDR_RAM_END && !(addr >= 0177700 && addr <= 0177712)) {
         uint16_t v = 0;
-        if (mpi_->mpiRead(addr, v)) {
+        if (mpi_->mpiRead(raw, v)) {
             uint16_t r = 0;
             if (io && io_->ioRead(addr, r)) v |= r;
             return v;
@@ -135,24 +136,24 @@ uint16_t Memory::busRead(uint16_t addr) {
 }
 
 uint16_t Memory::readWord(uint16_t addr) {
-    addr &= ~1; // word access ignores the low address bit
-    if (hook_) hook_(addr, false, false);
-    return busRead(addr);
+    if (hook_) hook_(addr & ~1, false, false);
+    return busRead(addr);   // память A0 при слове не смотрит, а устройство МПИ — может
 }
 
 uint8_t Memory::readByte(uint16_t addr) {
     if (hook_) hook_(addr, false, true);
     if (addr < ADDR_RAM_END && attr_[addr >> 13] == Ram) return *at(addr);
-    const uint16_t v = busRead(addr & ~1);
+    const uint16_t v = busRead(addr);
     return (addr & 1) ? (v >> 8) : (v & 0xff);
 }
 
 // Запись в ПЗУ: на БК-0010 просто пропадает; на БК-0011М, как у GID (devemu/
 // Board.cpp:458-466), ПЗУ записи не подтверждает — зависание. Пустой блок — тоже.
 void Memory::writeWord(uint16_t addr, uint16_t value) {
+    const uint16_t raw = addr;
     addr &= ~1;
     if (hook_) hook_(addr, true, false);
-    if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiWrite(addr, value, false)) return;
+    if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiWrite(raw, value, false)) return;
     if (addr >= ADDR_IO_PAGE && io_) {
         if (io_->ioWrite(addr, value, false)) return;
         // Регистр есть, но запись в него не принимается (0177662 доступен только по
@@ -200,7 +201,7 @@ uint16_t Memory::peekWord(uint16_t addr) const {
 uint8_t Memory::peekByte(uint16_t addr) const {
     if (mpi_ && addr >= ADDR_RAM_END) {
         uint16_t v = 0;
-        if (mpi_->mpiPeek(addr & ~1, v)) return (addr & 1) ? (v >> 8) : (v & 0xff);
+        if (mpi_->mpiPeek(addr, v)) return (addr & 1) ? (v >> 8) : (v & 0xff);
     }
     return *at(addr);
 }

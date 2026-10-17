@@ -2079,6 +2079,30 @@ int main() {
             CHECK(m.readWord(0100000) == 000240 && m.readWord(0120000) == 000207,
                   "11М: ПЗУ-стр. 1 — БЕЙСИК 327 + расширение БОС 325");
             CHECK(m.readWord(0140000) == 0106427, "11М: БОС (324) на 0140000 всегда");
+            // ---- Карта блоков для визуализатора ----
+            m.writeWord(0177716, static_cast<uint16_t>(04000 | 5 << 12 | 2 << 8));
+            {
+                const int p0 = Memory::pageForCode(5), p1 = Memory::pageForCode(2);
+                const int P = static_cast<int>(Memory::PAGE11_BYTES), H = P / 2;
+                CHECK(m.blockRamOffset(0) == 0 && m.blockRamOffset(1) == H
+                   && m.blockRamOffset(2) == p0 * P && m.blockRamOffset(3) == p0 * P + H
+                   && m.blockRamOffset(4) == p1 * P && m.blockRamOffset(5) == p1 * P + H
+                   && m.blockRomSlot(4) < 0,
+                      "11М: blockRamOffset — страница 0 и страницы обоих окон");
+            }
+            CHECK(m.blockRomSlot(6) == Memory::ROM_BOS && m.blockRamOffset(6) < 0
+               && (m.mstd() || m.blockRomSlot(7) < 0),
+                  "11М: blockRomSlot — БОС в блоке 6, без МСТД блок 7 пуст");
+            m.writeWord(0177716, 04000 | 01);
+            CHECK(m.blockRomSlot(4) == Memory::ROM_BASIC2 && m.blockRomSlot(5) == Memory::ROM_BASIC3
+               && m.blockRamOffset(4) < 0, "11М: blockRomSlot — ПЗУ-стр. 0 = 328 + 329");
+            m.writeWord(0177716, 04000 | 02);
+            CHECK(m.blockRomSlot(4) == Memory::ROM_BASIC1 && m.blockRomSlot(5) == Memory::ROM_EXT,
+                  "11М: blockRomSlot — ПЗУ-стр. 1 = 327 + 325");
+            m.writeWord(0177716, 04000 | 010);
+            CHECK(m.blockRomSlot(4) < 0 && m.blockRamOffset(4) < 0 && m.blockRomSlot(5) < 0,
+                  "11М: пустая ПЗУ-стр. 2 — блоки 4/5 ни ОЗУ, ни ПЗУ");
+            m.writeWord(0177716, 04000 | 02);
             // Ленточная запись (бит 11 = 0) карту не трогает.
             m.writeWord(0177716, 0100);
             CHECK(m.window1Rom() == 1 && b.reg716tap() == 0100, "11М: бит 11 = 0 — регистр ленты/динамика");
@@ -2472,6 +2496,98 @@ int main() {
                 CHECK(txt.find("Ok") != std::string::npos, "11М+СМК без дискет: БОС доходит до БЕЙСИКа");
             }
         }
+    }
+
+    // ---- Винчестер СМК-512: образ HDI, регистры 0177740–0177757 в инверсном коде ----
+    {
+        // Синтетический образ: паспорт C/H/S = 4/2/8, слово i сектора n на диске =
+        // ~(n << 8 | i), то есть процессор должен прочитать n << 8 | i.
+        const int C = 4, H = 2, S = 8, N = C * H * S;
+        const std::string path = (std::filesystem::temp_directory_path() / "bk_cpu_tests.hdi").string();
+        {
+            std::vector<uint8_t> img((N + 1) * 512, 0);
+            auto put16 = [&](size_t off, uint16_t v) { img[off] = v & 0xff; img[off + 1] = v >> 8; };
+            put16(0, 0x045a); put16(2, C); put16(6, H); put16(12, S);
+            const char model[] = "TEST DRIVE";        // ATA: байты в слове переставлены
+            for (size_t i = 0; i + 1 < sizeof(model); ++i) img[54 + (i ^ 1)] = static_cast<uint8_t>(model[i]);
+            img[510] = 0xA5;
+            uint8_t cs = 0;
+            for (int i = 0; i < 511; ++i) cs = static_cast<uint8_t>(cs + img[i]);
+            img[511] = static_cast<uint8_t>(-cs);
+            for (int n = 0; n < N; ++n)
+                for (int i = 0; i < 256; ++i) put16((n + 1) * 512 + 2 * i, static_cast<uint16_t>(~(n << 8 | i)));
+            FILE* f = std::fopen(path.c_str(), "wb");
+            std::fwrite(img.data(), 1, img.size(), f);
+            std::fclose(f);
+        }
+        Board b; b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.setSmk512(true); b.reset();
+        Memory& m = b.memory();
+        const bool ok = b.attachHdd(0, path, true);
+        CHECK(ok && b.ide().drive(0).cylinders() == C && b.ide().drive(0).heads() == H
+              && b.ide().drive(0).sectors() == S && b.ide().drive(0).model() == "TEST DRIVE",
+              "НЖМД: паспорт HDI — геометрия и модель");
+        if (ok) {
+            auto st = [&] { return static_cast<uint8_t>(~m.readWord(0177740)); };   // статус в логике ATA
+            auto cmd = [&](uint8_t c) { m.writeWord(0177740, static_cast<uint16_t>(~c)); };
+            auto chs = [&](int c, int h, int s, int cnt) {
+                m.writeWord(0177746, static_cast<uint16_t>(~c & 0xff));
+                m.writeWord(0177744, static_cast<uint16_t>(~(c >> 8)));
+                m.writeWord(0177742, static_cast<uint16_t>(~(0240 | h)));
+                m.writeByte(0177750, static_cast<uint8_t>(~s));
+                m.writeWord(0177752, static_cast<uint16_t>(~cnt));
+            };
+            // Программный сброс так, как его делает прошивка СМК: CLR @#177743 / MOV #6,@#177743 —
+            // СЛОВОМ по нечётному адресу. Без A0 это была бы запись в регистр головки 0177742.
+            m.writeWord(0177742, static_cast<uint16_t>(~0257));   // головка 15 — чтобы было что сбросить
+            m.writeWord(0177743, 0);
+            m.writeWord(0177743, 6);
+            CHECK((st() & 0xc0) == 0x40 && static_cast<uint8_t>(~m.readWord(0177742)) == 0
+                  && static_cast<uint8_t>(~m.readWord(0177754)) == 1,
+                  "НЖМД: сброс словом в 0177743 — DRDY, регистры — сигнатура ATA");
+            CHECK(static_cast<uint8_t>(m.readByte(0177743)) == static_cast<uint8_t>(m.readWord(0177740)),
+                  "НЖМД: 0177743 по чтению — второй статус (байт по нечётному адресу)");
+            cmd(0xec);
+            bool idOk = (st() & 0x08) != 0;
+            uint16_t id[256];
+            for (int i = 0; i < 256; ++i) id[i] = static_cast<uint16_t>(~m.readWord(0177756));
+            idOk = idOk && id[1] == C && id[3] == H && id[6] == S && !(st() & 0x08);
+            CHECK(idOk, "НЖМД: IDENTIFY отдаёт паспорт из заголовка HDI, DRQ снимается");
+            // Два сектора с C/H/S = 1/1/3: LBA (1*2+1)*8+2 = 26 и следующий 27.
+            chs(1, 1, 3, 2);
+            cmd(0x20);
+            bool rd = true;
+            for (int n = 26; n <= 27; ++n)
+                for (int i = 0; i < 256; ++i) rd = rd && m.readWord(0177756) == (n << 8 | i);
+            CHECK(rd && (st() & 0x09) == 0, "НЖМД: чтение двух секторов по CHS, данные проинвертированы платой");
+            // Запись: в образ только для чтения — в память поверх файла.
+            chs(0, 0, 6, 1);                                       // LBA 5
+            cmd(0x30);
+            for (int i = 0; i < 256; ++i) m.writeWord(0177756, static_cast<uint16_t>(0123000 + i));
+            chs(0, 0, 6, 1);
+            cmd(0x20);
+            bool wr = true;
+            for (int i = 0; i < 256; ++i) wr = wr && m.readWord(0177756) == 0123000 + i;
+            uint8_t disk[2] = {0, 0};
+            if (FILE* f = std::fopen(path.c_str(), "rb")) {
+                std::fseek(f, (5 + 1) * 512, SEEK_SET);
+                if (std::fread(disk, 1, 2, f) != 2) disk[0] = disk[1] = 0;
+                std::fclose(f);
+            }
+            CHECK(wr && b.ide().drive(0).dirtySectors() == 1
+                  && static_cast<uint16_t>(disk[0] | disk[1] << 8) == static_cast<uint16_t>(~(5 << 8)),
+                  "НЖМД: запись читается обратно, а файл образа не тронут (только чтение)");
+            chs(0, 0, S + 1, 1);                                   // сектора S+1 нет
+            cmd(0x20);
+            CHECK((st() & 0x01) && (static_cast<uint8_t>(~m.readWord(0177754)) & 0x14) == 0x14,
+                  "НЖМД: сектор вне геометрии — ERR, ошибка IDNF|ABRT");
+            // Снять плату — регистров НЖМД на шине нет; поставить обратно — есть.
+            b.setSmk512(false);
+            Memory& m2 = b.memory();
+            uint16_t v = 0;
+            CHECK(!(m2.mpi() && m2.mpi()->mpiPeek(0177740, v)), "НЖМД: без платы СМК регистров 0177740 нет");
+        }
+        std::filesystem::remove(path);
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

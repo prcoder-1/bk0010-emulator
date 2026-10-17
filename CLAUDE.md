@@ -49,6 +49,7 @@ Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 MCP since 2026-10-16; `Board` itself still starts without it. On the BK-0010 it covers the BASIC
 ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, overclk — need
 `--no-smk`),
+`--hdd <img.hdi>` / `--hdd-b` / `--hdd-rw` (IDE hard disk on the СМК-512, `docs/hdd.md`),
 `--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--scanline` (per-scanline rendering — each line drawn with the palette/screen values live
@@ -295,6 +296,19 @@ Key cross-cutting facts to know before editing the CPU or screen:
   field lengths (ID = 4-5 words, data = 258) in the Soft-ICE panel and `bk_io_state`,
   plus a ring log with the CPU PC behind `{"fdd_log": true}`. Details in
   `docs/floppy.md`.
+- **Hard disk (НЖМД, IDE of the СМК-512)** — `src/core/Hdd.{h,cpp}` (`HddDrive` = ATA drive
+  ported from GID `devemu/HDD.cpp`, commands run synchronously; `Ide` = master + slave) on
+  `0177740–0177757`, wired in `Board::MpiMux` only while СМК is on AND an image is attached.
+  Images are GID's **HDI**: 512-byte IDENTIFY sector (C/H/S in words 1/3/6, `0xA5` + checksum in
+  bytes 510/511) + raw sectors stored INVERTED vs the CPU — the board's buffers invert both
+  ways (`MpiMux::hddBus`), the drive model is plain ATA. Odd `0177741`/`0177743` are separate
+  CS1 registers selected by A0 even for WORD accesses (the SMK ROM driver resets the drive with
+  `CLR @#177743`), so `Memory` passes the raw address (with A0) to `mpiRead/mpiWrite`; the mux
+  aligns it for СМК/КНГМД. The HDD driver lives only in `roms/smk512.rom`, so attaching an HDD
+  (no explicit `--disk-rom`) swaps the controller ROM to it and booting = power-on (the firmware
+  captures the start address). Read-only by default (BK writes kept in an in-memory overlay),
+  `--hdd-rw` writes through. Flags `--hdd`, `--hdd-b`, `--hdd-rw`, positional `.hdi`; MCP
+  `bk_reset {hdd, hdd_rw}`. Details in `docs/hdd.md`.
 - **`MpiDevice` has two read paths**: `mpiRead` (side effects allowed — reading
   `0177132` clears TR) for the CPU and `mpiPeek` (const, side-effect-free) for the
   debugger/disassembler/screen. `Memory::peek*` must never call `mpiRead`.
