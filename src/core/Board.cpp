@@ -124,11 +124,20 @@ void Board::beginFrameRaster(int over) {
 // кадр эмулятора выходил длиннее кадра 037 на десятки тактов, и всё, что держится за
 // таймер ВМ1 (а не за кадровое прерывание), уползало по экрану — в INSULT (часть 19)
 // полоса смены палитры за минуту доползала от бегущей строки до верха экрана. Перелёт
-// переносится в следующий кадр; если граница прошла давно (шаг в отладчике, пауза,
-// снимок) — кадр начинается заново от текущего такта.
+// переносится в следующий кадр; если граница прошла давно или ещё не наступила (шаг в
+// отладчике, пауза, снимок, останов в загрузчике) — кадр начинается заново.
 void Board::beginFrame() {
     const uint64_t T = static_cast<uint64_t>(ticksPerFrame());
-    const uint64_t start = (totalTicks_ >= frameEnd_ && totalTicks_ - frameEnd_ < T) ? frameEnd_ : totalTicks_;
+    uint64_t start = frameEnd_;
+    if (totalTicks_ < frameEnd_ || totalTicks_ - frameEnd_ >= T) {
+        // Окна 037 и развёртку ведут одни и те же счётчики 037, так что фаза окон
+        // относительно луча постоянна: новый кадр начинается на том же такте периода
+        // окон, что и от сброса, иначе тайминг раскладки по строкам зависел бы от того,
+        // где прервали прогон (останов в загрузчике, отладчик).
+        const uint64_t P = static_cast<uint64_t>(busPeriodTicks());
+        const uint64_t r = (totalTicks_ + static_cast<uint64_t>(busSkew_)) % P;
+        start = totalTicks_ >= r ? totalTicks_ - r : totalTicks_;
+    }
     frameEnd_ = start + T;
     beginFrameRaster(static_cast<int>(totalTicks_ - start));
     deliverFrameInterrupts();
@@ -466,6 +475,7 @@ int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks, bool f
     };
     int64_t ref;
     bool fast;
+    bool anyDram = false;
     if (fromWait) {
         // Выход из WAIT по прерыванию: процессор стоит без предвыборки, и запись PSW в
         // стек идёт сразу. RTL ВМ1 (vm1_qbus.v, plm23_fc[2] «WAIT opcode, check irq
@@ -478,13 +488,21 @@ int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks, bool f
         const int64_t c = done(base + busFrac_, 'R', cls[0]);   // выборка
         ref = c + T + (T / 2) * (cls[0] != BusDram ? prevTeFast_ : prevTeDram_);  // старт микрокода
         fast = cls[0] != BusDram;
+        anyDram = !fast;
     }
     for (int i = 0; i < s.n; ++i) {
         const int gap = s.op[i].gap + (fast ? s.op[i].xf : 0);
         ref = done(ref + (T / 2) * gap, s.op[i].kind, cls[1 + i]);
         fast = cls[1 + i] != BusDram;
+        if (i < s.n - 1 && !fast) anyDram = true;
     }
-    const int64_t next = ref + (T / 2) * (s.tail + (fast ? s.pfXf : 0));
+    // БК-0011М: команда, которая после обмена с ДОЗУ кончается быстрой записью
+    // (MOV #n,(R0) и MOVB (R1)+,(R0) в порт 0177714), заканчивается на такт раньше —
+    // так у OneChipBook, откалиброванного по замерам на БК-0011М, и у RTL ВМ1 с
+    // мгновенным RPLY (хвост после быстрой записи ~11 полутактов). Иначе такая команда
+    // теряет лишнее окно 037. Без обмена с ДОЗУ (всё в СМК) — прежний хвост: замеры F/G.
+    const bool fastWAfterDram = bk11() && anyDram && s.n > 0 && fast && s.op[s.n - 1].kind == 'W';
+    const int64_t next = ref + (T / 2) * (s.tail + (fast ? s.pfXf : 0)) - (fastWAfterDram ? T : 0);
     prevTeDram_ = s.early ? 2 : 0;
     prevTeFast_ = s.teFast;
     busFrac_ = static_cast<int>(next % T);
