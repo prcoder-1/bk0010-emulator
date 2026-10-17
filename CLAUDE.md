@@ -10,8 +10,8 @@ game files. Also emulates the **BK-0011M** — the DEFAULT machine of the app (G
 saved choice, headless, MCP server), with the AY on; a `.BIN` without an explicit machine (CLI,
 GUI «Файл», MCP `bk_load`) picks it itself — `Board::binTargetsBk11`: writes 0177662/3 and neither
 polls it as the keyboard (CMP/BIT/TST) nor sets vector 4 more than once, OR an odd-numbered EMT
-(a BOS call) within the first 48 instructions reachable from the entry (no own EMT vector 030)
-→ BK-0011M, else BK-0010 (13 11M demos, 0/571 BK-0010 programs). `Board`
+(a BOS call) within the first 48 instructions reachable from the entry (no own EMT vector 030; `MOV #n,@#30` with n in the BOS ROM 0140000–0157777 is BOS's, not own)
+→ BK-0011M, else BK-0010 (14 11M demos, 0/571 BK-0010 programs). `Board`
 itself still defaults to the BK-0010 (tests rely on it). The 11M is selected via the menu «Машина», `--machine bk11m`, MCP
 `bk_reset {machine}`; it has 4 MHz, 128 KB paged RAM, BOS ROMs, 16 palettes switchable
 mid-frame, the AY-3-8910 on 0177714 — see `docs/bk0011m.md`. See `README.md` for the user-facing feature list and hotkeys, and
