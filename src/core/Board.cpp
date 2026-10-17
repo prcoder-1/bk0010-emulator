@@ -1,4 +1,5 @@
 #include "Board.h"
+#include "Disasm.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -1343,6 +1344,88 @@ bool readBin(const std::string& path, uint16_t& addr, std::vector<uint8_t>& data
 }
 }
 
+namespace {
+uint16_t binWord(const std::vector<uint8_t>& d, size_t i) {
+    return 2 * i + 1 < d.size() ? static_cast<uint16_t>(d[2 * i] | (d[2 * i + 1] << 8)) : 0;
+}
+
+// Точка входа .BIN. Обычно — адрес загрузки. Но есть игры с автозапуском через
+// затирание стека: монитор держит SP=01000, а его файловый EMT 36 расходует стек в
+// области ниже 01000 (trap кладёт PSW+PC, дальше вложенные JSR). Такая игра грузится
+// в 0760 и ЗАЛИВАЕТ весь этот «доадресный» слот [addr,01000) копиями своего
+// стартового адреса — тогда финальный RTS/RTI монитора снимает со стека не адрес
+// возврата, а этот адрес, и «возврат» уходит прямо в игру. Формат .BIN хранить
+// стартовый адрес отдельно не умеет, а мы грузим без EMT 36, поэтому берём его сами.
+// Признак — ДЛИННЫЙ ПРОГОН одинаковых слов с начала, указывающих внутрь образа:
+// одиночное слово-код (BOLDER грузится в 0606, там MOV #1000,SP) от повторяющегося
+// адреса-заливки (BIL: 001000 ×61, VALLEY/БАТИСКАФ ×8) так и отличаем.
+uint16_t binEntry(uint16_t addr, const std::vector<uint8_t>& d) {
+    if (addr >= 01000 || d.size() < 2) return addr;
+    const uint16_t w = binWord(d, 0);
+    const uint32_t end = static_cast<uint32_t>(addr) + d.size();
+    int run = 0;
+    for (uint32_t a = addr; a < 01000 && binWord(d, (a - addr) / 2) == w; a += 2) ++run;
+    return (w >= addr && w < end && run >= 4) ? w : addr;
+}
+
+// Ставит ли программа вектор EMT (запись по абсолютному адресу 030).
+bool emtSetsOwnVector(const std::vector<uint8_t>& d) {
+    for (size_t i = 0; i + 1 < d.size() / 2; ++i) {
+        const uint16_t w = binWord(d, i);
+        if ((w & 0170077) != 0010037) continue;           // MOV src,@#n
+        const unsigned src = (w >> 6) & 077;
+        const bool ext = src == 027 || src == 037 || (src >> 3) >= 6;
+        if (binWord(d, i + 1 + (ext ? 1 : 0)) == 030) return true;
+    }
+    return false;
+}
+
+// Есть ли в начале кода, достижимого от точки входа, EMT с нечётным номером. Обход по
+// переходам: ветвления, SOB, JMP/JSR по адресу (@#n и относительный), конец ветви —
+// RTS/RTI/RTT/HALT/безусловный переход. Длину команды даёт дизассемблер.
+bool reachableOddEmt(const std::vector<uint8_t>& d, uint16_t addr) {
+    Memory m;
+    for (size_t i = 0; i < d.size(); ++i) m.pokeByte(static_cast<uint16_t>(addr + i), d[i]);
+    const uint32_t lo = addr, hi = addr + static_cast<uint32_t>(d.size());
+    std::vector<bool> seen(d.size() / 2 + 1, false);
+    std::vector<uint16_t> todo{binEntry(addr, d)};
+    auto push = [&](uint32_t t) { if (t >= lo && t + 1 < hi && !(t & 1)) todo.push_back(static_cast<uint16_t>(t)); };
+    // Программа для 11М зовёт БОС в самом начале (режим экрана, цвета): в выборке — на
+    // 4–33-й команде обхода. Дальше обход чаще забредает в данные.
+    for (int budget = 48; !todo.empty() && budget > 0; ) {
+        uint16_t pc = todo.back(); todo.pop_back();
+        while (pc >= lo && pc + 1u < hi && !seen[(pc - lo) / 2] && budget-- > 0) {
+            seen[(pc - lo) / 2] = true;
+            const uint16_t w = m.peekWord(pc);
+            const DisasmLine dl = disasm(m, pc);
+            if (!dl.text.compare(0, 5, ".WORD")) break;          // недопустимый код — это данные
+            const int words = dl.words;
+            const uint16_t next = static_cast<uint16_t>(pc + 2 * words);
+            if (w >= 0104000 && w <= 0104377) { if (w & 1) return true; pc = next; continue; }
+            if (w == 0 || w == 2 || w == 6 || (w & 0177770) == 0000200) break;   // HALT, RTI, RTT, RTS
+            const int off = static_cast<int8_t>(w & 0377) * 2;
+            if ((w & 0177400) == 0000400) { push(pc + 2 + off); break; }        // BR
+            const uint16_t br = w & 0177400;
+            if ((br >= 0001000 && br <= 0003400) || (br >= 0100000 && br <= 0103400)) {
+                push(pc + 2 + off);                                              // Bxx
+                pc = next; continue;
+            }
+            if ((w & 0177000) == 0077000) { push(pc + 2 - 2 * (w & 077)); pc = next; continue; }  // SOB
+            const bool jmp = (w & 0177700) == 0000100, jsr = (w & 0177000) == 0004000;
+            if (jmp || jsr) {
+                const unsigned dst = w & 077;
+                const uint16_t x = m.peekWord(static_cast<uint16_t>(pc + 2));
+                if (dst == 037) push(x);
+                else if (dst == 067) push(static_cast<uint16_t>(pc + 4 + x));
+                if (jmp) break;
+            }
+            pc = next;
+        }
+    }
+    return false;
+}
+}
+
 bool Board::binTargetsBk11(const std::string& path) {
     uint16_t addr = 0;
     std::vector<uint8_t> d;
@@ -1391,9 +1474,16 @@ bool Board::binTargetsBk11(const std::string& path) {
     // Программа для БК-0010 туда не пишет вовсе. Программы для ОБЕИХ машин пишут, но
     // либо опрашивают 0177662 как регистр клавиатуры БК-0010 (CMP/BIT/TST), либо
     // пробуют запись под ловушкой — ставят вектор 4 вокруг каждой пробы. Программе
-    // только для 11М ни то ни другое не нужно. По выборке: 10 из 10 демо для 11М и ни
-    // одной из 571 программы для БК-0010.
-    return writes662 > 0 && tests662 == 0 && vec4 <= 1;
+    // только для 11М ни то ни другое не нужно.
+    if (writes662 > 0 && tests662 == 0 && vec4 <= 1) return true;
+    // Второй признак — вызов БОС: EMT с нечётным номером (51 — режим экрана, 53 — цвета,
+    // 57 — позиция курсора…). У монитора БК-0010 номера только чётные (4…50, дальше —
+    // входы ПЗУ дисковода), и программа для неё нечётный EMT не выполнит. Слова вида
+    // EMT часто встречаются в данных, поэтому смотрим только код, достижимый от точки
+    // входа, и не смотрим вовсе, если программа ставит свой обработчик EMT (вектор 030):
+    // тогда номера её собственные. Так опознаётся «bad tape» (reddie, MF2025), которая
+    // палитру пишет через регистр, а экран рисует вызовами БОС.
+    return emtSetsOwnVector(d) ? false : reachableOddEmt(d, addr);
 }
 
 // БОС 324: BIT #100,@#177716 / BEQ — нажата клавиша — в монитор (0140376).
@@ -1427,31 +1517,7 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
     if (run) {
         cpu_.clearHalt();
         cpu_.clearWait();
-        // Обычно точка входа = адрес загрузки. Но есть игры с автозапуском через
-        // затирание стека: монитор держит SP=01000, а его файловый EMT 36 расходует
-        // стек в области ниже 01000 (trap кладёт PSW+PC, дальше вложенные JSR). Такая
-        // игра грузится в 0760 и ЗАЛИВАЕТ весь этот «доадресный» слот [addr,01000)
-        // копиями своего стартового адреса — тогда финальный RTS/RTI монитора снимает
-        // со стека не адрес возврата, а этот адрес, и «возврат» уходит прямо в игру.
-        // Формат .BIN хранить стартовый адрес отдельно не умеет, а мы грузим прямым
-        // poke (без EMT 36), поэтому берём его сами. Признак приёма — именно ЗАЛИВКА:
-        // все слова [addr,01000) одинаковы и указывают внутрь образа. Иначе (обычная
-        // программа ниже 01000, напр. BOLDER грузится в 0606 и там реальный код —
-        // MOV #1000,SP) точка входа = адрес загрузки. Примеры заливки: VALLEY (→01000),
-        // БАТИСКАФ (→036576), BIL (→01000).
-        // Признак заливки — не «весь слот одинаков» (у BIL последние слова слота иные),
-        // а ДЛИННЫЙ ПРОГОН одинаковых слов с начала: одиночное слово-код (BOLDER) от
-        // повторяющегося адреса-заливки (BIL: 001000 ×61, VALLEY/БАТИСКАФ ×8) так и
-        // отличаем.
-        uint16_t start = addr;
-        if (addr < 01000) {
-            const uint16_t w = mem_.peekWord(addr);
-            const uint32_t end = static_cast<uint32_t>(addr) + got;
-            int run = 0;                          // длина прогона одинаковых слов с addr
-            for (uint16_t a = addr; a < 01000 && mem_.peekWord(a) == w; a += 2) ++run;
-            if (w >= addr && w < end && run >= 4) // адрес-заливка внутрь образа
-                start = w;                        // автозапуск через затирание стека
-        }
+        const uint16_t start = binEntry(addr, data);
         cpu_.r[7] = start; // точка входа
         // Стек — как у пускового монитора (100260: MOV #1000,SP), откуда программу и
         // запускают. Иначе SP остаётся от того, где стоял монитор или Бейсик в момент
