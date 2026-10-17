@@ -7,8 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A BK-0010-01 (Soviet PDP-11 clone, K1801VM1 CPU) emulator-debugger in C++17/Qt6
 with OpenGL screen output and a Soft-ICE style debugger. Loads and runs `.BIN`
 game files. Also emulates the **BK-0011M** — the DEFAULT machine of the app (GUI without a
-saved choice, headless, MCP server), with the AY on; a `.BIN` on the command line without
-`--machine` runs on the BK-0010, and MCP `bk_load` switches to the BK-0010 by itself. `Board`
+saved choice, headless, MCP server), with the AY on; a `.BIN` without an explicit machine (CLI,
+GUI «Файл», MCP `bk_load`) picks it itself — `Board::binTargetsBk11`: writes 0177662/3 and neither
+polls it as the keyboard (CMP/BIT/TST) nor sets vector 4 more than once → BK-0011M, else BK-0010
+(10/10 11M demos, 0/571 BK-0010 programs). `Board`
 itself still defaults to the BK-0010 (tests rely on it). The 11M is selected via the menu «Машина», `--machine bk11m`, MCP
 `bk_reset {machine}`; it has 4 MHz, 128 KB paged RAM, BOS ROMs, 16 palettes switchable
 mid-frame, the AY-3-8910 on 0177714 — see `docs/bk0011m.md`. See `README.md` for the user-facing feature list and hotkeys, and
@@ -108,8 +110,12 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `{1,5,2,3,4,7,0,6}`), 0177716 writes (bit 11 = 1 memory map, 0 tape/speaker/STOP lock),
   0177662 writes (palette, screen page 5/6, bit 14 = 1 DISABLES the 0100 frame IRQ — on the
   0010 that write must stay a bus error, the СМК firmware relies on it), start address
-  0140000, ROM writes trap (vector 4) and empty ROM sockets trap on read, no EMT 36 intercept,
-  no `.BIN` loading. СМК-512 works on the 11M too: its ВЭД signal (modes SYS/Std10/ОЗУ10/All)
+  0140000, ROM writes trap (vector 4) and empty ROM sockets trap on read, no EMT 36 intercept.
+  `.BIN` on the 11M = what the BOS monitor does for «L», «R6/1000», «G»: power-on with a key
+  held (BOS checks it at 0140376 and drops into its monitor), the file into the USER page map
+  `040402` (014400) — NOT `0114`, which is BOS's copy of the write-only 0177716 and holds the
+  system 054002 while BOS runs — then `040420=01000` and BOS's own «addrG» at 0141060 (R3 = addr).
+  СМК-512 works on the 11M too: its ВЭД signal (modes SYS/Std10/ОЗУ10/All)
   disconnects the 11M window 1 (`Memory::setWindow1Off`, driven by `Smk512::setModeHook`),
   without the SMK firmware image the board starts (power-on, СТОП) in Std11 the way the
   firmware would, and the floppy controller stays on the bus even with no disks — BOS probes
@@ -117,9 +123,14 @@ Key cross-cutting facts to know before editing the CPU or screen:
   byte writes (the odd byte goes to the high half, as in GID).
 - **The emulator frame starts at the frame IRQ** (`Vp037::syncToLine`): on the BK-0010 at the
   037 nVSYNC pulse, line 277 (21st blanking line, RTL `va_037.v:239-241`), 43 lines before the
-  field; on the BK-0011M at line 257 (`Vp037::IRQ11_LINE`, one line after blanking starts, 63
-  lines before the field) — fitted to Prince of Persia's title screen, whose SOB-timed palette
-  switches land on the art boundaries (rows 130/221) only there; nVSYNC put them 20 lines low.
+  field; on the BK-0011M at VGATE + 452 CLKIN = line 256, CLKIN 324 (`Vp037::IRQ11_LINE`,
+  `IRQ11_CLKIN`; VGATE rises at line 255 word 32) — the board's WTI/SYNCO missing-pulse detector,
+  traced and measured on the 037 netlist in OneChipBook (`src/peripheral/bk_evnt.sv`). Babylona
+  (mid-line palette, self-calibrating screen) needs it to the word; Prince of Persia's SOB-timed
+  switches (rows 130/221) stay in blanking. Babylona still shows one 037 window early (right frame
+  line of its calibration red) — unexplained, do not "fix" by moving the IRQ without evidence.
+  An interrupt taken FROM WAIT has no discarded prefetch (VM1 RTL: IRQ2 at 0 → PSW push SYNC at 9,
+  vs 19 mid-stream): `Board::busStep(…, fromWait)`.
   `Vp037::fieldLine()` is the field line within the current frame (negative before the field);
   per-scanline rendering uses it, and a write to 0177662/0177664 first finishes the current line
   up to `lineWord()` (`Board::flushRaster`, `Screen::renderSpan`). Inside an instruction such a

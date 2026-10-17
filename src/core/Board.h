@@ -319,8 +319,21 @@ public:
 
     // Load a .BIN file (4-byte header: load addr + length, little-endian).
     // If `run`, sets PC to the load address. Returns false on error.
+    // БК-0011М: с `run` — как на живой машине с магнитофона: включение питания с
+    // удерживаемой клавишей (БОС сразу уходит в клавиатурный монитор), затем команды
+    // монитора «L», «R6/1000» и «G»: файл — в распределение страниц пользователя
+    // (040402), SP = 01000, пуск кодом самой БОС. Без `run` файл кладётся в текущую карту.
     bool loadBin(const std::string& path, bool run,
                  uint16_t* outAddr = nullptr, uint16_t* outLen = nullptr);
+    // Программа для БК-0011М? Признак — запись в регистр 0177662/0177663 (палитра,
+    // экранная страница, таймер 11М): на БК-0010 этот регистр только читается, запись
+    // в него — «зависание». Программы для обеих машин тоже пишут, но они узнаются (см.
+    // реализацию) и остаются на БК-0010. Нужен, когда машину не задали явно.
+    static bool binTargetsBk11(const std::string& path);
+    // БК-0011М: включение питания с удерживаемой клавишей — БОС сразу уходит в
+    // клавиатурный монитор (БК-docs §20.8), не пробуя дисковод и не поднимая Бейсик.
+    // false — проверки клавиши в БОС не нашли (не та машина или не то ПЗУ).
+    bool bootBosMonitor();
 
     // Accessors
     Cpu&    cpu()    { return cpu_; }
@@ -390,6 +403,8 @@ private:
     std::string diskRom_;          // выбранная прошивка контроллера (пусто — авто)
     std::string romDir_;           // откуда грузили ПЗУ — оттуда же берём прошивку НГМД
     bool loadControllerRom();      // прошивка контроллера (diskRom_ или disk326.rom)
+    bool loadBin11(uint16_t addr, const std::vector<uint8_t>& data, bool run,
+                   uint16_t* outAddr, uint16_t* outLen);
 
     // На шине МПИ могут быть оба устройства сразу — блок расширения памяти и
     // контроллер НГМД, — поэтому обращения разводит мультиплексор.
@@ -471,10 +486,12 @@ private:
     int  busTicks(uint16_t ir, int tableTicks);   // время команды (модель шины или таблица)
     bool mapAccesses(const Vm1Sched& s, int& from, uint8_t* cls) const;
     // Время по модели шины от момента `ticks` (в тактах ЦП, без busSkew_).
-    int  busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks);
+    // fromWait: вход в прерывание из WAIT — выборки нет (см. busStep).
+    int  busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks, bool fromWait = false);
     // Вход в прерывание по обменам acc_[from..]; `pc` — адрес отброшенной предвыборки.
     int  enterInterrupt(uint16_t vector, bool iako);
-    int  interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks);
+    int  interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks,
+                        bool fromWait = false);
 
     Machine machine_ = Machine::Bk0010;
     int cpuFreqHz_ = 3000000;   // тактовая частота ЦП

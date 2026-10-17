@@ -93,8 +93,8 @@ void Board::timerCheck() {
 }
 
 // Граница кадра эмулятора — момент кадрового прерывания: на БК-0010 синхроимпульс
-// 037 (nVSYNC, 21-я строка гашения, до поля 43 строки), на БК-0011М — 2-я строка
-// кадрового гашения (до поля 63 строки). Видимые строки предыдущего кадра к этому времени уже
+// 037 (nVSYNC, 21-я строка гашения, до поля 43 строки), на БК-0011М — VGATE + 452 CLKIN,
+// строка 256, CLKIN 324 (Vp037::IRQ11_CLKIN). Видимые строки предыдущего кадра к этому времени уже
 // пройдены, так что дорисовываем хвост и начинаем новый кадр с нулевой строки.
 void Board::beginFrameRaster(int over) {
     if (scanlineRender_) {
@@ -107,6 +107,7 @@ void Board::beginFrameRaster(int over) {
     // начала кадрового гашения (снято по заставке Prince of Persia), на БК-0010 — на
     // nVSYNC (RTL 037).
     vp037_.syncToLine(bk11() ? Vp037::IRQ11_LINE : Vp037::VSYNC_LINE);
+    if (bk11()) vp037_.tick(Vp037::IRQ11_CLKIN);
     vpHalf_ = 0;
     // Граница кадра пришлась на середину команды: луч уже ушёл от неё на `over` тактов.
     if (over > 0) {
@@ -450,7 +451,7 @@ bool Board::mapAccesses(const Vm1Sched& s, int& from, uint8_t* cls) const {
 // чтении-модификации-записи). Так считает eCat3, и это даёт таблицу СМК-512. ПЗУ на
 // чтении отвечает на kRomReadExtra четвертей позже, ЦП видит RPLY на фронте своего
 // полутакта. Параметры БК-0011М подобраны по замерам Manwe (docs/bk0011m.md).
-int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks) {
+int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks, bool fromWait) {
     constexpr int64_t T = 12, Q = 3;              // такт и четверть такта в U
     const int64_t base = static_cast<int64_t>(ticks + static_cast<uint64_t>(busSkew_)) * T;
     const int64_t win = busWinU(), phi = busPhaseU();
@@ -462,9 +463,21 @@ int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks) {
         d += ((phi - d) % win + win) % win;
         return ceilTo(d + busRespU_, T);
     };
-    int64_t c = done(base + busFrac_, 'R', cls[0]);        // выборка
-    int64_t ref = c + T + (T / 2) * (cls[0] != BusDram ? prevTeFast_ : prevTeDram_);  // старт микрокода
-    bool fast = cls[0] != BusDram;
+    int64_t ref;
+    bool fast;
+    if (fromWait) {
+        // Выход из WAIT по прерыванию: процессор стоит без предвыборки, и запись PSW в
+        // стек идёт сразу. RTL ВМ1 (vm1_qbus.v, plm23_fc[2] «WAIT opcode, check irq
+        // only»): фронт IRQ2 на такте 0 — DOUT первой записи на такте 10, то есть запрос
+        // через 17 полутактов; при паузе W11 старт микрокода — через 6 полутактов.
+        // Посреди потока команд тот же вход начинается с отброшенной предвыборки.
+        ref = base + (T / 2) * 6;
+        fast = false;
+    } else {
+        const int64_t c = done(base + busFrac_, 'R', cls[0]);   // выборка
+        ref = c + T + (T / 2) * (cls[0] != BusDram ? prevTeFast_ : prevTeDram_);  // старт микрокода
+        fast = cls[0] != BusDram;
+    }
     for (int i = 0; i < s.n; ++i) {
         const int gap = s.op[i].gap + (fast ? s.op[i].xf : 0);
         ref = done(ref + (T / 2) * gap, s.op[i].kind, cls[1 + i]);
@@ -479,13 +492,14 @@ int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks) {
 
 // Вход в прерывание по шине. Обмены — от acc_[from]; если их нет или они не те
 // (вектор не установлен и т.п.), остаётся `tableTicks` (-1 — сообщить вызывающему).
-int Board::interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks) {
+int Board::interruptTicks(bool iako, uint16_t pc, int from, uint64_t ticks, int tableTicks,
+                          bool fromWait) {
     Vm1Sched s;
     vm1InterruptSchedule(iako, s);
     uint8_t cls[1 + 7];
     cls[0] = busClass(pc, false);
     if (!mapAccesses(s, from, cls) || from != nAcc_) return tableTicks;
-    return busStep(s, cls, ticks);
+    return busStep(s, cls, ticks, fromWait);
 }
 
 // Evaluate a breakpoint's optional condition (unconditional breakpoints allow).
@@ -1252,10 +1266,11 @@ void Board::deliverFrameInterrupts() {
 // Вход в прерывание: IRQ2 и СТОП — по фиксированному вектору, клавиатура — векторное
 // с циклом IAKO. С моделью шины время считается по шаблону входа (Vm1Timing.h).
 int Board::enterInterrupt(uint16_t vector, bool iako) {
-    const uint16_t pc = static_cast<uint16_t>(cpu_.pc() + (cpu_.waiting() ? 2 : 0));
+    const bool fromWait = cpu_.waiting();
+    const uint16_t pc = static_cast<uint16_t>(cpu_.pc() + (fromWait ? 2 : 0));
     nAcc_ = 0;
     const int t = cpu_.interrupt(vector);
-    return arb037_ ? interruptTicks(iako, pc, 0, totalTicks_, t) : t;
+    return arb037_ ? interruptTicks(iako, pc, 0, totalTicks_, t, fromWait) : t;
 }
 
 // Возвращает стоимость входа в прерывание в тактах (0, если ничего не выдано).
@@ -1313,21 +1328,98 @@ int Board::stepInstruction() {
     return t;
 }
 
-bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16_t* outLen) {
-    if (bk11()) {
-        std::fprintf(stderr, "loadBin: загрузка .BIN на БК-0011М пока не поддерживается\n");
-        return false;
-    }
+namespace {
+// .BIN: адрес загрузки, длина, данные. false — файла нет или он пуст.
+bool readBin(const std::string& path, uint16_t& addr, std::vector<uint8_t>& data) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) { std::fprintf(stderr, "loadBin: cannot open '%s'\n", path.c_str()); return false; }
     uint8_t hdr[4];
     if (std::fread(hdr, 1, 4, f) != 4) { std::fclose(f); return false; }
-    uint16_t addr = hdr[0] | (hdr[1] << 8);
-    uint16_t len  = hdr[2] | (hdr[3] << 8);
-    std::vector<uint8_t> data(len);
-    size_t got = std::fread(data.data(), 1, len, f);
+    addr = static_cast<uint16_t>(hdr[0] | (hdr[1] << 8));
+    data.resize(static_cast<size_t>(hdr[2] | (hdr[3] << 8)));
+    data.resize(std::fread(data.data(), 1, data.size(), f));
     std::fclose(f);
-    if (got == 0) return false;
+    return !data.empty();
+}
+}
+
+bool Board::binTargetsBk11(const std::string& path) {
+    uint16_t addr = 0;
+    std::vector<uint8_t> d;
+    if (!readBin(path, addr, d)) return false;
+    const size_t n = d.size() / 2;
+    auto word = [&](size_t i) { return i < n ? static_cast<uint16_t>(d[2 * i] | (d[2 * i + 1] << 8)) : 0; };
+    // У операнда есть своё слово: #n, @#n, X(Rn), @X(Rn).
+    auto extra = [](unsigned m) { const unsigned mode = m >> 3, reg = m & 7;
+                                  return (reg == 7 && (mode == 2 || mode == 3)) || mode == 6 || mode == 7; };
+    int writes662 = 0, tests662 = 0, vec4 = 0;
+    // Каждое слово пробуем как начало команды: данные внутри кода совпадение с
+    // «запись @#177662» дают разве что случайно.
+    for (size_t i = 0; i < n; ++i) {
+        const uint16_t w = word(i);
+        int srcAbs = -1, dstAbs = -1;            // абсолютный адрес @#n у источника / приёмника
+        bool writes = false, tests = false;
+        switch (w & 0070000 ? w & 0170000 : 0) {
+        case 0010000: case 0110000:              // MOV, MOVB
+        case 0040000: case 0140000:              // BIC, BICB
+        case 0050000: case 0150000:              // BIS, BISB
+        case 0060000: case 0160000:              // ADD, SUB
+            writes = true; [[fallthrough]];
+        case 0020000: case 0120000:              // CMP, CMPB
+        case 0030000: case 0130000: {            // BIT, BITB
+            tests = !writes;
+            const unsigned src = (w >> 6) & 077;
+            if (src == 037) srcAbs = word(i + 1);
+            if ((w & 077) == 037) dstAbs = word(i + 1 + (extra(src) ? 1 : 0));
+            break;
+        }
+        default:
+            if ((w & 077) != 037) break;
+            switch (w & 0177700) {
+            case 0005000: case 0105000: case 0005100: case 0105100:   // CLR, COM
+            case 0005200: case 0105200: case 0005300: case 0105300:   // INC, DEC
+            case 0005400: case 0105400: case 0000300:                 // NEG, SWAB
+                writes = true; dstAbs = word(i + 1); break;
+            case 0005700: case 0105700:                               // TST
+                tests = true; dstAbs = word(i + 1); break;
+            }
+        }
+        if (writes && dstAbs >= 0 && (dstAbs | 1) == 0177663) ++writes662;
+        if (writes && dstAbs == 4) ++vec4;
+        if (tests && ((srcAbs | 1) == 0177663 || (dstAbs | 1) == 0177663)) ++tests662;
+    }
+    // Программа для БК-0010 туда не пишет вовсе. Программы для ОБЕИХ машин пишут, но
+    // либо опрашивают 0177662 как регистр клавиатуры БК-0010 (CMP/BIT/TST), либо
+    // пробуют запись под ловушкой — ставят вектор 4 вокруг каждой пробы. Программе
+    // только для 11М ни то ни другое не нужно. По выборке: 10 из 10 демо для 11М и ни
+    // одной из 571 программы для БК-0010.
+    return writes662 > 0 && tests662 == 0 && vec4 <= 1;
+}
+
+// БОС 324: BIT #100,@#177716 / BEQ — нажата клавиша — в монитор (0140376).
+static constexpr uint16_t BOS_KEY_CHECK = 0140376;
+
+bool Board::bootBosMonitor() {
+    if (!bk11()) return false;
+    reset();
+    setKeyHeld(true);                     // разряд 6 регистра 0177716: клавиша нажата
+    bool hit = false;
+    for (int tries = 0; tries < 300 && !hit; ++tries) {
+        runUntil(BOS_KEY_CHECK, static_cast<int>(ticksPerFrame()));
+        hit = cpu_.pc() == BOS_KEY_CHECK;
+    }
+    if (hit) { stepInstruction(); stepInstruction(); }   // BIT и BEQ — уже в монитор
+    setKeyHeld(false);
+    for (int i = 0; i < 25; ++i) runFrame();             // монитор печатает «@» и ждёт
+    return hit;
+}
+
+bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16_t* outLen) {
+    uint16_t addr = 0;
+    std::vector<uint8_t> data;
+    if (!readBin(path, addr, data)) return false;
+    const size_t got = data.size();
+    if (bk11()) return loadBin11(addr, data, run, outAddr, outLen);
     for (size_t i = 0; i < got; ++i)
         mem_.pokeByte(static_cast<uint16_t>(addr + i), data[i]);
     if (outAddr) *outAddr = addr;
@@ -1367,6 +1459,52 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
         // сама, затирает свой код (45com-lo).
         cpu_.r[6] = 01000;
     }
+    return true;
+}
+
+// Загрузка на БК-0011М так, как это делает монитор БОС (ПЗУ 324). Ячейка 0114 —
+// копия регистра памяти (сам 0177716 только пишется): пока работает БОС, там системное
+// распределение 054002; распределение пользователя монитор держит в 040402 (014400:
+// окно 0 — экранная страница 5, окно 1 — страница 4), его регистры — в 040404..040424
+// (R0, R1-R5, SP, PC, PSW). «L» читает файл через .BMB10 в распределение пользователя,
+// «R6/1000» пишет 040420, а «адресG» — это 0141060 с адресом в R3: PC пользователя,
+// вектор 4, палитра, распределение страниц и RTT. Его и выполняем, кодом самой БОС.
+static constexpr uint16_t BOS_G_ADDR = 0141060;   // «адресG»: BIT #1,R3 / MOV R3,40422 …
+static constexpr uint16_t BOS_USER_MAP = 040402, BOS_USER_SP = 040420;
+
+bool Board::loadBin11(uint16_t addr, const std::vector<uint8_t>& data, bool run,
+                      uint16_t* outAddr, uint16_t* outLen) {
+    const bool monitor = run && bootBosMonitor();
+    if (run && !monitor)
+        std::fprintf(stderr, "loadBin: БОС не дошла до монитора — пуск без него\n");
+    const uint16_t sysMap = mem_.pageMap();
+    const uint16_t userMap = mem_.peekWord(BOS_USER_MAP);
+    if (run && (userMap & 04000)) mem_.writeWord(0177716, userMap);   // разряд 11 — регистр памяти
+    size_t skipped = 0;
+    for (size_t i = 0; i < data.size(); ++i) {
+        const uint16_t a = static_cast<uint16_t>(addr + i);
+        // ПЗУ и пустые розетки .BMB10 не пишет (ошибка 3 — недопустимый диапазон).
+        if (!mem_.isRam(a)) { ++skipped; continue; }
+        mem_.pokeByte(a, data[i]);
+    }
+    if (skipped)
+        std::fprintf(stderr, "loadBin: %zu байт приходятся не на ОЗУ (ПЗУ или регистры) — пропущены\n", skipped);
+    if (outAddr) *outAddr = addr;
+    if (outLen)  *outLen  = static_cast<uint16_t>(data.size());
+    if (!run) return true;
+    cpu_.clearHalt();
+    cpu_.clearWait();
+    if (monitor) {
+        mem_.writeWord(0177716, sysMap | 04000);          // монитор работает в своей карте
+        mem_.pokeWord(BOS_USER_SP, 01000);                 // R6/1000
+        cpu_.r[3] = addr;                                  // адресG
+        cpu_.r[7] = BOS_G_ADDR;
+        if (runUntil(addr, static_cast<int>(ticksPerFrame()) * 4) && cpu_.pc() == addr) return true;
+        std::fprintf(stderr, "loadBin: команда G монитора не дошла до %06o — пуск напрямую\n", addr);
+    }
+    if (userMap & 04000) mem_.writeWord(0177716, userMap);
+    cpu_.r[6] = 01000;
+    cpu_.r[7] = addr;
     return true;
 }
 

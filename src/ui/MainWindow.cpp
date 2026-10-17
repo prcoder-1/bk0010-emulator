@@ -550,14 +550,17 @@ void MainWindow::openBin() {
 
 bool MainWindow::loadBinFromPath(const QString& path) {
     uint16_t addr = 0, len = 0;
+    // Машину выбирает программа: пишет в регистр 0177662 (палитра и экран 11М) —
+    // БК-0011М, иначе БК-0010-01. Сохранённый выбор машины это не меняет.
+    const bool want11 = bk::Board::binTargetsBk11(path.toStdString());
+    if (want11 != board_->bk11()) setMachine(want11 ? 1 : 0, false);
     // The monitor ROM must have initialised before a game is started; when a bin
     // is passed on the command line this happens before the 50 Hz timer has run
-    // a single frame, so boot it here first.
+    // a single frame, so boot it here first. (На БК-0011М монитор БОС поднимает сам
+    // loadBin.)
     board_->ensureMonitorBooted();
     if (!board_->loadBin(path.toStdString(), true, &addr, &len)) {
-        QMessageBox::warning(this, "БК", board_->bk11()
-            ? QString("Загрузка .BIN на БК-0011М пока не поддерживается: %1").arg(path)
-            : QString("Не удалось загрузить %1").arg(path));
+        QMessageBox::warning(this, "БК", QString("Не удалось загрузить %1").arg(path));
         return false;
     }
     lastBin_ = path;
@@ -605,9 +608,9 @@ void MainWindow::syncMachineMenu() {
     smkAction_->setChecked(board_->smk512());
 }
 
-void MainWindow::setMachine(int m) {
+void MainWindow::setMachine(int m, bool persist) {
     const bool want11 = m == 1;
-    QSettings().setValue("machine", want11 ? 1 : 0);
+    if (persist) QSettings().setValue("machine", want11 ? 1 : 0);
     if (want11 == board_->bk11()) { syncMachineMenu(); return; }
     saveDisks();
     board_->setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);

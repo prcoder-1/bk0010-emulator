@@ -322,8 +322,13 @@ QJsonArray McpServer::toolDefs() const {
 
     t.append(tool("bk_load", "Load a .BIN game/program (boots the monitor first) and start it. "
                   "Use frames to run it right away, and reset=true when loading a second game "
-                  "so its trace/hotspot data is not mixed with the previous one.",
+                  "so its trace/hotspot data is not mixed with the previous one. The machine is picked "
+                  "by the program unless `machine` is given: one that writes the 0177662 register "
+                  "(БК-0011М palette/screen) runs on bk11m, anything else on bk10. On bk11m the load "
+                  "goes like the BOS monitor's L / R6/1000 / G: power-on with a key held (BOS drops into "
+                  "its monitor), the file into the user memory map, SP=01000, PSW from the monitor.",
         schema({{"path", P("string", "Path to the .BIN file")},
+                {"machine", P("string", "\"bk10\" or \"bk11m\" (default: chosen by the program)")},
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
                 {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
                 {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
@@ -912,10 +917,20 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
 
     if (name == "bk_load") {
         if (!romsOk_) return fail("ROMs not loaded from " + QString::fromStdString(romDir_));
-        // .BIN грузится только на БК-0010-01; сервер по умолчанию — БК-0011М, поэтому
-        // загрузка программы сама переключает машину (как bk_reset {"machine":"bk10"}).
+        // Машину выбирает программа (запись в 0177662 — БК-0011М), если её не задали явно.
+        const QString path = args.value("path").toString();
+        bool want11 = bk::Board::binTargetsBk11(path.toStdString());
+        if (args.contains("machine")) {
+            const QString m = args.value("machine").toString().toLower();
+            want11 = m.contains("11");
+            if (!want11 && !m.contains("10")) return fail("machine must be \"bk10\" or \"bk11m\"");
+        }
         QString switched;
-        if (switchMachine(false)) switched = "Машина переключена на БК-0010-01 (.BIN грузится только туда). ";
+        if (switchMachine(want11))
+            switched = QString("Машина переключена на %1%2. ")
+                .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
+                .arg(args.contains("machine") ? QString() : want11
+                     ? QString(" (программа пишет в регистр 0177662)") : QString());
         if (args.value("reset").toBool(false)) {
             board_.reset();          // заодно сбрасывает трассу: данные двух игр не смешиваются
             cyrState_ = false;
