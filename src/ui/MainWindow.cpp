@@ -38,18 +38,15 @@
 #include <cstdio>
 
 MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverride,
-                       int machineOverride, int ayOverride, QWidget* parent)
+                       int machineOverride, int ayOverride, int ay2Override, int covoxOverride,
+                       QWidget* parent)
     : QMainWindow(parent) {
     board_ = std::make_unique<bk::Board>();
     // Машина: настройка запоминается между запусками, --machine перекрывает её.
     const int machine = machineOverride >= 0 ? machineOverride
                                              : QSettings().value("machine", 1).toInt();
     board_->setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
-    {
-        const bool ay = ayOverride >= 0 ? ayOverride > 0
-            : QSettings().value(board_->bk11() ? "ay11m" : "ay10", board_->bk11()).toBool();
-        board_->setAy(ay);
-    }
+    applySoundSettings(ayOverride, ay2Override, covoxOverride);
     applyScanline();
     // Блок расширения памяти СМК-512: настройка запоминается между запусками,
     // ключ --smk/--no-smk перекрывает её на один запуск.
@@ -143,6 +140,12 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     ayAction_ = mach->addAction("Звуковой сопроцессор &AY-3-8910 / YM2149 (порт 0177714)");
     ayAction_->setCheckable(true);
     connect(ayAction_, &QAction::toggled, this, [this](bool on) { setAy(on); });
+    ay2Action_ = mach->addAction("Второй AY — плата «&2AY» (TurboSound / «Грифон»)");
+    ay2Action_->setCheckable(true);
+    connect(ay2Action_, &QAction::toggled, this, [this](bool on) { setAy2(on); });
+    covoxAction_ = mach->addAction("&Covox — ЦАП на порту 0177714");
+    covoxAction_->setCheckable(true);
+    connect(covoxAction_, &QAction::toggled, this, [this](bool on) { setCovox(on); });
     mach->addSeparator();
     // Джойстик: геймпад через SDL2, порт 0177714. Раскладка выбирается — у БК их две
     // (несовместимые). Если геймпад подключён — покажем его имя в подменю.
@@ -599,12 +602,15 @@ void MainWindow::applyScanline() {
 }
 
 void MainWindow::syncMachineMenu() {
-    for (QAction* a : {machine10Action_, machine11Action_, ayAction_, smkAction_})
+    for (QAction* a : {machine10Action_, machine11Action_, ayAction_, ay2Action_, covoxAction_, smkAction_})
         if (!a) return;
-    QSignalBlocker b1(machine10Action_), b2(machine11Action_), b3(ayAction_), b4(smkAction_);
+    QSignalBlocker b1(machine10Action_), b2(machine11Action_), b3(ayAction_), b4(smkAction_),
+                   b5(ay2Action_), b6(covoxAction_);
     machine10Action_->setChecked(!board_->bk11());
     machine11Action_->setChecked(board_->bk11());
     ayAction_->setChecked(board_->ay());
+    ay2Action_->setChecked(board_->ay2());
+    covoxAction_->setChecked(board_->covox());
     smkAction_->setChecked(board_->smk512());
 }
 
@@ -614,7 +620,7 @@ void MainWindow::setMachine(int m, bool persist) {
     if (want11 == board_->bk11()) { syncMachineMenu(); return; }
     saveDisks();
     board_->setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
-    board_->setAy(QSettings().value(want11 ? "ay11m" : "ay10", want11).toBool());
+    applySoundSettings();
     // Плата — своя настройка у каждой машины (на БК-0011М её ставят реже).
     board_->setSmk512(QSettings().value(smkKey(), true).toBool());
     applyScanline();
@@ -625,10 +631,34 @@ void MainWindow::setMachine(int m, bool persist) {
     status_->setText(QString("Машина: %1 — перезапущена").arg(QString::fromUtf8(bk::Board::machineName(board_->machine()))));
 }
 
+// Звук — по настройкам этой машины (по умолчанию на БК-0011М всё включено: AY, второй
+// AY и Covox, на БК-0010-01 — ничего); ключи командной строки перекрывают их на запуск.
+void MainWindow::applySoundSettings(int ayOverride, int ay2Override, int covoxOverride) {
+    const bool b11 = board_->bk11();
+    auto pick = [&](int ovr, const char* base) {
+        return ovr >= 0 ? ovr > 0 : QSettings().value(soundKey(base), b11).toBool();
+    };
+    board_->setAy(pick(ayOverride, "ay"));
+    board_->setAy2(pick(ay2Override, "ay2_"));
+    board_->setCovox(pick(covoxOverride, "covox"));
+}
+
 void MainWindow::setAy(bool on) {
     board_->setAy(on);
-    QSettings().setValue(board_->bk11() ? "ay11m" : "ay10", on);
+    QSettings().setValue(soundKey("ay"), on);
     status_->setText(on ? "Звуковой сопроцессор AY-3-8910 подключён" : "Звуковой сопроцессор AY-3-8910 снят");
+}
+
+void MainWindow::setAy2(bool on) {
+    board_->setAy2(on);
+    QSettings().setValue(soundKey("ay2_"), on);
+    status_->setText(on ? "Второй AY подключён (плата «2AY»: TurboSound и «Грифон»)" : "Второй AY снят");
+}
+
+void MainWindow::setCovox(bool on) {
+    board_->setCovox(on);
+    QSettings().setValue(soundKey("covox"), on);
+    status_->setText(on ? "Covox подключён к порту 0177714" : "Covox снят");
 }
 
 void MainWindow::setPixelAspect34(bool on) {

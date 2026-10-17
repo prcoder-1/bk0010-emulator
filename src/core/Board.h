@@ -193,13 +193,28 @@ public:
     // при пуске отдаёт ему управление — по умолчанию блок не вставлен.
     void setMstd(bool on) { mem_.setMstd(on); }
     // Звуковой сопроцессор AY-3-8910 / YM2149 на параллельном порту 0177714.
-    void setAy(bool on) {
-        ayOn_ = on; sound_.setAy(on ? &ay_ : nullptr); sound_.setAy2(on && ay2Seen_ ? &ay2_ : nullptr);
-    }
+    void setAy(bool on) { ayOn_ = on; syncSound(); }
+    // Плата на два AY («2AY», docs/sound.md). Чип выбирается двумя способами сразу,
+    // как их понимают программы для обеих плат (leCSIcon, «200%»): TurboSound — слово,
+    // у которого в логическом значении разряды 3–7 единичные, разряд 0 выбирает чип
+    // (1 — первый); «Грифон» — разряды 15/14 слова адреса (0 — чип выбран). Выключено —
+    // всё идёт в первый чип, как на плате с одним AY.
+    void setAy2(bool on);
+    bool ay2() const { return ay2On_; }
+    // Covox — 8-разрядный ЦАП на младших линиях порта 0177714 (вывод у эмулятора моно,
+    // стерео «Мультизвука» не моделируется). Вместе с AY — автоопределение этой карты:
+    // слова и байты вперемешку — протокол AY, ЦАП молчит; молчит он и пока программа
+    // читает порт (джойстик, мышь).
+    void setCovox(bool on);
+    bool covox() const { return covoxOn_; }
+    enum class CovoxMode { Off, Idle, AyMuted, PortInput, Active };
+    CovoxMode covoxMode() const { return covoxOn_ ? covoxMode_ : CovoxMode::Off; }
+    uint8_t covoxSample() const { return covoxL_; }      // младший байт регистра порта
     const Ay8910& ayChip(int chip = 0) const { return chip ? ay2_ : ay_; }
     Ay8910&       ayChip(int chip = 0)       { return chip ? ay2_ : ay_; }
     bool ay() const { return ayOn_; }
-    bool ay2Active() const { return ayOn_ && ay2Seen_; }   // программа обратилась ко второму AY
+    bool ay2Active() const { return ayOn_ && ay2On_ && ay2Seen_; }   // программа обратилась ко второму AY
+    int  ayTurboChip() const { return tsChip_; }                     // выбор TurboSound: 0 — первый
 
     // True while an unread code sits in the register (ready flag set).
     bool keyReady() const { return (kbdStatus_ & 0200) != 0; }
@@ -597,13 +612,26 @@ private:
 
     Speaker sound_;
     Ay8910  ay_;                // звуковой сопроцессор на 0177714 (если ayOn_)
-    // Второй AY: плата «2AY» с выбором чипа разрядами 15/14 слова адреса (режим
-    // «Грифон» в GID). ay2Seen_ — программа хоть раз выбрала его отдельно: до этого
-    // всё идёт в первый чип, как на плате с одним AY.
+    // Второй AY платы «2AY» (если ay2On_). ay2Seen_ — программа хоть раз выбрала его:
+    // до этого он не подмешивается, и одиночный AY звучит в полную громкость.
     Ay8910  ay2_;
+    bool    ay2On_ = false;
     bool    ay2Seen_ = false;
     uint8_t aySel_ = 1;         // выбранные чипы: бит 0 — первый, бит 1 — второй
+    uint8_t tsChip_ = 0;        // чип, выбранный по TurboSound (0 — первый)
     void ayWrite(uint16_t value, uint16_t wide, bool isByte);
+    void syncSound() {
+        sound_.setAy(ayOn_ ? &ay_ : nullptr);
+        sound_.setAy2(ayOn_ && ay2On_ && ay2Seen_ ? &ay2_ : nullptr);
+    }
+    // Covox на 0177714.
+    bool    covoxOn_ = false;
+    CovoxMode covoxMode_ = CovoxMode::Idle;
+    uint8_t covoxHist_ = 0;     // ширина последних записей в порт: 1 — байт
+    uint8_t covoxN_ = 0;        // сколько записей в истории (до 8)
+    uint8_t covoxL_ = 0200;     // младший байт регистра порта — то, что слышит ЦАП
+    uint64_t portReadAt_ = 0;   // такт последнего чтения 0177714 + 1 (0 — не читали)
+    void covoxWrite(uint16_t wide, bool isByte);
     Trace   trace_;
 };
 

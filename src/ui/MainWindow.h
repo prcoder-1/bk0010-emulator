@@ -33,10 +33,12 @@ public:
     // перезаписывает: настройка меняется только переключателем в меню).
     // aspectOverride — то же для неквадратных пикселей БК (--aspect34/--no-aspect34).
     // machineOverride: 0 — БК-0010-01, 1 — БК-0011М, -1 — сохранённая настройка;
-    // ayOverride — звуковой сопроцессор (-1 — настройка этой машины).
+    // ayOverride — звуковой сопроцессор (-1 — настройка этой машины); ay2Override и
+    // covoxOverride — то же для второго AY (плата «2AY») и Covox.
     explicit MainWindow(const QString& romDir, int smkOverride = -1,
                         int aspectOverride = -1, int machineOverride = -1,
-                        int ayOverride = -1, QWidget* parent = nullptr);
+                        int ayOverride = -1, int ay2Override = -1, int covoxOverride = -1,
+                        QWidget* parent = nullptr);
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
@@ -61,6 +63,8 @@ public:
     // настройка сохраняется между запусками.
     void setMachine(int m, bool persist = true);   // persist — запомнить выбор в настройках
     void setAy(bool on);                // звуковой сопроцессор AY-3-8910 на 0177714
+    void setAy2(bool on);               // второй AY (плата «2AY»: TurboSound / «Грифон»)
+    void setCovox(bool on);             // Covox — ЦАП на 0177714
     // Построчная отрисовка: -1 — по машине (БК-0011М — вкл), 0/1 — принудительно.
     void setScanlineOverride(int v) { scanlineOverride_ = v; applyScanline(); }
     void setMstd(bool on) { if (board_ && on != board_->memory().mstd()) { board_->setMstd(on); resetMachine(); } }
@@ -128,6 +132,11 @@ private:
     QAction* machine10Action_ = nullptr;   // радиопункты меню «Машина»
     QAction* machine11Action_ = nullptr;
     QAction* ayAction_ = nullptr;          // галка «AY-3-8910»
+    QAction* ay2Action_ = nullptr;         // галка «второй AY»
+    QAction* covoxAction_ = nullptr;       // галка «Covox»
+    // Ключи настроек звука — свои у каждой машины; по умолчанию всё включено на 11М.
+    QString soundKey(const char* base) const { return QString(base) + ((board_ && board_->bk11()) ? "11m" : "10"); }
+    void applySoundSettings(int ayOverride = -1, int ay2Override = -1, int covoxOverride = -1);
     int  scanlineOverride_ = -1;
     // Ключ настройки «плата СМК-512 стоит» — свой у каждой машины.
     QString smkKey() const { return (board_ && board_->bk11()) ? "smk512_11m" : "smk512"; }

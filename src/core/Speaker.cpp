@@ -45,6 +45,7 @@ void Speaker::feed(int level, int ticks) {
         filtered_ += (target - filtered_) * a;
         if (ay_) ay_->advance(take / sampleRate_);
         if (ay_ && ay2_) ay2_->advance(take / sampleRate_);
+        if (covox_) covoxAcc_ += covoxLevel_ * take;
         acc_  += take;
         span  -= take;
         if (acc_ < 1.0) break;                            // отсчёт ещё не набран
@@ -58,6 +59,13 @@ void Speaker::feed(int level, int ticks) {
                                    : ay_->takeSample() * 28000.0;
             ayDc_ += (ay - ayDc_) * dcRc;
             v += ay - ayDc_;
+        }
+        if (covox_) {
+            // Полная шкала ЦАП — ±16000: громко, но с запасом под AY и пищалку.
+            const double cv = covoxAcc_ * 16000.0;
+            covoxAcc_ = 0.0;
+            covoxDc_ += (cv - covoxDc_) * dcRc;
+            v += cv - covoxDc_;
         }
         if (v > 32767.0) v = 32767.0; else if (v < -32767.0) v = -32767.0;
         const int16_t smp = static_cast<int16_t>(v);

@@ -83,10 +83,12 @@ static bool parseNumber(const QJsonValue& v, long& out) {
 }
 
 McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool diskRw,
-                     int machine, int ay, std::string hdd, bool hddRw)
+                     int machine, int ay, std::string hdd, bool hddRw, int ay2, int covox)
     : romDir_(std::move(romDir)) {
     board_.setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
     if (ay >= 0) board_.setAy(ay != 0);
+    if (ay2 >= 0) board_.setAy2(ay2 != 0);
+    if (covox >= 0) board_.setCovox(covox != 0);
     // На БК-0011М палитра меняется по ходу кадра — экран рисуется построчно.
     board_.setScanlineRender(board_.bk11());
     romsOk_ = board_.loadRoms(romDir_);
@@ -118,15 +120,27 @@ bool McpServer::switchMachine(bool want11) {
     return true;
 }
 
+static const char* covoxModeName(bk::Board::CovoxMode m) {
+    switch (m) {
+    case bk::Board::CovoxMode::Off:     return "выкл";
+    case bk::Board::CovoxMode::Idle:    return "записей не было";
+    case bk::Board::CovoxMode::AyMuted: return "молчит — в порт идёт протокол AY";
+    case bk::Board::CovoxMode::PortInput: return "молчит — порт опрашивают (джойстик, мышь)";
+    case bk::Board::CovoxMode::Active:  return "звучит";
+    }
+    return "";
+}
+
 QString McpServer::machineText() {
     const bool b11 = board_.bk11();
     QString s = QString("Машина: %1, ЦП %2 МГц, кадр %3 тактов (%4 Гц). AY-3-8910 %5, СМК-512 %6, "
-                        "отрисовка %7.")
+                        "отрисовка %7. Второй AY (2AY) %8, Covox %9.")
         .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
         .arg(board_.cpuFreqHz() / 1000000).arg(board_.ticksPerFrame())
         .arg(board_.frameRateHz(), 0, 'f', 2)
         .arg(board_.ay() ? "вкл" : "выкл").arg(board_.smk512() ? "вкл" : "выкл")
-        .arg(board_.scanlineRender() ? "по лучу" : "покадровая");
+        .arg(board_.scanlineRender() ? "по лучу" : "покадровая")
+        .arg(board_.ay2() ? "вкл" : "выкл").arg(board_.covox() ? "вкл" : "выкл");
     if (board_.diskAttached(0)) s += QString(" Дискета A: %1.").arg(QString::fromStdString(board_.diskPath(0)));
     for (int u = 0; u < bk::Ide::DRIVES; ++u)
         if (board_.hddAttached(u))
@@ -354,6 +368,8 @@ QJsonArray McpServer::toolDefs() const {
                   "firmware) and boots from it; an empty string detaches it.",
         schema({{"machine", P("string", "\"bk10\" or \"bk11m\" (default: keep)")},
                 {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: keep)")},
+                {"ay2", P("boolean", "Second AY (\"2AY\" board: TurboSound and Gryphon chip select) on/off (default: keep)")},
+                {"covox", P("boolean", "Covox DAC on 0177714 on/off (default: keep)")},
                 {"cpu_phase", P("integer", "CPU clock phase vs the 037 window, 0 or 1 (default: keep)")},
                 {"smk", P("boolean", "СМК-512 memory board on/off (default: keep)")},
                 {"disk", P("string", "Floppy image (.bkd/.img) to insert into drive 0 and boot; \"\" = eject (default: keep)")},
@@ -367,9 +383,12 @@ QJsonArray McpServer::toolDefs() const {
                   "ROMs, 3/4 MHz clock, memory map and per-scanline rendering change, RAM is cleared and the CPU "
                   "starts from the ROM (switching to the current model does nothing). An inserted floppy stays "
                   "in drive A and is booted (BOS boots it on the 11M by itself). The AY chip follows the "
-                  "machine's default (on for bk11m) unless `ay` is given. .BIN programs load only on bk10.",
+                  "machine's default (on for bk11m) unless `ay` is given; so do the second AY (`ay2`, \"2AY\" "
+                  "board) and the Covox DAC (`covox`) — both on for bk11m by default.",
         schema({{"machine", P("string", "\"bk10\" (БК-0010-01) or \"bk11m\" (БК-0011М); omit to just report")},
                 {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: the machine's default when switching, else keep)")},
+                {"ay2", P("boolean", "Second AY (\"2AY\") on/off (default: the machine's default when switching, else keep)")},
+                {"covox", P("boolean", "Covox DAC on 0177714 on/off (default: the machine's default when switching, else keep)")},
                 {"frames", P("integer", "Run this many frames after switching (default 0)")}})));
     t.append(tool("bk_run", "Run frames (with 50 Hz interrupts) until a breakpoint, HALT, or the frame "
                   "limit. `input` scripts keyboard/joystick over time, so a whole control sequence "
@@ -1003,6 +1022,8 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             }
         }
         if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
+        if (args.contains("ay2")) board_.setAy2(args.value("ay2").toBool());
+        if (args.contains("covox")) board_.setCovox(args.value("covox").toBool());
         RunOutcome r;
         const int frames = args.value("frames").toInt(0);
         if (frames > 0) r = runFrames(frames);
@@ -1017,6 +1038,8 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             switchMachine(want11);
         }
         if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
+        if (args.contains("ay2")) board_.setAy2(args.value("ay2").toBool());
+        if (args.contains("covox")) board_.setCovox(args.value("covox").toBool());
         if (args.contains("cpu_phase")) board_.setCpuPhase(args.value("cpu_phase").toInt());
         if (args.contains("smk")) {
             // Повторное включение — как установка платы в выключенную машину: ДОЗУ с нуля
@@ -2051,6 +2074,9 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                          : QString())
         + (board_.ay() ? QString("\n  AY-3-8910 %1").arg(QString::fromStdString(board_.aySummary())) : QString())
         + (board_.ay2Active() ? QString("\n  AY №2     %1").arg(QString::fromStdString(board_.aySummary(1))) : QString())
+        + (board_.ay() && board_.ay2() ? QString("\n  2AY       выбор TurboSound: AY№%1").arg(board_.ayTurboChip() + 1) : QString())
+        + (board_.covox() ? QString("\n  Covox     %1, отсчёт %2")
+                                .arg(covoxModeName(board_.covoxMode())).arg(oct6(board_.covoxSample())) : QString())
         + (board_.diskControllerOn() ? fddState() : QString())
         + (board_.ide().any() ? hddState() : QString())
         + ((board_.diskControllerOn() && args.value("fdd_log").toBool())
