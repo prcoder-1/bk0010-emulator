@@ -930,7 +930,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             switched = QString("Машина переключена на %1%2. ")
                 .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
                 .arg(args.contains("machine") ? QString() : want11
-                     ? QString(" (программа пишет в регистр 0177662)") : QString());
+                     ? QString(" (программа для неё: палитра 0177662 или вызовы БОС)") : QString());
         if (args.value("reset").toBool(false)) {
             board_.reset();          // заодно сбрасывает трассу: данные двух игр не смешиваются
             cyrState_ = false;

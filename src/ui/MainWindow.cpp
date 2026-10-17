@@ -550,7 +550,7 @@ void MainWindow::openBin() {
 
 bool MainWindow::loadBinFromPath(const QString& path) {
     uint16_t addr = 0, len = 0;
-    // Машину выбирает программа: пишет в регистр 0177662 (палитра и экран 11М) —
+    // Машину выбирает программа (Board::binTargetsBk11): палитра 0177662 или вызовы БОС —
     // БК-0011М, иначе БК-0010-01. Сохранённый выбор машины это не меняет.
     const bool want11 = bk::Board::binTargetsBk11(path.toStdString());
     if (want11 != board_->bk11()) setMachine(want11 ? 1 : 0, false);
