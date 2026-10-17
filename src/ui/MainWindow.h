@@ -59,7 +59,7 @@ public:
     void setPixelAspect34(bool on);     // пиксель БК блоком 4x3 точек хоста
     // Смена машины — как включение другой машины: ПЗУ, частота, карта памяти;
     // настройка сохраняется между запусками.
-    void setMachine(int m);
+    void setMachine(int m, bool persist = true);   // persist — запомнить выбор в настройках
     void setAy(bool on);                // звуковой сопроцессор AY-3-8910 на 0177714
     // Построчная отрисовка: -1 — по машине (БК-0011М — вкл), 0/1 — принудительно.
     void setScanlineOverride(int v) { scanlineOverride_ = v; applyScanline(); }

@@ -2232,8 +2232,11 @@ int main() {
                 m.pokeWord(01000, 000777);
                 b.cpu().reset(01000, 0340);
                 b.runFrameSlice(0, 100000);
-                CHECK(b.vp037().fieldLine() == -63 && b.vp037().scanline() == Vp037::IRQ11_LINE,
-                      "11М: кадр (и прерывание 0100) — через строку после начала гашения, за 63 строки до поля");
+                // Схема платы (детектор пропадания WTI, OneChipBook bk_evnt.sv): IRQ2 через
+                // 452 CLKIN после подъёма VGATE (строка 255, слово 32) — строка 256, слово 40.
+                CHECK(b.vp037().fieldLine() == -64 && b.vp037().scanline() == Vp037::IRQ11_LINE
+                      && b.vp037().lineWord() == 40,
+                      "11М: кадр (и прерывание 0100) — VGATE + 452 CLKIN: строка 256, слово 40");
                 Board z; z.reset(); z.memory().pokeWord(01000, 000777); z.cpu().reset(01000, 0340);
                 z.runFrameSlice(0, 100000);
                 CHECK(z.vp037().fieldLine() == -43, "БК-0010: кадр — на nVSYNC, за 43 строки до поля");
@@ -2496,6 +2499,63 @@ int main() {
                 CHECK(txt.find("Ok") != std::string::npos, "11М+СМК без дискет: БОС доходит до БЕЙСИКа");
             }
         }
+    }
+
+    // ---- Вход в прерывание из WAIT: без предвыборки (RTL ВМ1) ----
+    {
+        // Фронт IRQ2 на такте 0 — запись PSW в стек на такте 9 (RTL), а посреди потока
+        // команд сначала идёт отброшенная предвыборка. Раньше модель считала её и для WAIT.
+        auto entry = [](bool b11, uint16_t idle) {
+            Board z; z.setMachine(b11 ? Machine::Bk0011m : Machine::Bk0010);
+            z.loadRoms(BK_DEFAULT_ROM_DIR); z.reset();
+            Memory& m = z.memory();
+            if (b11) m.writeWord(0177662, 0);                 // 11М: кадровое прерывание разрешено
+            m.pokeWord(0100, 03000); m.pokeWord(0102, 0340); m.pokeWord(03000, 000777);
+            m.pokeWord(01000, idle); m.pokeWord(01002, 000777);
+            z.cpu().reset(01000, 0);
+            z.runTicks(400);
+            const uint64_t t0 = z.totalTicks();
+            for (int n = 0; z.cpu().pc() != 03000 && n < 100000; ++n) z.runFrameSlice(n ? 1 : 0, 1000000);
+            return static_cast<int>(z.totalTicks() - t0);
+        };
+        CHECK(entry(true, 000001) == 57 && entry(false, 000001) == 55,
+              "WAIT + прерывание: вход без предвыборки (11М 57 тактов, было 68; БК-0010 55, было 59)");
+        CHECK(entry(true, 000777) == 65 && entry(false, 000777) == 57,
+              "прерывание посреди потока команд — по-прежнему с отброшенной предвыборкой");
+    }
+
+    // ---- .BIN на БК-0011М: выбор машины и загрузка через монитор БОС ----
+    {
+        const auto dir = std::filesystem::temp_directory_path();
+        auto writeBin = [&](const char* name, uint16_t addr, std::initializer_list<uint16_t> words) {
+            const std::string path = (dir / name).string();
+            FILE* f = std::fopen(path.c_str(), "wb");
+            const uint16_t len = static_cast<uint16_t>(words.size() * 2);
+            const uint8_t hdr[4] = {uint8_t(addr), uint8_t(addr >> 8), uint8_t(len), uint8_t(len >> 8)};
+            std::fwrite(hdr, 1, 4, f);
+            for (uint16_t w : words) { const uint8_t b2[2] = {uint8_t(w), uint8_t(w >> 8)}; std::fwrite(b2, 1, 2, f); }
+            std::fclose(f);
+            return path;
+        };
+        const std::string p11 = writeBin("bk_t11.bin", 02000, {012737, 0140000, 0177662, 000777});  // MOV #,@#177662
+        const std::string pb  = writeBin("bk_tb.bin",  02000, {0110037, 0177663, 000777});          // MOVB R0,@#177663
+        const std::string p10 = writeBin("bk_t10.bin", 02000, {013700, 0177662, 000777});           // MOV @#177662,R0
+        CHECK(Board::binTargetsBk11(p11) && Board::binTargetsBk11(pb) && !Board::binTargetsBk11(p10),
+              ".BIN: запись в 0177662/0177663 — программа для БК-0011М, чтение — нет");
+        Board b; b.setMachine(Machine::Bk0011m);
+        if (b.loadRoms(BK_DEFAULT_ROM_DIR)) {
+            b.reset();
+            const std::string pr = writeBin("bk_trun.bin", 02000, {012700, 01234, 000777});        // MOV #1234,R0; BR .
+            uint16_t a = 0, l = 0;
+            const bool ok = b.loadBin(pr, true, &a, &l);
+            CHECK(ok && a == 02000 && l == 6 && b.cpu().pc() == 02000 && b.cpu().sp() == 01000
+                  && b.cpu().psw == 0 && b.memory().pageMap() == 014400,
+                  ".BIN на 11М: «L», «R6/1000», «G» монитора БОС — SP 01000, страницы пользователя 014400");
+            b.runFrame();
+            CHECK(b.cpu().r[0] == 01234 && b.cpu().pc() == 02004, ".BIN на 11М: программа исполняется");
+            std::filesystem::remove(pr);
+        }
+        for (const auto& p : {p11, pb, p10}) std::filesystem::remove(p);
     }
 
     // ---- Винчестер СМК-512: образ HDI, регистры 0177740–0177757 в инверсном коде ----
