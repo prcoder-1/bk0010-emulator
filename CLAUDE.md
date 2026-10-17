@@ -176,7 +176,12 @@ Key cross-cutting facts to know before editing the CPU or screen:
   and `45com-lo` 45/45 in phase 1 from the same machine (all in `cpu_tests`). `busStep` works
   in units of 1/12 tick (U): 0010 values are the old quarter-tick ones ×3 (results identical);
   the 11M window is 64 U and its request/response/phase (15/39/0 U) were fitted to Manwe's
-  BK-0011 table (122/128 forms exact; `docs/bk0011m.md`).
+  BK-0011 table (122/128 forms exact; `docs/bk0011m.md`). On the 11M an instruction that
+  touched DRAM and ENDS with a fast write (`MOV #n,(R0)` to 0177714) ends one tick early — 7
+  windows, as in OneChipBook's hardware-calibrated model; all-fast instructions keep the full
+  tail (real F/G tone legs). A frame restarted mid-run (`beginFrame` when the run stopped
+  short) starts on the same tick of the window period as after reset — the window↔beam phase
+  is fixed in the 037, and letting it drift made raster timing depend on load history.
   Memory above 0100000 is NOT behind the 037. IO and СМК RAM answer at once (end = request
   + 4 / 5 / 7 half-ticks for read / write / RMW write — eCat3's model, which reproduces
   Manwe's СМК table 192/192). ROM (К1801РЕ2) is slower on reads by `Board::kRomReadExtra`
