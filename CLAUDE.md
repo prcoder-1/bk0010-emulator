@@ -299,7 +299,11 @@ Key cross-cutting facts to know before editing the CPU or screen:
   window (`src/ui/SmkRamWidget.cpp`, Ctrl+D — per-page hex dump that also resolves
   each row to the BK address it is visible at right now, and edits words straight
   into `smk().ram()`, since unmapped pages have no BK address to poke) and is selectable as a
-  source in the memory visualiser (`MemCanvas::smkPage`). The heatmap only works
+  source in the memory visualiser (`MemCanvas::smkPage`). The dump itself is
+  `src/ui/HexPageView` (shared with «Память БК по страницам», `src/ui/BkRamWidget`, Ctrl+P:
+  the 11M's 8 RAM pages + loaded ROM slots, rows resolved to BK addresses through
+  `Memory::blockRamOffset/blockRomSlot`, edits go straight into `ram11()`/`raw()`); each window
+  only supplies a `HexPageSource`. The heatmap only works
   for the mapped page — `Trace` is indexed by 16-bit BK addresses. End-to-end coverage is the
   third-party `tests/data/SMKTEST.bin`, run automatically by `cpu_tests` — it OCRs
   the report off the screen, and the glyph table must come from a SEPARATE pristine

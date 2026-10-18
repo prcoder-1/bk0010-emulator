@@ -13,6 +13,7 @@
 #include "ui/DebuggerOverlay.h"
 #include "ui/MemVisWidget.h"
 #include "ui/SmkRamWidget.h"
+#include "ui/BkRamWidget.h"
 #include "ui/HotPathWidget.h"
 #include "ui/CallGraphWidget.h"
 #include "ui/FlameWidget.h"
@@ -327,6 +328,14 @@ static int runHeadless(const QString& romDir, const QString& bin,
             QString srPath = memvisShot; srPath.replace(".png", "_smkram.png");
             sr.grab().save(srPath);
             std::printf("headless: wrote ДОЗУ СМК по страницам %s\n", qPrintable(srPath));
+        }
+        // Окно «Память БК по страницам» (на 11М — со страницы в окне 0).
+        {
+            BkRamWidget br(&board);
+            br.resize(980, 620);
+            QString brPath = memvisShot; brPath.replace(".png", "_bkram.png");
+            br.grab().save(brPath);
+            std::printf("headless: wrote память БК по страницам %s\n", qPrintable(brPath));
         }
         // БК-0011М: всё ОЗУ (8 страниц), оно же с ПЗУ-слотами и экранная страница.
         if (board.bk11()) {
