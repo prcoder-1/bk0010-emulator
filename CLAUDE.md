@@ -244,7 +244,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
   once selected ALONE (CSIDOS polls the mouse with MOV #10,@#177714 = "both"). Covox (`--covox`)
   is a mono DAC on the port's LOW byte (odd-byte writes don't touch it); it stays silent while
   writes mix words and bytes (AY protocol, the Multizvuk auto-detect) and within a frame of a
-  read of 0177714 (joystick/mouse polling). Details in `docs/sound.md`.
+  read of 0177714 (joystick/mouse polling). The `RESET` instruction resets both AYs (all
+  registers 0 → silence, TurboSound back to chip 1): INIT reaches the AY through contact А1
+  «СБРОС» of the УП connector, GID does the same, and programs rely on it (INSULT's music-off
+  routine 035204 starts with RESET). Details in `docs/sound.md`.
 - **Interrupt gating**: reset PSW is `0340` (priority 7, masked) so the monitor ROM
   can install its vectors before the 50 Hz IRQ fires — do not reset to 0, games will
   jump to an unset vector and HALT. `Board::deliverFrameInterrupts` also refuses to
