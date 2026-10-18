@@ -2318,6 +2318,15 @@ int main() {
                       "AY: запись словом выбирает регистр, байтом — данные (инверсные линии)");
                 m.writeByte(0177715, 0);                  // нечётный байт: младший 0 -> данные 0377
                 CHECK(r[8] == 037, "AY: байт в 0177715 пишет ~0 = 0377 (по маске регистра)");
+                // Команда RESET: INIT идёт на контакт А1 «СБРОС» разъёма УП — AY обнуляется
+                // и смолкает (так глушит музыку INSULT, подпрограмма 035204).
+                ayw(9, 15); ayw(10, 12);
+                m.pokeWord(01000, 000005);                 // RESET
+                b.cpu().reset(01000, 0340);
+                b.stepInstruction();
+                bool silent = b.ayChip().address() == 0;
+                for (int i = 0; i < 16; ++i) silent = silent && r[i] == 0;
+                CHECK(silent, "AY: команда RESET обнуляет регистры сопроцессора (INIT на разъёме УП)");
                 Ay8910 ay;
                 ay.writeReg(0, 100); ay.writeReg(1, 0); ay.writeReg(7, 076); ay.writeReg(8, 15);
                 int edges = 0; bool hi = false;
