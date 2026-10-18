@@ -83,7 +83,8 @@ static bool parseNumber(const QJsonValue& v, long& out) {
 }
 
 McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool diskRw,
-                     int machine, int ay, std::string hdd, bool hddRw, int ay2, int covox)
+                     int machine, int ay, std::string hdd, bool hddRw, int ay2, int covox,
+                     bk::Board::HddController hddCtl)
     : romDir_(std::move(romDir)) {
     board_.setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
     if (ay >= 0) board_.setAy(ay != 0);
@@ -103,7 +104,8 @@ McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool dis
             board_.bootFromDisk();
         }
     }
-    // --hdd <образ.hdi>: винчестер на плате СМК-512; грузит с него прошивка платы.
+    // --hdd <образ.hdi>: винчестер на СМК-512 или «Самаре»; грузит с него прошивка контроллера.
+    board_.setHddController(hddCtl);
     if (!hdd.empty() && board_.attachHdd(0, hdd, !hddRw)) board_.bootFromHdd();
     board_.trace().setEnabled(true);      // collect hot-spot data from the start
     board_.trace().setFlameEnabled(true); // maintain the shadow call stack (bk_backtrace)
@@ -144,7 +146,8 @@ QString McpServer::machineText() {
     if (board_.diskAttached(0)) s += QString(" Дискета A: %1.").arg(QString::fromStdString(board_.diskPath(0)));
     for (int u = 0; u < bk::Ide::DRIVES; ++u)
         if (board_.hddAttached(u))
-            s += QString(" Винчестер %1: %2.").arg(u ? "slave" : "master")
+            s += QString(" Винчестер %1 (%2): %3.").arg(u ? "slave" : "master")
+                     .arg(board_.hddSamara() ? "«Самара»" : "СМК-512")
                      .arg(QString::fromStdString(board_.ide().drive(u).path()));
     if (!romsOk_) s += QString(" ⚠ ПЗУ %1 не загружены из %2.").arg(b11 ? "БК-0011М" : "БК-0010")
                            .arg(QString::fromStdString(romDir_));
@@ -175,10 +178,30 @@ QString McpServer::fddLog(int limit) const {
     return out;
 }
 
-// Регистры НЖМД — в логике ATA (как их видит накопитель); процессор читает их по
-// 0177740–0177757 проинвертированными.
+// Регистры НЖМД — в логике ATA (как их видит накопитель); процессор читает их
+// проинвертированными (оба контроллера ставят инвертирующие буферы).
+// Логические диски винчестера по его разметке (блок 7 «АльтПро» или блок 1 «Самары»).
+static QString hddMapText(const bk::HddMap& m) {
+    if (m.kind == bk::HddMap::Kind::None) return "\n            разметка не опознана (ни «АльтПро», ни «Самара»)";
+    QString out = QString("\n            разметка «%1», логических дисков: %2, автозагрузка %3")
+        .arg(QString::fromUtf8(bk::hddMapName(m.kind))).arg(m.disks.size())
+        .arg(m.bootUnit >= 2 && m.bootUnit < 2 + 24 ? QString("%1:").arg(QChar('A' + m.bootUnit)) : QString("—"));
+    for (const auto& ld : m.disks) {
+        QString fl;
+        if (ld.flags & 010) fl += ", защита от записи";
+        if (ld.flags & 020) fl += ", защита от чтения";
+        out += QString("\n              %1: блоки %2–%3 (%4)%5")
+            .arg(ld.unit < 26 ? QString(QChar('A' + ld.unit)) : QString::number(ld.unit))
+            .arg(ld.first).arg(ld.first + ld.blocks - 1).arg(ld.blocks).arg(fl);
+    }
+    return out;
+}
+
 QString McpServer::hddState() const {
-    QString out;
+    QString out = QString("\n  НЖМД      контроллер %1%2")
+        .arg(board_.hddSamara() ? "«Самара», регистры 0177620/0177622, 0177640–0177656"
+                                : "СМК-512, регистры 0177740–0177757")
+        .arg(board_.hddOnBus() ? "" : " — НЕ на шине (нет платы или контроллера)");
     for (int u = 0; u < bk::Ide::DRIVES; ++u) {
         const bk::HddDrive& d = board_.ide().drive(u);
         if (!d.attached()) continue;
@@ -200,6 +223,7 @@ QString McpServer::hddState() const {
             .arg(d.peek(R::COUNT)).arg(d.peek(R::SECTOR))
             .arg((d.peek(R::CYL_HI) << 8) | d.peek(R::CYL_LO)).arg(d.peek(R::HEAD) & 017)
             .arg(QString("%1").arg(d.lastCommand(), 2, 16, QChar('0'))).arg(d.lastLba());
+        out += hddMapText(bk::readHddMap(d));
     }
     return out;
 }
@@ -364,8 +388,11 @@ QJsonArray McpServer::toolDefs() const {
                   "(its 512 KB are cleared, as at power-on). `disk` inserts a floppy image (re-read from the "
                   "host file, so a rebuilt image is picked up) and boots from it; an empty string ejects it. "
                   "`hdd` attaches a hard-disk image in GID's HDI format (512-byte ATA IDENTIFY header + raw "
-                  "sectors) as the IDE master on the СМК-512 board (installing the board and its smk512.rom "
-                  "firmware) and boots from it; an empty string detaches it.",
+                  "sectors) as the IDE master and boots from it; an empty string detaches it. The controller "
+                  "is picked by the image's partition layout unless `hdd_ctl` says otherwise: a «Самара» "
+                  "layout goes to the Samara controller (0177620–0177656, samara.rom in the floppy "
+                  "controller, no memory board needed), anything else to the СМК-512 board (0177740–0177757, "
+                  "installing the board and its smk512.rom firmware).",
         schema({{"machine", P("string", "\"bk10\" or \"bk11m\" (default: keep)")},
                 {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: keep)")},
                 {"ay2", P("boolean", "Second AY (\"2AY\" board: TurboSound and Gryphon chip select) on/off (default: keep)")},
@@ -376,6 +403,7 @@ QJsonArray McpServer::toolDefs() const {
                 {"disk_rw", P("boolean", "Insert the image writable (default false = read-only)")},
                 {"hdd", P("string", "Hard-disk image (.hdi) to attach as IDE master and boot; \"\" = detach (default: keep)")},
                 {"hdd_rw", P("boolean", "Attach the HDD image writable (default false: BK writes stay in memory)")},
+                {"hdd_ctl", P("string", "HDD controller: \"auto\" (by the image's layout), \"smk\" or \"samara\" (default: keep)")},
                 {"frames", P("integer", "Run this many frames after reset/boot (default 0)")}})));
     t.append(tool("bk_machine", "Show or switch the emulated machine. Without `machine` it reports the "
                   "current model (БК-0010-01 or БК-0011М), CPU clock, frame length, AY / СМК-512 state and the "
@@ -617,13 +645,27 @@ bool McpServer::resolveAddr(const QJsonObject& args, const char* key, uint16_t& 
     if (v.isString()) {
         QString s = v.toString().trimmed();
         if (s.compare("pc", Qt::CaseInsensitive) == 0) { out = board_.cpu().pc(); return true; }
-        auto it = symAddr_.find(s.toStdString());
-        if (it != symAddr_.end()) { out = it->second; return true; }
+        uint16_t sa;
+        if (symAddrOf(s.toStdString(), sa)) { out = sa; return true; }
     }
     long n;
     if (parseNumber(v, n)) { out = (uint16_t)(n & 0xFFFF); return true; }
     err = QString("cannot resolve address/symbol '%1'").arg(v.toString());
     return false;
+}
+
+const std::string* McpServer::symAt(uint16_t a) const {
+    auto it = symName_.find(a);
+    if (it != symName_.end()) return &it->second;
+    const bk::SymbolTable* rom = board_.romSymbols();
+    return rom ? rom->nameAt(a) : nullptr;
+}
+
+bool McpServer::symAddrOf(const std::string& name, uint16_t& a) const {
+    auto it = symAddr_.find(name);
+    if (it != symAddr_.end()) { a = it->second; return true; }
+    const bk::SymbolTable* rom = board_.romSymbols();
+    return rom && rom->addrOf(name, a);
 }
 
 int McpServer::loadSymbols(const QString& path) {
@@ -671,8 +713,8 @@ QString McpServer::regsText() {
         .arg(oct6(c.r[6])).arg(oct6(c.r[7])).arg(oct6(c.psw)).arg(f)
         .arg(c.halted() ? "HALTED" : "running");
     // symbol at PC, if known
-    auto it = symName_.find(c.r[7]);
-    if (it != symName_.end()) s += QString("  ; PC=<%1>").arg(QString::fromStdString(it->second));
+    const std::string* it = symAt(c.r[7]);
+    if (it) s += QString("  ; PC=<%1>").arg(QString::fromStdString(*it));
     return s;
 }
 
@@ -680,10 +722,10 @@ QString McpServer::disasmText(uint16_t addr, int count) {
     const bk::Memory& mem = board_.memory();
     QString out;
     for (int i = 0; i < count; ++i) {
-        bk::DisasmLine d = bk::disasm(mem, addr);
+        bk::DisasmLine d = bk::disasm(mem, addr, board_.romSymbols());
         QString mark = (addr == board_.cpu().pc()) ? ">" : (board_.hasBreakpoint(addr) ? "*" : " ");
-        QString sym; auto it = symName_.find(addr);
-        if (it != symName_.end()) sym = QString(" <%1>").arg(QString::fromStdString(it->second));
+        QString sym; const std::string* it = symAt(addr);
+        if (it) sym = QString(" <%1>").arg(QString::fromStdString(*it));
         out += QString("%1%2%3  %4\n").arg(mark).arg(oct6(addr)).arg(sym).arg(QString::fromStdString(d.text));
         addr += d.words * 2;
     }
@@ -1063,18 +1105,29 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                 extra = " Disk ejected.";
             }
         }
+        if (args.contains("hdd_ctl")) {
+            const QString c = args.value("hdd_ctl").toString().toLower();
+            if (c == "auto") board_.setHddController(bk::Board::HddController::Auto);
+            else if (c == "smk") board_.setHddController(bk::Board::HddController::Smk);
+            else if (c == "samara") board_.setHddController(bk::Board::HddController::Samara);
+            else return fail("hdd_ctl: expected auto, smk or samara");
+        }
         if (args.contains("hdd")) {
             const QString path = args.value("hdd").toString();
             board_.detachHdd(0);
             if (!path.isEmpty()) {
-                if (!board_.smk512()) board_.setSmk512(true);
+                // Винчестер СМК — узел платы; «Самаре» плата не нужна.
+                if (board_.resolveHddController(path.toStdString()) == bk::Board::HddController::Smk
+                    && !board_.smk512())
+                    board_.setSmk512(true);
                 std::string err;
                 if (!board_.attachHdd(0, path.toStdString(), !args.value("hdd_rw").toBool(false), &err))
                     return fail("cannot attach HDD " + path + ": " + QString::fromStdString(err));
                 board_.bootFromHdd();
                 const bk::HddDrive& d = board_.ide().drive(0);
-                extra += QString(" HDD %1 (C/H/S %2/%3/%4), booting.").arg(path)
-                             .arg(d.cylinders()).arg(d.heads()).arg(d.sectors());
+                extra += QString(" HDD %1 (C/H/S %2/%3/%4) on %5, booting.").arg(path)
+                             .arg(d.cylinders()).arg(d.heads()).arg(d.sectors())
+                             .arg(board_.hddSamara() ? "«Самара»" : "СМК-512");
             } else {
                 board_.reset();
                 extra += " HDD detached.";
@@ -1221,7 +1274,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                 c.kind = byte ? 2 : 1;
                 long n;
                 if (parseNumber(QJsonValue(as), n)) c.a = (uint16_t)(n & 0xFFFF);
-                else { auto it = symAddr_.find(as.toStdString()); if (it == symAddr_.end()) return fail("bad address in condition"); c.a = it->second; }
+                else { uint16_t sa; if (!symAddrOf(as.toStdString(), sa)) return fail("bad address in condition"); c.a = sa; }
             } else return fail("condition LHS must be Rn or @addr");
             board_.setBreakCond(a, c);
         }
@@ -1243,7 +1296,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         if (board_.breakpoints().empty()) out += " (none)";
         for (uint16_t bp : board_.breakpoints()) {
             out += " " + oct6(bp);
-            auto it = symName_.find(bp); if (it != symName_.end()) out += QString("<%1>").arg(QString::fromStdString(it->second));
+            const std::string* it = symAt(bp); if (it) out += QString("<%1>").arg(QString::fromStdString(*it));
         }
         return textContent(out);
     }
@@ -1518,9 +1571,9 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         QString out = QString("Hot instructions (%1 unique executed):\n").arg(hot.size());
         for (int i = 0; i < count && i < (int)hot.size(); ++i) {
             uint16_t a = hot[i].second;
-            bk::DisasmLine d = bk::disasm(board_.memory(), a);
-            QString sym; auto it = symName_.find(a);
-            if (it != symName_.end()) sym = QString(" <%1>").arg(QString::fromStdString(it->second));
+            bk::DisasmLine d = bk::disasm(board_.memory(), a, board_.romSymbols());
+            QString sym; const std::string* it = symAt(a);
+            if (it) sym = QString(" <%1>").arg(QString::fromStdString(*it));
             out += QString("%1%2  %3  x%4\n").arg(oct6(a)).arg(sym).arg(QString::fromStdString(d.text)).arg(hot[i].first);
         }
         return textContent(out);
@@ -1553,8 +1606,8 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         int depth = args.value("depth").toInt(24);
         const bk::Memory& mem = board_.memory();
         auto sym = [&](uint16_t x) {
-            auto it = symName_.find(x);
-            return it != symName_.end() ? QString(" <%1>").arg(QString::fromStdString(it->second)) : QString();
+            const std::string* it = symAt(x);
+            return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString();
         };
         auto isJsr = [](uint16_t ir) { return ir >= 0004000 && ir <= 0004777; };
         uint16_t pc = board_.cpu().pc();
@@ -1678,7 +1731,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         for (auto& e : board_.trace().edges())
             if (isJsr(mem.peekWord(e.first >> 16))) subs.insert(e.first & 0xFFFF);
         auto funcOf = [&](uint16_t x) -> uint16_t { auto it = subs.upper_bound(x); if (it == subs.begin()) return 0; --it; return *it; };
-        auto sym = [&](uint16_t x) { auto it = symName_.find(x); return it != symName_.end() ? QString(" <%1>").arg(QString::fromStdString(it->second)) : QString(); };
+        auto sym = [&](uint16_t x) { const std::string* it = symAt(x); return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString(); };
         std::map<uint16_t, uint32_t> agg;
         for (auto& e : board_.trace().edges()) {
             uint16_t from = e.first >> 16, to = e.first & 0xFFFF;
@@ -1776,8 +1829,8 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         if (total == 0) return fail("no profile data — run the program first (or pass frames)");
         auto pct = [&](uint64_t v) { return 100.0 * double(v) / double(total); };
         auto label = [&](uint16_t fn) {
-            auto it = symName_.find(fn);
-            return it != symName_.end() ? QString("%1 <%2>").arg(oct6(fn)).arg(QString::fromStdString(it->second)) : oct6(fn);
+            const std::string* it = symAt(fn);
+            return it ? QString("%1 <%2>").arg(oct6(fn)).arg(QString::fromStdString(*it)) : oct6(fn);
         };
         std::vector<int> roots;
         uint16_t focus = 0;
@@ -1832,7 +1885,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         FILE* f = std::fopen(path.toStdString().c_str(), "wb");
         if (!f) return fail("cannot open " + path);
         auto label = [&](uint16_t fn) -> std::string {
-            auto it = symName_.find(fn); if (it != symName_.end()) return it->second;
+            const std::string* it = symAt(fn); if (it) return *it;
             char b[8]; std::snprintf(b, sizeof(b), "%06o", fn); return b;
         };
         int lines = 0;
@@ -2005,7 +2058,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
     if (name == "bk_xrefs") {
         uint16_t target; QString err; if (!resolveAddr(args, "addr", target, err)) return fail(err);
         const bk::Memory& mem = board_.memory();
-        auto sym = [&](uint16_t x) { auto it = symName_.find(x); return it != symName_.end() ? QString(" <%1>").arg(QString::fromStdString(it->second)) : QString(); };
+        auto sym = [&](uint16_t x) { const std::string* it = symAt(x); return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString(); };
         auto kind = [&](uint16_t ir) -> const char* {
             if (ir >= 0004000 && ir <= 0004777) return "call";
             if (ir >= 0000100 && ir <= 0000177) return "jmp";

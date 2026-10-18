@@ -104,6 +104,23 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     file->addAction("Подключить &винчестер (HDI)…", this, [this] { openHdd(0); });
     file->addAction("Подключить второй винчестер (slave)…", this, [this] { openHdd(1); });
     file->addAction("Отключить винчестеры", this, &MainWindow::detachHdds);
+    // Контроллер винчестера: по разметке образа или явно. Действует со следующего
+    // подключения образа.
+    QMenu* hddCtl = file->addMenu("Контроллер винчестера");
+    auto* hddGroup = new QActionGroup(this);
+    const std::pair<const char*, bk::Board::HddController> ctls[] = {
+        {"По разметке образа (авто)", bk::Board::HddController::Auto},
+        {"СМК-512 (0177740–0177757)", bk::Board::HddController::Smk},
+        {"«Самара» (0177620–0177656)", bk::Board::HddController::Samara}};
+    for (const auto& c : ctls) {
+        QAction* a = hddCtl->addAction(c.first);
+        a->setCheckable(true);
+        a->setChecked(c.second == board_->hddController());
+        hddGroup->addAction(a);
+        const bk::Board::HddController v = c.second;
+        connect(a, &QAction::triggered, this, [this, v] { board_->setHddController(v); });
+        hddCtlActions_.push_back({a, v});
+    }
     file->addSeparator();
     file->addAction("В&ыход", this, &QWidget::close, QKeySequence::Quit);
 
@@ -839,9 +856,9 @@ bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
     return true;
 }
 
-// Винчестер — узел платы СМК-512 (регистры НЖМД 0177740–0177757), а грузит с него
-// прошивка платы, перехватывающая пуск. Поэтому master подключается с включением
-// питания, а slave — на ходу, как вторая дискета.
+// Винчестер — на плате СМК-512 (регистры 0177740–0177757, грузит прошивка платы,
+// перехватывающая пуск) или на «Самаре» (0177620–0177656, грузит автозагрузчик КНГМД).
+// Master подключается с включением питания, slave — на ходу, как вторая дискета.
 void MainWindow::openHdd(int unit) {
     const QString path = QFileDialog::getOpenFileName(
         this, unit ? "Подключить второй винчестер (slave)" : "Подключить винчестер",
@@ -851,8 +868,18 @@ void MainWindow::openHdd(int unit) {
     attachHdd(path, unit, unit == 0);
 }
 
+void MainWindow::setHddController(bk::Board::HddController c) {
+    board_->setHddController(c);
+    for (const auto& a : hddCtlActions_) a.first->setChecked(a.second == c);
+}
+
 bool MainWindow::attachHdd(const QString& path, int unit, bool boot) {
-    if (!board_->smk512()) { board_->setSmk512(true); syncMachineMenu(); }
+    // Винчестер СМК — узел платы СМК-512; «Самаре» плата не нужна.
+    if (board_->resolveHddController(path.toStdString()) == bk::Board::HddController::Smk
+        && !board_->smk512()) {
+        board_->setSmk512(true);
+        syncMachineMenu();
+    }
     std::string err;
     if (!board_->attachHdd(unit, path.toStdString(), !hddRw_, &err)) {
         status_->setText(QString("Винчестер не подключён: %1").arg(QString::fromStdString(err)));
@@ -861,12 +888,15 @@ bool MainWindow::attachHdd(const QString& path, int unit, bool boot) {
     lastHdd_ = path;
     if (boot) { lastBin_.clear(); resetMachine(); }
     const bk::HddDrive& d = board_->ide().drive(unit);
-    status_->setText(QString("Винчестер %1: %2 — %3/%4/%5, %6 Мбайт%7%8")
+    status_->setText(QString("Винчестер %1 (%9): %2 — %3/%4/%5, %6 Мбайт%7%8")
         .arg(unit ? "slave" : "master").arg(QFileInfo(path).fileName())
         .arg(d.cylinders()).arg(d.heads()).arg(d.sectors())
         .arg(d.totalSectors() / 2048)
         .arg(hddRw_ ? "" : ", только чтение (запись — в памяти)")
-        .arg(boot ? ", загрузка" : ""));
+        .arg(boot ? ", загрузка" : "")
+        .arg(board_->hddSamara() ? "«Самара»" : "СМК-512")
+        + (board_->hddSamara() && !board_->bk11() && !board_->smk512()
+               ? " — ВНИМАНИЕ: плата СМК-512 снята, загрузчику может не хватить памяти" : ""));
     updateTitle();
     return true;
 }

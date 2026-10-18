@@ -52,7 +52,8 @@ Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 MCP since 2026-10-16; `Board` itself still starts without it. On the BK-0010 it covers the BASIC
 ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, overclk — need
 `--no-smk`),
-`--hdd <img.hdi>` / `--hdd-b` / `--hdd-rw` (IDE hard disk on the СМК-512, `docs/hdd.md`),
+`--hdd <img.hdi>` / `--hdd-b` / `--hdd-rw` / `--hdd-ctl auto|smk|samara` (IDE hard disk on
+the СМК-512 or the «Самара» controller, `docs/hdd.md`),
 `--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--scanline` (per-scanline rendering — each line drawn with the palette/screen values live
@@ -330,7 +331,22 @@ Key cross-cutting facts to know before editing the CPU or screen:
   (no explicit `--disk-rom`) swaps the controller ROM to it and booting = power-on (the firmware
   captures the start address). Read-only by default (BK writes kept in an in-memory overlay),
   `--hdd-rw` writes through. Flags `--hdd`, `--hdd-b`, `--hdd-rw`, positional `.hdi`; MCP
-  `bk_reset {hdd, hdd_rw}`. Details in `docs/hdd.md`.
+  `bk_reset {hdd, hdd_rw, hdd_ctl}`. Second controller: **«Самара»** (Lugov's HDD controller
+  for the 11M, the ancestor of the SMK's IDE): the same ATA block at `0177640–0177656` with the
+  CS1 registers at EVEN `0177620/0177622`, also inverted (`Ide::decodeSamara`); its driver lives
+  in the floppy controller's ROM (`roms/samara.rom`, entry 0160000 tries the HDD first), so it
+  needs no SMK — but on the BK-0010 the boot block (read to 01000–01777) needs RAM in place of
+  BASIC (stack at 01762), which the SMK provides, as for floppies. `--hdd-ctl auto|smk|samara`
+  (auto = by the image's partition layout: Samara table in block 1, else SMK;
+  `Board::resolveHddController`). `bk::readHddMap` parses both layouts (AltPro block 7, Samara
+  block 1) for `bk_io_state`. Details in `docs/hdd.md`.
+- **Controller ROM symbols**: `roms/<rom>.sym` (`disk326`, `smk512`, `samara`) load with the
+  controller ROM (`Board::loadRomSymbols`) into a separate table that is the FALLBACK layer of
+  `Board::symbols()` (`SymbolTable::setFallback`) while the controller is on the bus — user
+  symbols win and `.bkdb` annotations never include ROM names. MCP resolves through
+  `McpServer::symAt/symAddrOf` (its own `bk_symbols` maps first, then `Board::romSymbols()`).
+  The labels were bound to the ROM images by instruction-pattern matching against the
+  commented sources (see `docs/floppy.md`) — regenerate the same way if a ROM changes.
 - **`MpiDevice` has two read paths**: `mpiRead` (side effects allowed — reading
   `0177132` clears TR) for the CPU and `mpiPeek` (const, side-effect-free) for the
   debugger/disassembler/screen. `Memory::peek*` must never call `mpiRead`.

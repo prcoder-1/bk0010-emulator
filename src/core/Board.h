@@ -137,18 +137,29 @@ public:
     // Монитор к этому моменту должен быть поднят — см. ensureMonitorBooted().
     bool bootFromDisk();
 
-    // Винчестер IDE платы СМК-512 (образ HDI, docs/hdd.md): unit 0 — master, 1 — slave.
-    // Регистры НЖМД 0177740–0177757 стоят на шине, пока плата установлена и подключён
-    // хотя бы один образ. Драйвер НЖМД есть только в фирменной прошивке СМК, поэтому
-    // без явного setDiskRom контроллер с винчестером получает roms/smk512.rom.
+    // Винчестер IDE (образ HDI, docs/hdd.md): unit 0 — master, 1 — slave. Контроллеров
+    // два: канал платы СМК-512 (0177740–0177757, драйвер — в прошивке платы
+    // roms/smk512.rom) и «Самара» (0177620–0177656, драйвер — в прошивке КНГМД
+    // roms/samara.rom, плата памяти не нужна). Auto — по разметке образа первого
+    // подключённого винчестера: разметка «Самары» — её контроллер, иначе СМК.
+    // Регистры стоят на шине, пока подключён хотя бы один образ (у СМК — ещё и при
+    // установленной плате). Без явного setDiskRom ставится прошивка этого контроллера.
     // readOnly: записанное БК остаётся в памяти поверх файла. Ошибка — в err.
+    enum class HddController { Auto, Smk, Samara };
+    void setHddController(HddController c) { hddCtl_ = c; }
+    HddController hddController() const { return hddCtl_; }
+    // Какой контроллер получит образ path, если подключить его сейчас.
+    HddController resolveHddController(const std::string& path) const;
+    bool hddSamara() const { return samara_; }   // винчестеры сейчас на «Самаре»
     bool attachHdd(int unit, const std::string& path, bool readOnly = true, std::string* err = nullptr);
     void detachHdd(int unit);
     bool hddAttached(int unit = 0) const { return ide_.drive(unit).attached(); }
+    bool hddOnBus() const { return mux_.ide != nullptr; }
     const Ide& ide() const { return ide_; }
     Ide&       ide()       { return ide_; }
-    // Загрузка с винчестера: включение питания — прошивка СМК перехватывает пуск и
-    // сама грузит систему (MBR с блока 0). false — нет платы, образа или прошивки.
+    // Загрузка с винчестера. СМК: включение питания — прошивка платы перехватывает
+    // пуск и грузит систему сама (MBR с блока 0). «Самара»: автозагрузчик КНГМД
+    // 0160000 сначала пробует винчестер. false — нет образа, платы или прошивки.
     bool bootFromHdd();
 
     // Run enough frames for the monitor ROM to initialise (vectors, stack,
@@ -255,6 +266,10 @@ public:
     SymbolTable& symbols() { return symbols_; }
     const SymbolTable& symbols() const { return symbols_; }
     int loadSymbols(const std::string& path) { return symbols_.loadMap(path); }
+    // Имена из ПЗУ контроллера дисковода (roms/<прошивка>.sym рядом с образом ПЗУ):
+    // точки входа и подпрограммы драйвера. Нижний слой symbols(): свои имена главнее.
+    // nullptr — контроллера на шине нет.
+    const SymbolTable* romSymbols() const { return diskOn_ ? &romSyms_ : nullptr; }
 
     // --- Comments (interactive disassembler annotations): address -> free text.
     void setComment(uint16_t a, const std::string& c) { if (c.empty()) comments_.erase(a); else comments_[a] = c; }
@@ -412,7 +427,11 @@ private:
     // Сигнал ВЭД платы → карта памяти 11М (окно 1 отключено в SYS/Std10/ОЗУ10/All).
     void syncSmk11() { mem_.setWindow1Off(bk11() && smkOn_ && smk_.upperRamOff()); }
     Kngmd  kngmd_;                 // контроллер НГМД: ПЗУ драйвера + 1801ВП1-128
-    Ide    ide_;                   // канал IDE платы СМК-512 (винчестеры)
+    Ide    ide_;                   // канал IDE (винчестеры) платы СМК-512 или «Самары»
+    HddController hddCtl_ = HddController::Auto;
+    bool   samara_ = false;        // канал IDE — контроллера «Самара»
+    std::string loadedRom_;        // какое ПЗУ по умолчанию стоит в КНГМД (пусто — своё/нет)
+    std::string defaultControllerRom() const;
     bool   diskOn_ = false;        // контроллер НГМД на шине
     uint64_t fddNextTick_ = 0;     // такт следующего поворота диска (раз в 64 мкс)
     std::string diskRom_;          // выбранная прошивка контроллера (пусто — авто)
@@ -433,7 +452,8 @@ private:
     public:
         Smk512* smk = nullptr;
         Kngmd*  fdc = nullptr;
-        Ide*    ide = nullptr;     // только вместе с smk: регистры НЖМД — узел платы
+        Ide*    ide = nullptr;     // регистры НЖМД: СМК — узел платы, «Самара» — своя плата
+        bool    samara = false;    // дешифратор «Самары» (0177620/22, 0177640–56)
         bool empty() const { return !smk && !fdc; }
         bool mpiRead(uint16_t addr, uint16_t& value) override;
         bool mpiPeek(uint16_t addr, uint16_t& value) const override;
@@ -443,7 +463,10 @@ private:
         bool smkRam(uint16_t addr) const;      // ДОЗУ платы подключено по этому адресу?
         bool smkRomCell(uint16_t addr) const;  // здесь по Табл. 1 видно ПЗУ контроллера
         bool smkVersion(uint16_t addr, uint16_t& value) const;   // слово версии платы 0167776
-        static uint16_t hddBus(uint16_t addr, uint16_t v);      // регистр НЖМД -> шина БК
+        uint16_t hddBus(uint16_t addr, uint16_t v) const;       // регистр НЖМД -> шина БК
+        bool hddReg(uint16_t addr, HddDrive::Reg& r) const {
+            return ide && (samara ? Ide::decodeSamara(addr, r) : Ide::decodeSmk(addr, r));
+        }
     };
     MpiMux mux_;
     void updateMpi();
@@ -590,6 +613,8 @@ private:
     std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
     bool     breakHit_ = false;
     SymbolTable symbols_;                        // linker-map symbols (address <-> name)
+    SymbolTable romSyms_;                        // имена из ПЗУ контроллера (нижний слой)
+    void loadRomSymbols(const std::string& romPath);
     std::map<uint16_t, std::string> comments_;   // interactive per-address comments
     std::map<uint16_t, DataItem> data_;          // interactive code/data markup
 

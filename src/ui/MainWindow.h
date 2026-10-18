@@ -3,6 +3,8 @@
 #include <memory>
 #include <deque>
 #include <set>
+#include <vector>
+#include <utility>
 #include "Board.h"
 #include "BkKeymap.h"
 #include "Gamepad.h"
@@ -53,6 +55,7 @@ public:
     // ставит сама на этот запуск, если её нет (настройку не меняет).
     bool attachHdd(const QString& path, int unit = 0, bool boot = true);
     void setHddWritable(bool on) { hddRw_ = on; }   // --hdd-rw: изменения — в файл
+    void setHddController(bk::Board::HddController c);   // --hdd-ctl
 
     // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
@@ -148,6 +151,7 @@ private:
     bool diskRw_ = false;
     QString lastHdd_;       // последний подключённый образ винчестера
     bool hddRw_ = false;
+    std::vector<std::pair<QAction*, bk::Board::HddController>> hddCtlActions_;
     void openHdd(int unit);
     void detachHdds();
     void saveDisks();

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace bk {
 
@@ -49,6 +50,8 @@ public:
     uint32_t totalSectors() const { return total_; }
     size_t dirtySectors() const { return overlay_.size(); }   // записано БК, но не в файл
     std::string model() const;                                // модель из паспорта
+    // Сектор так, как он лежит на накопителе (в инверсном коде), без побочных эффектов.
+    bool peekSector(uint32_t lba, uint8_t* dst) const { return attached() && lba < total_ && readSector(lba, dst); }
 
     void reset(bool hard);                     // hard — включение питания, иначе SRST
     uint16_t read(Reg r);                      // с побочными эффектами (регистр данных)
@@ -63,7 +66,7 @@ public:
 
 private:
     enum class Phase { Failure, Ready, PioOut, PioIn };
-    bool readSector(uint32_t lba, uint8_t* dst);
+    bool readSector(uint32_t lba, uint8_t* dst) const;
     bool writeSector(uint32_t lba, const uint8_t* src);
     bool seek();                               // регистры -> lba_, сдвиг на следующий
     void readNext(bool verify);
@@ -113,11 +116,40 @@ public:
     // Адрес на шине БК -> регистр канала (СМК: 0177740..0177757, БК-docs §15.12).
     // Нечётные 0177741 и 0177743 — самостоятельные регистры блока CS1.
     static bool decodeSmk(uint16_t addr, HddDrive::Reg& r);
+    // «Самара» (БК-docs §13.12): тот же блок на 0177640..0177657, а регистры CS1 —
+    // по чётным адресам 0177620 (адрес накопителя) и 0177622 (второй статус/сброс).
+    static bool decodeSamara(uint16_t addr, HddDrive::Reg& r);
 private:
     HddDrive d_[DRIVES];
 };
 
 // Похож ли файл на образ винчестера по расширению (.hdi в любом регистре).
 bool looksLikeHdi(const std::string& path);
+
+// Разметка винчестера на логические диски — её пишет программа обслуживания
+// контроллера, и у двух контроллеров она своя (docs/hdd.md):
+//  * «АльтПро»/СМК — таблица в конце блока 7: слова 255/254/253 — цилиндры, головки,
+//    секторы; 252 — число дисков и (старший байт) диск автозагрузки; дальше пары
+//    «(цилиндр << 4) | головка начала, длина» и контрольная сумма от 012701;
+//  * «Самара» — блок 1: номер диска автозагрузки, H·S, S | (H−1) << 8 и с третьего
+//    слова — номера первых блоков дисков двойными словами. Первый блок диска —
+//    заголовок (номер диска, ёмкость, флаги защиты), данные — со следующего.
+// Логические диски нумеруются с 2 (C:). Разбор — по данным после инверсии.
+struct HddLogicalDisk {
+    int unit = 0;              // 2 = C:
+    uint32_t first = 0;        // первый блок данных (LBA)
+    uint32_t blocks = 0;
+    uint16_t flags = 0;        // «Самара»: 010 — защита от записи, 020 — от чтения
+};
+struct HddMap {
+    enum class Kind { None, AltPro, Samara };
+    Kind kind = Kind::None;
+    int bootUnit = 0;          // диск автозагрузки (2 = C:), 0 — не задан
+    std::vector<HddLogicalDisk> disks;
+};
+HddMap readHddMap(const HddDrive& d);
+// Разметка образа HDI по файлу (Kind::None — не опознана или файл не открылся).
+HddMap::Kind hdiLayout(const std::string& path);
+const char* hddMapName(HddMap::Kind k);
 
 } // namespace bk

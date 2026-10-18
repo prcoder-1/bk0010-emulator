@@ -592,6 +592,23 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         p.drawText(srx, gy, fm.elidedText(s, Qt::ElideRight, srw));
         gy += lineH_;
     }
+    // Винчестер: чей канал, последняя команда ATA, LBA и статус (в логике ATA).
+    if (board_->hddOnBus()) {
+        using R = bk::HddDrive;
+        const bk::Ide& ide = board_->ide();
+        const int u = ide.drive(1).selected() ? 1 : 0;
+        const R& d = ide.drive(u);
+        const uint8_t st = static_cast<uint8_t>(ide.peek(R::STATUS_CMD));
+        QString s = QString::fromUtf8("НЖМД %1%2 к%3 LBA %4 ст%5%6")
+                        .arg(board_->hddSamara() ? "Сам" : "СМК").arg(u ? " slave" : "")
+                        .arg(d.lastCommand(), 2, 16, QChar('0')).arg(d.lastLba())
+                        .arg(st, 2, 16, QChar('0'))
+                        .arg((st & R::ST_ERR) ? QString(" ош%1").arg(ide.peek(R::ERR_FEAT) & 0xff, 2, 16, QChar('0'))
+                                              : QString());
+        p.setPen((st & R::ST_ERR) ? QColor(255, 140, 140) : fg);
+        p.drawText(srx, gy, fm.elidedText(s, Qt::ElideRight, srw));
+        gy += lineH_;
+    }
     for (const auto& sr : sregs) {
         if (gy > sregRect.bottom()) break;
         uint16_t rd = board_->peekReg(sr.addr);

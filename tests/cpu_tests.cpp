@@ -2740,6 +2740,91 @@ int main() {
         std::filesystem::remove(path);
     }
 
+    // ---- Винчестер на контроллере «Самара»: разметка, регистры 0177620–0177656, загрузка ----
+    {
+        // Образ C/H/S = 20/2/16 в разметке «Самары»: блок 1 — геометрия и таблица дисков,
+        // блок 3 — заголовок диска C:, блок 4 — его загрузчик (в 01000):
+        //   NOP; MOV #123456,@#500; MOV R0,@#502; BR .
+        const int C = 20, H = 2, S = 16, N = C * H * S;
+        const std::string path = (std::filesystem::temp_directory_path() / "bk_cpu_tests_samara.hdi").string();
+        {
+            std::vector<uint8_t> img((N + 1) * 512, 0);
+            auto put16 = [&](size_t off, uint16_t v) { img[off] = v & 0xff; img[off + 1] = v >> 8; };
+            put16(0, 0x045a); put16(2, C); put16(6, H); put16(12, S);
+            img[510] = 0xA5;
+            uint8_t cs = 0;
+            for (int i = 0; i < 511; ++i) cs = static_cast<uint8_t>(cs + img[i]);
+            img[511] = static_cast<uint8_t>(-cs);
+            std::vector<uint16_t> blk(N * 256, 0);         // в логике процессора
+            const uint16_t b1[] = {2, H * S, static_cast<uint16_t>(S | (H - 1) << 8), 3, 0};
+            std::copy(std::begin(b1), std::end(b1), blk.begin() + 1 * 256);
+            const uint16_t hdr[] = {2, 100, 010, 02000, 01000, 014400};   // флаг 010 — защита от записи
+            std::copy(std::begin(hdr), std::end(hdr), blk.begin() + 3 * 256);
+            const uint16_t boot[] = {000240, 012737, 0123456, 0500, 010037, 0502, 000777};
+            std::copy(std::begin(boot), std::end(boot), blk.begin() + 4 * 256);
+            for (int i = 0; i < N * 256; ++i) put16(512 + 2 * i, static_cast<uint16_t>(~blk[i]));
+            FILE* f = std::fopen(path.c_str(), "wb");
+            std::fwrite(img.data(), 1, img.size(), f);
+            std::fclose(f);
+        }
+        HddDrive::Reg r;
+        CHECK(Ide::decodeSamara(0177640, r) && r == HddDrive::STATUS_CMD && Ide::decodeSamara(0177656, r)
+              && r == HddDrive::DATA && Ide::decodeSamara(0177620, r) && r == HddDrive::DRIVE_ADDR
+              && Ide::decodeSamara(0177622, r) && r == HddDrive::CTRL && !Ide::decodeSamara(0177660, r)
+              && !Ide::decodeSamara(0177624, r),
+              "«Самара»: регистры 0177640–0177656 — блок CS0 по убыванию, CS1 — 0177620/0177622");
+        CHECK(hdiLayout(path) == HddMap::Kind::Samara, "«Самара»: разметка опознана по блоку 1");
+        for (int mach = 0; mach < 2; ++mach) {
+            const bool b11 = mach == 1;
+            // На БК-0010 загрузчику нужна память вместо Бейсика (у КНГМД БК-0010-01 там
+            // ОЗУ 16 Кбайт; Бейсик держит стек в 01762, а блок читается в 01000–01777) — её
+            // даёт СМК-512, как и при загрузке с дискеты. На 11М плата не нужна.
+            Board b;
+            b.setMachine(b11 ? Machine::Bk0011m : Machine::Bk0010);
+            if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) break;
+            b.setSmk512(!b11);
+            b.reset();
+            const bool ok = b.attachHdd(0, path, true);
+            CHECK(ok && b.hddSamara() && b.hddOnBus(),
+                  b11 ? "«Самара» на 11М: авто по разметке, без платы СМК"
+                      : "«Самара» на БК-0010: авто по разметке, вместе с СМК");
+            if (!ok) continue;
+            if (!b11) {
+                const HddMap map = readHddMap(b.ide().drive(0));
+                CHECK(map.kind == HddMap::Kind::Samara && map.bootUnit == 2 && map.disks.size() == 1
+                      && map.disks[0].unit == 2 && map.disks[0].first == 4 && map.disks[0].blocks == 100
+                      && map.disks[0].flags == 010,
+                      "«Самара»: таблица дисков — C: с блока 4, 100 блоков, защита от записи");
+                uint16_t v = 0;
+                CHECK(b.memory().mpi() && !b.memory().mpi()->mpiPeek(0177740, v),
+                      "«Самара»: регистров СМК 0177740 на шине нет");
+            }
+            if (b11) {
+                // Имена ПЗУ контроллера (roms/samara.sym) — нижний слой таблицы символов.
+                uint16_t a = 0;
+                const std::string* n = b.symbols().nameAt(0164316);
+                CHECK(n && *n == "GRUZ0D" && b.symbols().addrOf("T.BOOT", a) && a == 0160000
+                      && b.symbols().all().empty(),
+                      "«Самара»: имена ПЗУ контроллера видны, в свои символы не попадают");
+                b.symbols().set(0164316, "MY");
+                n = b.symbols().nameAt(0164316);
+                CHECK(n && *n == "MY", "Символы: своё имя главнее имени из ПЗУ");
+            }
+            b.bootFromHdd();
+            for (int f = 0; f < 150 && b.memory().peekWord(0500) != 0123456; ++f) b.runFrame();
+            CHECK(b.memory().peekWord(0500) == 0123456 && b.memory().peekWord(0502) == 2,
+                  b11 ? "«Самара» на 11М: БОС зовёт 0160000, ПЗУ грузит C: с винчестера, R0 = 2"
+                      : "«Самара» на БК-0010: 160000 грузит C: с винчестера, R0 = 2");
+        }
+        {
+            Board b; b.loadRoms(BK_DEFAULT_ROM_DIR);
+            b.setHddController(Board::HddController::Smk);
+            b.setSmk512(true); b.reset();
+            CHECK(b.attachHdd(0, path, true) && !b.hddSamara(), "«Самара»: --hdd-ctl smk перекрывает разметку");
+        }
+        std::filesystem::remove(path);
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;
 }
