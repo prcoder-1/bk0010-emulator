@@ -2956,6 +2956,51 @@ int main() {
         CHECK(frames1 > 0 && frames2 > 0 && !std::filesystem::exists(part3) && frames1 + frames2 == 30,
               "Видео: файл больше порога продолжается в имя_002.avi, кадры не теряются");
         std::filesystem::remove(base); std::filesystem::remove(part2); std::filesystem::remove(part3);
+
+        // Звук: отвод Speaker пишет каждый отсчёт и при выключенном выводе на карту; за
+        // секунду эмуляции — ровно частота отсчётов.
+        {
+            Speaker spk(44100, 3000000);
+            spk.setEnabled(false);
+            spk.setCapture(true);
+            for (int i = 0; i < 1000; ++i) spk.feed((i & 1) ? 4 : 0, 3000);   // 1000 x 1 мс
+            std::vector<int16_t> got;
+            spk.takeCaptured(got);
+            bool loud = false;
+            for (int16_t v : got) loud |= v > 1000 || v < -1000;
+            CHECK(got.size() == 44100 && spk.available() == 0 && loud,
+                  "Видео: отвод звука — 44100 отсчётов за секунду, при выключенном выводе тоже");
+        }
+        // AVI со звуком: второй поток PCM, звук кадра — сразу за его картинкой.
+        {
+            const std::string wav = (dir / "bk_cpu_tests_video_audio.avi").string();
+            VideoCapture va;
+            VideoCapture::Options ao;
+            ao.audioRate = 44100;
+            std::vector<int16_t> snd(903, 1234);
+            bool okA = va.start(wav, ao, W, H, 4000000, 81920);
+            for (int t = 0; t < 10 && okA; ++t) { const auto f = scene(t); va.addFrame(f.data(), snd.data(), snd.size() + (t & 1)); }
+            okA = okA && va.stop();
+            const std::vector<uint8_t> v = rd(wav);
+            const size_t avihA = find(v, "avih");
+            size_t auds = size_t(-1);
+            for (size_t i = 0; i + 4 <= v.size(); ++i) if (!std::memcmp(&v[i], "auds", 4)) { auds = i; break; }
+            int dc = 0, wb = 0;
+            const size_t movi = find(v, "movi");
+            for (size_t p2 = movi + 4; movi != size_t(-1) && p2 + 8 <= v.size();) {
+                if (!std::memcmp(&v[p2], "idx1", 4)) break;
+                dc += !std::memcmp(&v[p2], "00dc", 4);
+                wb += !std::memcmp(&v[p2], "01wb", 4);
+                const uint32_t n = u32(v, p2 + 4);
+                p2 += 8 + n + (n & 1);
+            }
+            const bool hdrA = avihA != size_t(-1) && u32(v, avihA + 8 + 24) == 2 && auds != size_t(-1)
+                              && u32(v, auds + 20) == 2 && u32(v, auds + 24) == 88200     // scale = блок, rate = байт/с
+                              && u32(v, auds + 32) == 10 * 903 + 5;                        // dwLength — отсчёты
+            CHECK(okA && hdrA && dc == 10 && wb == 10,
+                  "Видео: звук PCM 44,1 кГц вторым потоком, кусок на кадр, длина дорожки в отсчётах");
+            std::filesystem::remove(wav);
+        }
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

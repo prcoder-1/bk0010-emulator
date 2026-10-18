@@ -1,5 +1,6 @@
 #include "AviWriter.h"
 #include <sys/types.h>
+#include <algorithm>
 
 namespace bk {
 
@@ -20,11 +21,14 @@ bool AviWriter::patch32(uint64_t at, uint32_t v) {
 }
 
 bool AviWriter::open(const std::string& path, int width, int height, uint32_t codec, int bitCount,
-                     uint32_t rate, uint32_t scale, int aspectX, int aspectY, std::string* err) {
+                     uint32_t rate, uint32_t scale, int aspectX, int aspectY, std::string* err,
+                     int audioRate, int audioChannels) {
     close();
     f_ = std::fopen(path.c_str(), "wb");
     if (!f_) { if (err) *err = "файл не открывается на запись"; return false; }
     pos_ = 0; index_.clear(); maxChunk_ = 0; ok_ = true;
+    audioCh_ = audioRate > 0 ? std::max(1, audioChannels) : 0;
+    audioBlocks_ = 0; frames_ = 0; maxAudio_ = 0;
 
     const bool vprp = aspectX > 0 && aspectY > 0;
     std::vector<uint8_t> h;
@@ -41,10 +45,10 @@ bool AviWriter::open(const std::string& path, int width, int height, uint32_t co
     le32(h, uint32_t((1000000ULL * scale + rate / 2) / rate));   // мкс на кадр
     le32(h, 0);                       // dwMaxBytesPerSec
     le32(h, 0);                       // dwPaddingGranularity
-    le32(h, 0x10);                    // AVIF_HASINDEX
+    le32(h, audioCh_ ? 0x110 : 0x10); // AVIF_HASINDEX (| AVIF_ISINTERLEAVED со звуком)
     avihFrames_ = h.size(); le32(h, 0);
     le32(h, 0);                       // dwInitialFrames
-    le32(h, 1);                       // dwStreams
+    le32(h, audioCh_ ? 2 : 1);        // dwStreams
     avihBuffer_ = h.size(); le32(h, 0);
     le32(h, uint32_t(width)); le32(h, uint32_t(height));
     for (int i = 0; i < 4; ++i) le32(h, 0);
@@ -77,24 +81,60 @@ bool AviWriter::open(const std::string& path, int width, int height, uint32_t co
         le32(h, uint32_t(height)); le32(h, uint32_t(width));
         for (int i = 0; i < 4; ++i) le32(h, 0);
     }
-    endList();                                        // strl
+    endList();                                        // strl видео
+    if (audioCh_) {
+        const uint16_t align = uint16_t(2 * audioCh_);
+        list("strl");
+        tag("strh"); le32(h, 56);
+        tag("auds"); le32(h, 0);
+        le32(h, 0); le16(h, 0); le16(h, 0); le32(h, 0);
+        le32(h, align); le32(h, uint32_t(audioRate) * align);   // блоков в секунду = частота
+        le32(h, 0);
+        audLength_ = h.size(); le32(h, 0);
+        audBuffer_ = h.size(); le32(h, 0);
+        le32(h, 0xFFFFFFFFu);
+        le32(h, align);                                   // dwSampleSize — блок
+        le16(h, 0); le16(h, 0); le16(h, 0); le16(h, 0);
+        tag("strf"); le32(h, 16);                         // PCMWAVEFORMAT
+        le16(h, 1);                                       // WAVE_FORMAT_PCM
+        le16(h, uint16_t(audioCh_));
+        le32(h, uint32_t(audioRate));
+        le32(h, uint32_t(audioRate) * align);
+        le16(h, align);
+        le16(h, 16);
+        endList();                                    // strl звука
+    }
     endList();                                        // hdrl
     tag("LIST"); moviList_ = h.size(); le32(h, 0); tag("movi");
     if (!put(h.data(), h.size())) { if (err) *err = "ошибка записи"; close(); return false; }
     return true;
 }
 
-bool AviWriter::writeFrame(const uint8_t* data, size_t size, bool keyframe) {
+bool AviWriter::chunk(uint32_t id, const void* data, size_t size, bool key) {
     if (!f_ || !ok_) return false;
     const uint32_t n = uint32_t(size);
     std::vector<uint8_t> hdr;
-    hdr.push_back('0'); hdr.push_back('0'); hdr.push_back('d'); hdr.push_back('c');
+    le32(hdr, id);
     le32(hdr, n);
     // Смещение в idx1 — от слова «movi».
-    index_.push_back({uint32_t(pos_ - (moviList_ + 4)), n, keyframe});
-    if (n > maxChunk_) maxChunk_ = n;
+    index_.push_back({id, uint32_t(pos_ - (moviList_ + 4)), n, key});
     static const uint8_t pad = 0;
     return put(hdr.data(), hdr.size()) && put(data, size) && ((n & 1) == 0 || put(&pad, 1));
+}
+
+bool AviWriter::writeFrame(const uint8_t* data, size_t size, bool keyframe) {
+    if (size > maxChunk_) maxChunk_ = uint32_t(size);
+    ++frames_;
+    return chunk(fourcc('0', '0', 'd', 'c'), data, size, keyframe);
+}
+
+bool AviWriter::writeAudio(const int16_t* samples, size_t count) {
+    if (!audioCh_ || !count) return true;
+    const size_t bytes = count * 2 * size_t(audioCh_);
+    if (bytes > maxAudio_) maxAudio_ = uint32_t(bytes);
+    audioBlocks_ += count;
+    // PCM в AVI — little-endian, как и int16 в памяти x86/ARM.
+    return chunk(fourcc('0', '1', 'w', 'b'), samples, bytes, true);
 }
 
 bool AviWriter::close() {
@@ -107,16 +147,19 @@ bool AviWriter::close() {
         idx.push_back('i'); idx.push_back('d'); idx.push_back('x'); idx.push_back('1');
         le32(idx, uint32_t(index_.size() * 16));
         for (const Entry& e : index_) {
-            idx.push_back('0'); idx.push_back('0'); idx.push_back('d'); idx.push_back('c');
+            le32(idx, e.id);
             le32(idx, e.key ? 0x10 : 0);              // AVIIF_KEYFRAME
             le32(idx, e.offset); le32(idx, e.size);
         }
         good = put(idx.data(), idx.size());
-        const uint32_t frames = uint32_t(index_.size());
+        const uint32_t frames = frames_;
         good = good && patch32(4, uint32_t(pos_ - 8))
                     && patch32(moviList_, uint32_t(moviEnd - moviList_ - 4))
                     && patch32(avihFrames_, frames) && patch32(strhLength_, frames)
-                    && patch32(avihBuffer_, maxChunk_ + 8) && patch32(strhBuffer_, maxChunk_ + 8);
+                    && patch32(avihBuffer_, std::max(maxChunk_, maxAudio_) + 8)
+                    && patch32(strhBuffer_, maxChunk_ + 8);
+        if (audioCh_)
+            good = good && patch32(audLength_, uint32_t(audioBlocks_)) && patch32(audBuffer_, maxAudio_);
     }
     good = (std::fclose(f_) == 0) && good;
     f_ = nullptr;

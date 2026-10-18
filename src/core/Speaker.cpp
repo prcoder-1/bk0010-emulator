@@ -16,7 +16,7 @@ static const double kLevelPct[8] = {0.00, 0.15, 0.30, 0.40, 0.70, 0.80, 0.94, 1.
 
 void Speaker::feed(int level, int ticks) {
     level &= 7;
-    if (!enabled_ || ticks <= 0) { level_ = level; return; }
+    if ((!enabled_ && !capture_) || ticks <= 0) { level_ = level; return; }
     level_ = level;
     // Number of output samples covered by these CPU ticks.
     const double samplesPerTick = static_cast<double>(sampleRate_) / cpuFreq_;
@@ -69,8 +69,11 @@ void Speaker::feed(int level, int ticks) {
         }
         if (v > 32767.0) v = 32767.0; else if (v < -32767.0) v = -32767.0;
         const int16_t smp = static_cast<int16_t>(v);
-        if (buf_.size() >= maxBuf) for (size_t i = 0; i < maxBuf / 4; ++i) buf_.pop_front();
-        buf_.push_back(smp);
+        if (enabled_) {
+            if (buf_.size() >= maxBuf) for (size_t i = 0; i < maxBuf / 4; ++i) buf_.pop_front();
+            buf_.push_back(smp);
+        }
+        if (capture_) cap_.push_back(smp);
     }
 }
 
@@ -92,6 +95,18 @@ void Speaker::trimTo(size_t maxSamples) {
 size_t Speaker::available() {
     std::lock_guard<std::mutex> lk(mtx_);
     return buf_.size();
+}
+
+void Speaker::setCapture(bool on) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    capture_ = on;
+    cap_.clear();
+}
+
+void Speaker::takeCaptured(std::vector<int16_t>& out) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    out.clear();
+    out.swap(cap_);
 }
 
 void Speaker::clear() {

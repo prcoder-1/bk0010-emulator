@@ -117,6 +117,7 @@ static QString g_diskRom;            // --disk-rom smk|326|<файл>: прош�
 // --video-codec, --video-size перекрывают настройки на этот запуск.
 static QString g_video, g_videoCodec;
 static int     g_videoAspect = -1;          // 1 — кадр 1024x768, 0 — 512x256, -1 — настройка
+static int     g_videoAudio = -1;           // --video-audio / --no-video-audio; -1 — настройка (вкл)
 static QString g_hdd, g_hddB;
 static bool    g_hddRw = false;
 // --hdd-ctl auto|smk|samara: контроллер винчестера (auto — по разметке образа).
@@ -208,10 +209,15 @@ static int runHeadless(const QString& romDir, const QString& bin,
     board.screen().setColorMode(color);
     // --video: запись с первого кадра основного прогона (загрузка уже позади).
     bk::VideoCapture video;
+    std::vector<int16_t> videoAudio;
     if (!g_video.isEmpty()) {
         bk::VideoCapture::Options vo;
         if (!g_videoCodec.isEmpty()) vo.codec = g_videoCodec.toStdString();
         vo.aspect43 = g_videoAspect != 0;
+        if (g_videoAudio != 0) {
+            vo.audioRate = board.sound().sampleRate();
+            board.sound().setCapture(true);       // отвод звука — с начала первого кадра записи
+        }
         std::string err;
         if (!video.start(g_video.toStdString(), vo, bk::Screen::TEX_W, bk::Screen::TEX_H,
                          static_cast<uint32_t>(board.cpuFreqHz()), static_cast<uint32_t>(board.ticksPerFrame()), &err)) {
@@ -233,9 +239,11 @@ static int runHeadless(const QString& romDir, const QString& bin,
         board.runFrame();
         if (video.active()) {
             if (!board.scanlineRender()) board.screen().render(board.memory());
-            video.addFrame(board.screen().pixels());
+            board.sound().takeCaptured(videoAudio);
+            video.addFrame(board.screen().pixels(), videoAudio.data(), videoAudio.size());
         }
     }
+    board.sound().setCapture(false);
     if (video.active()) {
         const uint64_t n = video.frames();
         if (video.stop())
@@ -488,6 +496,8 @@ static void printHelp(const char* prog) {
         "  --video-codec zmbv     кодек (GUI — по умолчанию из настроек, безголовый — zmbv)\n"
         "  --video-size 1024x768|512x256  кадр: точка БК блоком 2x3 (4:3, по умолчанию)\n"
         "                         или как буфер экрана с пометкой «показывать 4:3»\n"
+        "  --no-video-audio       без звука (по умолчанию звук пищалки, AY и Covox пишется\n"
+        "                         в тот же файл: PCM 44,1 кГц моно); --video-audio — со звуком\n"
         "\n"
         "Тайминг и экран:\n"
         "  --cpu-phase 0|1        фаза такта ЦП относительно окна 037 (по умолчанию 0)\n"
@@ -665,6 +675,8 @@ int main(int argc, char** argv) {
             for (const auto& c : bk::videoCodecs()) known |= g_videoCodec.toStdString() == c;
             if (!known) { std::fprintf(stderr, "--video-codec: неизвестный кодек %s\n", qPrintable(g_videoCodec)); return 2; }
         }
+        else if (args[i] == "--video-audio") g_videoAudio = 1;
+        else if (args[i] == "--no-video-audio") g_videoAudio = 0;
         else if (args[i] == "--video-size" && i + 1 < args.size()) {
             const QString v = args[++i].toLower();
             if (v == "1024x768" || v == "4:3") g_videoAspect = 1;
@@ -760,7 +772,7 @@ int main(int argc, char** argv) {
     if (!g_diskB.isEmpty()) w.insertDiskAndBoot(g_diskB, 1);
     w.setHddWritable(g_hddRw);
     w.setHddController(g_hddCtl);
-    if (!g_video.isEmpty()) w.startVideo(g_video, g_videoCodec, g_videoAspect);
+    if (!g_video.isEmpty()) w.startVideo(g_video, g_videoCodec, g_videoAspect, g_videoAudio);
     if (!g_hddB.isEmpty()) w.attachHdd(g_hddB, 1, g_hdd.isEmpty());
     if (!g_hdd.isEmpty()) w.attachHdd(g_hdd, 0, true);
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <deque>
+#include <vector>
 #include <mutex>
 #include "Ay8910.h"
 
@@ -46,6 +47,13 @@ public:
     size_t available();
     void clear();
 
+    // Отвод для записи видео: каждый отсчёт копируется ещё и сюда — независимо от
+    // вывода на звуковую карту (выключенный вывод, обрезка задержки в read/trimTo),
+    // поэтому в записи нет ни пропусков, ни лишнего. Включение очищает отвод.
+    void setCapture(bool on);
+    void takeCaptured(std::vector<int16_t>& out);   // забрать накопленное (out заменяется)
+    int sampleRate() const { return sampleRate_; }
+
 private:
     int sampleRate_, cpuFreq_;
     bool enabled_ = true;
@@ -59,6 +67,8 @@ private:
     bool covox_ = false;
     double covoxLevel_ = 0.0, covoxAcc_ = 0.0, covoxDc_ = 0.0;
     std::deque<int16_t> buf_;   // FIFO of generated samples (O(1) push/pop at both ends)
+    bool capture_ = false;
+    std::vector<int16_t> cap_;  // отвод для записи видео
     std::mutex mtx_;
 };
 
