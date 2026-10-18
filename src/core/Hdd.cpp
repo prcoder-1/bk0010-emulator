@@ -30,6 +30,96 @@ bool Ide::decodeSmk(uint16_t addr, HddDrive::Reg& r) {
     return true;
 }
 
+bool Ide::decodeSamara(uint16_t addr, HddDrive::Reg& r) {
+    const uint16_t a = addr & ~1;
+    if (a == 0177620) { r = HddDrive::DRIVE_ADDR; return true; }
+    if (a == 0177622) { r = HddDrive::CTRL; return true; }
+    if (a < 0177640 || a > 0177656) return false;
+    // 0177640 — статус/команда (1F7), ... 0177656 — данные (1F0).
+    r = static_cast<HddDrive::Reg>((0177656 - a) / 2);
+    return true;
+}
+
+namespace {
+// Блок накопителя в логике процессора (данные на диске инверсные).
+bool cpuBlock(const HddDrive& d, uint32_t lba, uint16_t* w) {
+    uint8_t b[HddDrive::SECTOR_BYTES];
+    if (!d.peekSector(lba, b)) return false;
+    for (int i = 0; i < HddDrive::SECTOR_WORDS; ++i)
+        w[i] = static_cast<uint16_t>(~(b[2 * i] | (b[2 * i + 1] << 8)));
+    return true;
+}
+
+bool samaraMap(const HddDrive& d, HddMap& m) {
+    uint16_t b[HddDrive::SECTOR_WORDS], h[HddDrive::SECTOR_WORDS];
+    if (!cpuBlock(d, 1, b)) return false;
+    const int s = b[2] & 0377, heads = (b[2] >> 8) + 1;
+    if (s == 0 || b[1] != s * heads || s != d.sectors() || heads != d.heads()) return false;
+    for (int k = 0; 3 + 2 * k + 1 < HddDrive::SECTOR_WORDS; ++k) {
+        const uint32_t hdr = b[3 + 2 * k] | (static_cast<uint32_t>(b[4 + 2 * k]) << 16);
+        if (hdr == 0) break;
+        if (hdr < 3 || hdr >= d.totalSectors() || !cpuBlock(d, hdr, h) || (h[0] & 0377) != 2 + k)
+            return false;
+        HddLogicalDisk ld;
+        ld.unit = 2 + k;
+        ld.first = hdr + 1;
+        ld.blocks = h[1];
+        ld.flags = h[2];
+        m.disks.push_back(ld);
+    }
+    if (m.disks.empty()) return false;
+    m.kind = HddMap::Kind::Samara;
+    m.bootUnit = b[0];
+    return true;
+}
+
+bool altProMap(const HddDrive& d, HddMap& m) {
+    uint16_t b[HddDrive::SECTOR_WORDS];
+    if (!cpuBlock(d, 7, b)) return false;
+    if (b[255] != d.cylinders() || b[254] != d.heads() || b[253] != d.sectors()) return false;
+    const int n = b[252] & 0377;
+    if (n == 0 || 2 * n + 4 > 255) return false;
+    uint16_t crc = 012701;
+    for (int i = 0; i < 2 * n + 4; ++i) crc = static_cast<uint16_t>(crc + b[255 - i]);
+    if (crc != b[251 - 2 * n]) return false;
+    for (int k = 0; k < n; ++k) {
+        const uint16_t pos = b[251 - 2 * k];
+        HddLogicalDisk ld;
+        ld.unit = 2 + k;
+        ld.first = (static_cast<uint32_t>(pos >> 4) * d.heads() + (pos & 017)) * d.sectors();
+        ld.blocks = b[250 - 2 * k];
+        m.disks.push_back(ld);
+    }
+    m.kind = HddMap::Kind::AltPro;
+    m.bootUnit = b[252] >> 8;
+    return true;
+}
+}
+
+HddMap readHddMap(const HddDrive& d) {
+    HddMap m;
+    if (!d.attached()) return m;
+    if (samaraMap(d, m)) return m;
+    m = HddMap();
+    if (altProMap(d, m)) return m;
+    return HddMap();
+}
+
+HddMap::Kind hdiLayout(const std::string& path) {
+    HddDrive d;
+    if (!d.attach(path, true, false)) return HddMap::Kind::None;
+    return readHddMap(d).kind;
+}
+
+const char* hddMapName(HddMap::Kind k) {
+    switch (k) {
+    case HddMap::Kind::AltPro: return "АльтПро";
+    case HddMap::Kind::Samara: return "Самара";
+    case HddMap::Kind::None:   break;
+    }
+    return "не опознана";
+}
+
 bool HddDrive::attach(const std::string& path, bool readOnly, bool slave, std::string* err) {
     detach();
     auto bad = [&](const char* why) { if (err) *err = why; if (f_) { std::fclose(f_); f_ = nullptr; } return false; };
@@ -72,7 +162,7 @@ std::string HddDrive::model() const {
     return s;
 }
 
-bool HddDrive::readSector(uint32_t lba, uint8_t* dst) {
+bool HddDrive::readSector(uint32_t lba, uint8_t* dst) const {
     auto it = overlay_.find(lba);
     if (it != overlay_.end()) { std::memcpy(dst, it->second.data(), SECTOR_BYTES); return true; }
     const off_t pos = static_cast<off_t>(lba + 1) * SECTOR_BYTES;   // +1 — паспорт

@@ -112,6 +112,23 @@ static QString g_diskRom;            // --disk-rom smk|326|<файл>: прош�
 // дискета, по умолчанию только на чтение; --hdd-rw пишет изменения в файл.
 static QString g_hdd, g_hddB;
 static bool    g_hddRw = false;
+// --hdd-ctl auto|smk|samara: контроллер винчестера (auto — по разметке образа).
+static bk::Board::HddController g_hddCtl = bk::Board::HddController::Auto;
+
+static bool parseHddCtl(const QString& s, bk::Board::HddController& out) {
+    const QString v = s.toLower();
+    if (v == "auto") out = bk::Board::HddController::Auto;
+    else if (v == "smk" || v == "smk512") out = bk::Board::HddController::Smk;
+    else if (v == "samara" || v == "самара") out = bk::Board::HddController::Samara;
+    else return false;
+    return true;
+}
+
+// Попадёт ли образ на контроллер «Самара» (ему плата СМК-512 не нужна).
+static bool hddOnSamara(bk::Board::HddController ctl, const std::string& path) {
+    if (ctl != bk::Board::HddController::Auto) return ctl == bk::Board::HddController::Samara;
+    return bk::hdiLayout(path) == bk::HddMap::Kind::Samara;
+}
 
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
@@ -168,6 +185,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     // после подключения образа — включение питания.
     if (!g_hdd.isEmpty() || !g_hddB.isEmpty()) {
         if (!g_diskRom.isEmpty()) board.setDiskRom(g_diskRom.toStdString());
+        board.setHddController(g_hddCtl);
         if (!g_hddB.isEmpty() && !board.attachHdd(1, g_hddB.toStdString(), !g_hddRw)) return 7;
         if (!g_hdd.isEmpty() && !board.attachHdd(0, g_hdd.toStdString(), !g_hddRw)) return 7;
         if (board.bootFromHdd())
@@ -423,11 +441,14 @@ static void printHelp(const char* prog) {
         "  --disk-sides 1|2       число сторон (по умолчанию — по размеру образа)\n"
         "  --disk-rom smk|326|<файл>  прошивка контроллера: smk512.rom, disk326.rom или своя\n"
         "\n"
-        "Винчестер (IDE платы СМК-512, образы HDI эмулятора GID):\n"
+        "Винчестер (IDE платы СМК-512 или контроллера «Самара», образы HDI эмулятора GID):\n"
         "  --hdd <образ.hdi>      подключить винчестер (master) и загрузиться с него;\n"
-        "                         включает СМК-512 и её прошивку smk512.rom\n"
+        "                         СМК: включает плату и её прошивку smk512.rom,\n"
+        "                         «Самара»: прошивка КНГМД samara.rom, плата не нужна\n"
         "  --hdd-b <образ.hdi>    второй винчестер (slave)\n"
         "  --hdd-rw               изменения пишутся в файл образа (иначе — только в память)\n"
+        "  --hdd-ctl auto|smk|samara  контроллер винчестера; auto (по умолчанию) — по\n"
+        "                         разметке образа: «Самара» — её контроллер, иначе СМК\n"
         "\n"
         "Тайминг и экран:\n"
         "  --cpu-phase 0|1        фаза такта ЦП относительно окна 037 (по умолчанию 0)\n"
@@ -454,7 +475,7 @@ static void printHelp(const char* prog) {
         "Прочее:\n"
         "  --server               MCP-сервер (JSON-RPC 2.0 по stdio) для отладки через Claude;\n"
         "                         понимает --roms, --machine, --bk10/--bk11m, --ay/--no-ay,\n"
-        "                         --smk/--no-smk, --disk, --disk-rw, --hdd, --hdd-rw\n"
+        "                         --smk/--no-smk, --disk, --disk-rw, --hdd, --hdd-rw, --hdd-ctl\n"
         "                         и позиционный образ диска или винчестера\n"
         "  --keytest              самопроверка перевода клавиш Qt в коды БК\n"
         "  -h, --help             эта справка\n"
@@ -492,6 +513,7 @@ int main(int argc, char** argv) {
             bool smk = true;               // СМК-512 по умолчанию стоит
             std::string disk; bool diskRw = false;
             std::string hdd; bool hddRw = false;
+            bk::Board::HddController hddCtl = bk::Board::HddController::Auto;
             int machine = 1, ay = -1, ay2 = -1, covox = -1;   // по умолчанию — БК-0011М
             for (int j = 1; j < argc; ++j) {
                 if (std::string(argv[j]) == "--machine" && j + 1 < argc)
@@ -513,9 +535,13 @@ int main(int argc, char** argv) {
                 else if (std::string(argv[j]) == "--hdd" && j + 1 < argc) hdd = argv[j + 1];
                 else if (argv[j][0] != '-' && bk::looksLikeHdi(argv[j])) hdd = argv[j];
                 else if (std::string(argv[j]) == "--hdd-rw") hddRw = true;
+                else if (std::string(argv[j]) == "--hdd-ctl" && j + 1 < argc)
+                    parseHddCtl(QString::fromLocal8Bit(argv[j + 1]), hddCtl);
             }
-            if (!hdd.empty()) smk = true;  // винчестер — узел платы СМК-512
-            McpServer server(romDir.toStdString(), smk, disk, diskRw, machine, ay, hdd, hddRw, ay2, covox);
+            // Винчестер СМК — узел платы СМК-512; «Самаре» плата не нужна.
+            if (!hdd.empty() && !hddOnSamara(hddCtl, hdd)) smk = true;
+            McpServer server(romDir.toStdString(), smk, disk, diskRw, machine, ay, hdd, hddRw, ay2, covox,
+                             hddCtl);
             return server.run();
         }
     }
@@ -593,6 +619,12 @@ int main(int argc, char** argv) {
         else if (args[i] == "--hdd" && i + 1 < args.size()) g_hdd = args[++i];
         else if (args[i] == "--hdd-b" && i + 1 < args.size()) g_hddB = args[++i];
         else if (args[i] == "--hdd-rw") g_hddRw = true;
+        else if (args[i] == "--hdd-ctl" && i + 1 < args.size()) {
+            if (!parseHddCtl(args[++i], g_hddCtl)) {
+                std::fprintf(stderr, "--hdd-ctl: ожидается auto, smk или samara\n");
+                return 2;
+            }
+        }
         else if (args[i] == "--smk") g_smk = 1;
         else if (args[i] == "--no-smk") g_smk = 0;
         else if (args[i] == "--aspect34") g_aspect34 = 1;
@@ -636,8 +668,18 @@ int main(int argc, char** argv) {
                              "(отключить — ключом --no-smk)\n");
     }
 
-    // Винчестер — узел платы СМК-512: без неё регистров НЖМД на шине нет.
-    if (!g_hdd.isEmpty() || !g_hddB.isEmpty()) {
+    // Винчестер СМК — узел платы СМК-512: без неё регистров НЖМД на шине нет. У «Самары»
+    // своя плата, а драйвер — в прошивке КНГМД.
+    const QString hddFirst = g_hdd.isEmpty() ? g_hddB : g_hdd;
+    if (!hddFirst.isEmpty() && hddOnSamara(g_hddCtl, hddFirst.toStdString())) {
+        std::fprintf(stderr, "Винчестер: контроллер «Самара» (0177620–0177656, прошивка samara.rom)\n");
+        // На БК-0010 загрузчику нужна память на месте Бейсика — как и дискете.
+        if (effMachine == 0 && g_smk < 0 && !smkSaved) {
+            g_smk = 1;
+            std::fprintf(stderr, "Винчестер: включён блок расширения памяти СМК-512 "
+                                 "(отключить — ключом --no-smk)\n");
+        }
+    } else if (!hddFirst.isEmpty()) {
         if (g_smk == 0) {
             std::fprintf(stderr, "Винчестер подключается к плате СМК-512 — уберите --no-smk\n");
             return 2;
@@ -665,6 +707,7 @@ int main(int argc, char** argv) {
     else if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
     if (!g_diskB.isEmpty()) w.insertDiskAndBoot(g_diskB, 1);
     w.setHddWritable(g_hddRw);
+    w.setHddController(g_hddCtl);
     if (!g_hddB.isEmpty()) w.attachHdd(g_hddB, 1, g_hdd.isEmpty());
     if (!g_hdd.isEmpty()) w.attachHdd(g_hdd, 0, true);
 

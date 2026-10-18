@@ -25,7 +25,8 @@ public:
                        std::string disk = {}, bool diskRw = false,
                        int machine = 1, int ay = -1,
                        std::string hdd = {}, bool hddRw = false,
-                       int ay2 = -1, int covox = -1);
+                       int ay2 = -1, int covox = -1,
+                       bk::Board::HddController hddCtl = bk::Board::HddController::Auto);
 
     // Run the stdio message loop until EOF. Returns a process exit code.
     int run();
@@ -37,6 +38,9 @@ private:
     QString     lastBin_;
     std::map<uint16_t, std::string> symName_; // addr -> symbol
     std::map<std::string, uint16_t> symAddr_; // symbol -> addr
+    // Свои имена (bk_symbols), а за ними — имена ПЗУ контроллера дисковода (roms/*.sym).
+    const std::string* symAt(uint16_t a) const;
+    bool symAddrOf(const std::string& name, uint16_t& a) const;
     std::vector<uint8_t> memSnap_;            // RAM snapshot for bk_diff_mem
 
     // --- отладка игр ---

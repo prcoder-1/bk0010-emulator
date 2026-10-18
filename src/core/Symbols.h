@@ -31,6 +31,10 @@ public:
         return count;
     }
 
+    // Второй, «нижний» слой: имена из ПЗУ (драйвер контроллера), которые видны, пока
+    // своих нет. В all()/empty()/size() и в сохранение аннотаций он не входит.
+    void setFallback(const SymbolTable* f) { fallback_ = f; }
+
     bool empty() const { return byAddr_.empty(); }
     std::size_t size() const { return byAddr_.size(); }
     const std::map<uint16_t, std::string>& all() const { return byAddr_; }
@@ -54,24 +58,31 @@ public:
     // Exact symbol at `a` (nullptr if none).
     const std::string* nameAt(uint16_t a) const {
         auto it = byAddr_.find(a);
-        return it == byAddr_.end() ? nullptr : &it->second;
+        if (it != byAddr_.end()) return &it->second;
+        return fallback_ ? fallback_->nameAt(a) : nullptr;
     }
     // Nearest symbol at or below `a`, within `maxOff` bytes. Fills base+name.
     bool nearest(uint16_t a, uint16_t& base, std::string& name, uint16_t maxOff = 0x1000) const {
-        if (byAddr_.empty()) return false;
+        bool found = false;
         auto it = byAddr_.upper_bound(a);            // first > a
-        if (it == byAddr_.begin()) return false;
-        --it;                                        // last <= a
-        if (static_cast<uint16_t>(a - it->first) > maxOff) return false;
-        base = it->first; name = it->second; return true;
+        if (it != byAddr_.begin()) {
+            --it;                                    // last <= a
+            if (static_cast<uint16_t>(a - it->first) <= maxOff) { base = it->first; name = it->second; found = true; }
+        }
+        uint16_t fb; std::string fn;                 // ближайший из ПЗУ, если он ближе
+        if (fallback_ && fallback_->nearest(a, fb, fn, maxOff) && (!found || fb > base)) {
+            base = fb; name = fn; found = true;
+        }
+        return found;
     }
     bool addrOf(const std::string& name, uint16_t& out) const {
         auto it = byName_.find(name);
-        if (it == byName_.end()) return false;
+        if (it == byName_.end()) return fallback_ && fallback_->addrOf(name, out);
         out = it->second; return true;
     }
 
 private:
+    const SymbolTable* fallback_ = nullptr;
     std::map<uint16_t, std::string> byAddr_;
     std::map<std::string, uint16_t> byName_;
 
