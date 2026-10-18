@@ -33,11 +33,13 @@
   (вектор 0100) и прерывание клавиатуры (векторы 060 / 0274).
 - **Звук пищалки** — генерация сэмплов в ядре (`Speaker`) с воспроизведением через
   `QAudioSink` (при наличии Qt6 Multimedia). Отключение звука — `Ctrl+M`.
-- **Запись видео** экрана в AVI — меню «Видео» (`Ctrl+F5`) или `--video файл.avi`: кадр
-  видео — кадр БК, частота точно 48,828125 Гц (3125/64), время эмулируемое (пауза в
-  файл не попадает); звук (пищалка, AY, Covox) — вторая дорожка PCM 44,1 кГц, кусок на
-  кадр, без расхождения с картинкой. Кодек выбирается в настройках; сейчас — **ZMBV** (кодек записи
-  экрана DOSBox, без потерь), кадр 1024×768 (точка БК 2×3, как в окне) или 512×256.
+- **Запись видео** экрана со звуком — меню «Видео» (`Ctrl+F5`) или `--video файл.avi|.mp4`:
+  кадр видео — кадр БК, частота точно 48,828125 Гц (3125/64), время эмулируемое (пауза в
+  файл не попадает); звук (пищалка, AY, Covox) — кусок на кадр, без расхождения с
+  картинкой. Кодек выбирается в настройках: **ZMBV + PCM в AVI** (кодек записи экрана
+  DOSBox, без потерь; кадр 1024×768 — точка БК 2×3, как в окне — или 512×256) или
+  **H.264 + AAC в MP4** — формат, который Telegram и телефоны показывают сразу (нужна
+  сборка с FFmpeg).
   Подробности — [docs/video.md](docs/video.md).
 - **Отладчик Soft-ICE** (`F12`) — полупрозрачный оверлей поверх экрана БК:
   регистры/PSW, дизассемблер с подсветкой PC и точками останова, дамп памяти, стек.
@@ -83,16 +85,20 @@
 
 Обязательно: CMake ≥ 3.16, компилятор C++17, Qt 6 (Core, Gui, Widgets,
 OpenGLWidgets) с заголовками (dev-пакеты), OpenGL, zlib (сжатие видео ZMBV).
-Опционально: Qt 6 Multimedia — без него эмулятор собирается, но без звука.
+Опционально: Qt 6 Multimedia — без него эмулятор собирается, но без звука;
+FFmpeg (libavcodec, libavformat, libavutil, libswscale с libx264) — запись видео в MP4
+для Telegram, без него остаётся AVI.
 
 Fedora / RHEL:
 ```sh
 sudo dnf install cmake gcc-c++ qt6-qtbase-devel qt6-qtmultimedia-devel mesa-libGL-devel zlib-devel
+sudo dnf install ffmpeg-devel      # MP4; из RPM Fusion — в ffmpeg-free нет libx264
 ```
 
 Debian / Ubuntu (22.04+):
 ```sh
-sudo apt install cmake g++ qt6-base-dev libgl1-mesa-dev qt6-multimedia-dev zlib1g-dev
+sudo apt install cmake g++ qt6-base-dev libgl1-mesa-dev qt6-multimedia-dev zlib1g-dev \
+                 libavcodec-dev libavformat-dev libswscale-dev
 ```
 Если CMake не находит `Qt6OpenGLWidgets`, доустановите `libqt6opengl6-dev`.
 
@@ -317,7 +323,7 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`, `--no-arb037`, `--cpu-phase 0|1`,
 `--scanline` / `--no-scanline`, `--smk` / `--no-smk`, `--disk <образ>` / `--disk-rw`,
 `--machine bk10|bk11m`, `--ay` / `--no-ay`, `--mstd`, `--key <код>`, `--keyframe N`,
-`--video <файл.avi>` (все `--frames` кадров в видео, со звуком), `--video-codec`, `--video-size`,
+`--video <файл.avi|.mp4>` (все `--frames` кадров в видео, со звуком), `--video-codec zmbv|h264`, `--video-size`,
 `--no-video-audio`.
 
 `--scanline` включает **построчную отрисовку**: каждая строка рисуется тем значением

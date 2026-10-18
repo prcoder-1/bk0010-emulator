@@ -19,7 +19,7 @@
 #include "ui/FlameChartWidget.h"
 #include "ui/HotChartWidget.h"
 #include "VideoCapture.h"
-#include "Zmbv.h"
+#include "VideoSink.h"
 #include <QMouseEvent>
 #include "ui/BkKeymap.h"
 #include "mcp/McpServer.h"
@@ -490,12 +490,15 @@ static void printHelp(const char* prog) {
         "  --hdd-ctl auto|smk|samara  контроллер винчестера; auto (по умолчанию) — по\n"
         "                         разметке образа: «Самара» — её контроллер, иначе СМК\n"
         "\n"
-        "Видео (запись экрана в AVI, частота кадров БК — 48,828125 Гц):\n"
+        "Видео (запись экрана со звуком в AVI или MP4, частота кадров БК — 48,828125 Гц):\n"
         "  --video <файл.avi>     записывать экран с первого кадра (GUI — до остановки\n"
         "                         записи или выхода, безголовый режим — все --frames кадров)\n"
-        "  --video-codec zmbv     кодек (GUI — по умолчанию из настроек, безголовый — zmbv)\n"
+        "  --video-codec zmbv|h264  zmbv — AVI без потерь (ZMBV + PCM); h264 — MP4 (H.264 +\n"
+        "                         AAC) для Telegram и телефонов, нужна сборка с FFmpeg. Без\n"
+        "                         ключа — по расширению (.mp4 — h264), иначе GUI — из\n"
+        "                         настроек, безголовый режим — zmbv\n"
         "  --video-size 1024x768|512x256  кадр: точка БК блоком 2x3 (4:3, по умолчанию)\n"
-        "                         или как буфер экрана с пометкой «показывать 4:3»\n"
+        "                         или как буфер экрана с пометкой «показывать 4:3» (только AVI)\n"
         "  --no-video-audio       без звука (по умолчанию звук пищалки, AY и Covox пишется\n"
         "                         в тот же файл: PCM 44,1 кГц моно); --video-audio — со звуком\n"
         "\n"
@@ -671,9 +674,10 @@ int main(int argc, char** argv) {
         else if (args[i] == "--video" && i + 1 < args.size()) g_video = args[++i];
         else if (args[i] == "--video-codec" && i + 1 < args.size()) {
             g_videoCodec = args[++i].toLower();
-            bool known = false;
-            for (const auto& c : bk::videoCodecs()) known |= g_videoCodec.toStdString() == c;
-            if (!known) { std::fprintf(stderr, "--video-codec: неизвестный кодек %s\n", qPrintable(g_videoCodec)); return 2; }
+            if (g_videoCodec == "mp4" || g_videoCodec == "h.264") g_videoCodec = "h264";
+            if (g_videoCodec == "avi") g_videoCodec = "zmbv";
+            const std::string why = bk::videoCodecUnavailableReason(g_videoCodec.toStdString());
+            if (!why.empty()) { std::fprintf(stderr, "--video-codec %s: %s\n", qPrintable(g_videoCodec), why.c_str()); return 2; }
         }
         else if (args[i] == "--video-audio") g_videoAudio = 1;
         else if (args[i] == "--no-video-audio") g_videoAudio = 0;
@@ -730,6 +734,18 @@ int main(int argc, char** argv) {
         g_smk = 1;
         std::fprintf(stderr, "Дискета: включён блок расширения памяти СМК-512 "
                              "(отключить — ключом --no-smk)\n");
+    }
+
+    // Кодек по расширению файла --video, если не задан ключом: .mp4 — H.264 + AAC.
+    if (!g_video.isEmpty() && g_videoCodec.isEmpty()) {
+        if (const bk::VideoCodecInfo* c = bk::videoCodecForPath(g_video.toStdString())) {
+            const std::string why = bk::videoCodecUnavailableReason(c->name);
+            if (!why.empty()) {
+                std::fprintf(stderr, "--video %s: %s\n", qPrintable(g_video), why.c_str());
+                return 2;
+            }
+            g_videoCodec = QString::fromStdString(c->name);
+        }
     }
 
     // Винчестер СМК — узел платы СМК-512: без неё регистров НЖМД на шине нет. У «Самары»

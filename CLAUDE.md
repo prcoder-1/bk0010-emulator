@@ -56,7 +56,7 @@ ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, ove
 the СМК-512 or the «Самара» controller, `docs/hdd.md`),
 `--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
-`--video <file.avi>` / `--video-codec zmbv` / `--video-size 1024x768|512x256` /
+`--video <file.avi|.mp4>` / `--video-codec zmbv|h264` (default: by extension) / `--video-size 1024x768|512x256` /
 `--video-audio` / `--no-video-audio` (screen capture with sound, GUI and headless, `docs/video.md`),
 `--scanline` (per-scanline rendering — each line drawn with the palette/screen values live
 when the beam crossed it and the scroll latched for the field, driven off the `Vp037` raster; OFF by default,
@@ -364,7 +364,13 @@ Key cross-cutting facts to know before editing the CPU or screen:
   and `setEnabled(false)` (feed() still runs while capturing). Each frame's samples go into an
   `01wb` chunk right after its `00dc`; the tap is armed at a frame START (GUI: `frameRec_` at
   phase 0), so audio and video start together and stay in sync (903.168 samples/frame).
-  New codecs: implement `VideoEncoder`, register in `videoCodecs()`/`makeVideoEncoder`.
+  Formats are `VideoSink`s (`src/core/VideoSink`: container + codecs, registry
+  `videoCodecList/findVideoCodec/videoCodecForPath/makeVideoSink`): `AviSink` (ZMBV + PCM,
+  splittable) and `Mp4Sink` (`src/core/FfmpegVideo.cpp`, H.264 libx264 + AAC, faststart — the
+  Telegram format). FFmpeg is OPTIONAL: CMake pkg-config `libavcodec libavformat libavutil
+  libswscale` → `BK_HAVE_FFMPEG` (PUBLIC on bkcore); `h264` is listed only if libx264 and aac
+  exist at runtime. MP4 forces the 1024x768 square-pixel frame (`squarePixelsOnly`) — Telegram
+  players may ignore `pasp`. New format: another `VideoSink` + a row in `knownCodecs()`.
 - **`MpiDevice` has two read paths**: `mpiRead` (side effects allowed — reading
   `0177132` clears TR) for the CPU and `mpiPeek` (const, side-effect-free) for the
   debugger/disassembler/screen. `Memory::peek*` must never call `mpiRead`.

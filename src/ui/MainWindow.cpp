@@ -11,7 +11,7 @@
 #include "AudioOut.h"
 #include "Disasm.h"
 #include "VideoCapture.h"
-#include "Zmbv.h"
+#include "VideoSink.h"
 #include <QDateTime>
 #include <QStandardPaths>
 #include <vector>
@@ -201,10 +201,10 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     });
     QMenu* codecMenu = vid->addMenu("&Кодек");
     auto* codecGroup = new QActionGroup(this);
-    const QString curCodec = QSettings().value("video/codec", QString::fromStdString(bk::videoCodecs().front())).toString();
-    for (const auto& c : bk::videoCodecs()) {
-        const QString name = QString::fromStdString(c);
-        QAction* a = codecMenu->addAction(name == "zmbv" ? "ZMBV — Zip Motion Blocks Video (DOSBox), без потерь" : name.toUpper());
+    const QString curCodec = QSettings().value("video/codec", QString::fromStdString(bk::videoCodecList().front().name)).toString();
+    for (const auto& c : bk::videoCodecList()) {
+        const QString name = QString::fromStdString(c.name);
+        QAction* a = codecMenu->addAction(QString::fromStdString(c.title));
         a->setCheckable(true);
         a->setChecked(name == curCodec);
         codecGroup->addAction(a);
@@ -215,7 +215,7 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     const bool cur43 = QSettings().value("video/aspect43", true).toBool();
     for (int v = 1; v >= 0; --v) {
         QAction* a = sizeMenu->addAction(v ? "1024×768 — точка БК блоком 2×3 (4:3, как в окне)"
-                                           : "512×256 — как буфер экрана, с пометкой «показывать 4:3»");
+                                           : "512×256 — как буфер экрана, с пометкой «показывать 4:3» (только AVI)");
         a->setCheckable(true);
         a->setChecked(cur43 == (v == 1));
         sizeGroup->addAction(a);
@@ -311,18 +311,38 @@ MainWindow::~MainWindow() { stopVideo(); }
 bool MainWindow::startVideo(const QString& path, const QString& codec, int aspect, int audio) {
     stopVideo();
     QString file = path;
+    // Кодек: явный (--video-codec), иначе по расширению файла, иначе из настроек.
+    std::string cname = codec.toStdString();
+    if (cname.empty() && !file.isEmpty())
+        if (const bk::VideoCodecInfo* c = bk::videoCodecForPath(file.toStdString())) cname = c->name;
+    if (cname.empty()) cname = QSettings().value("video/codec", "zmbv").toString().toStdString();
+    if (!bk::findVideoCodec(cname)) cname = bk::videoCodecList().front().name;   // настройка от другой сборки
     if (file.isEmpty()) {
         QSettings st;
         QString dir = st.value("video/dir").toString();
         if (dir.isEmpty()) dir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
-        const QString def = dir + "/bk_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".avi";
-        file = QFileDialog::getSaveFileName(this, "Записывать видео в файл", def, "Видео AVI (*.avi)");
+        const QString ext = QString::fromStdString(bk::findVideoCodec(cname)->ext);
+        const QString def = dir + "/bk_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ext;
+        QStringList filters;
+        QString sel;
+        for (const auto& c : bk::videoCodecList()) {
+            filters << QString("%1 (*%2)").arg(QString::fromStdString(c.title), QString::fromStdString(c.ext));
+            if (c.name == cname) sel = filters.back();
+        }
+        file = QFileDialog::getSaveFileName(this, "Записывать видео в файл", def, filters.join(";;"), &sel);
         if (file.isEmpty()) { videoAction_->setChecked(false); return false; }
-        if (!file.endsWith(".avi", Qt::CaseInsensitive)) file += ".avi";
+        // Расширение известного кодека решает, в чём писать; без него — дописать своё.
+        if (const bk::VideoCodecInfo* c = bk::videoCodecForPath(file.toStdString())) cname = c->name;
+        else file += ext;
         st.setValue("video/dir", QFileInfo(file).absolutePath());
     }
+    if (const std::string why = bk::videoCodecUnavailableReason(cname); !why.empty()) {
+        status_->setText(QString("Видео не записывается: %1").arg(QString::fromStdString(why)));
+        videoAction_->setChecked(false);
+        return false;
+    }
     bk::VideoCapture::Options o;
-    o.codec = (codec.isEmpty() ? QSettings().value("video/codec", "zmbv").toString() : codec).toStdString();
+    o.codec = cname;
     o.aspect43 = aspect < 0 ? QSettings().value("video/aspect43", true).toBool() : aspect != 0;
     // Звук — тот же поток, что идёт в колонки (пищалка, AY, Covox), но с отдельного
     // отвода: выключенный звук (Ctrl+M) запись не глушит. Отвод включается в начале
@@ -339,7 +359,7 @@ bool MainWindow::startVideo(const QString& path, const QString& codec, int aspec
         return false;
     }
     videoAction_->setChecked(true);
-    status_->setText(QString("Запись видео: %1 (%2, %3×%4, %5 Гц%6)").arg(file, QString::fromStdString(o.codec).toUpper())
+    status_->setText(QString("Запись видео: %1 (%2, %3×%4, %5 Гц%6)").arg(file, cname == "h264" ? "H.264 + AAC" : "ZMBV")
                          .arg(video_->outWidth()).arg(video_->outHeight())
                          .arg(double(board_->cpuFreqHz()) / board_->ticksPerFrame(), 0, 'f', 6)
                          .arg(o.audioRate ? QString(", звук %1 Гц").arg(o.audioRate) : QString(", без звука")));

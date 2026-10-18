@@ -10,10 +10,10 @@
 
 namespace bk {
 
-class AviWriter;
-class VideoEncoder;
+class VideoSink;
 
-// Запись экрана эмулятора в видеофайл AVI. Кадр видео — один кадр БК, поэтому
+// Запись экрана эмулятора в видеофайл: AVI (ZMBV + PCM) или MP4 (H.264 + AAC, если
+// эмулятор собран с FFmpeg) — см. VideoSink. Кадр видео — один кадр БК, поэтому
 // частота точно та же, что у машины: rate/scale = такт ЦП / такты кадра
 // (3 000 000 / 61 440 = 4 000 000 / 81 920 = 48,828125 Гц = 3125/64). Время в файле —
 // эмулируемое: пауза и отладчик в видео не попадают, торможение хоста — тоже.
@@ -27,9 +27,10 @@ class VideoEncoder;
 class VideoCapture {
 public:
     struct Options {
-        std::string codec = "zmbv";
+        std::string codec = "zmbv";            // название из videoCodecList()
         // true — кадр 1024x768: точка БК (512x256) — блоком 2x3, как пиксель 3:4 в окне
-        // GUI; false — как буфер, 512x256, с пометкой в AVI «показывать 4:3».
+        // GUI; false — как буфер, 512x256, с пометкой «показывать 4:3» (только AVI: MP4
+        // всегда 1024x768).
         bool aspect43 = true;
         uint64_t splitBytes = 1000000000ULL;
         int audioRate = 0;          // частота отсчётов звука; 0 — без звука
@@ -50,6 +51,7 @@ public:
     double seconds() const { return fpsNum_ ? double(queued_) * fpsDen_ / fpsNum_ : 0; }
     std::string error() const;                 // ошибка из потока записи (пусто — нет)
     std::string currentFile() const;
+    const std::string& codec() const { return opt_.codec; }
     int outWidth() const { return outW_; }
     int outHeight() const { return outH_; }
 
@@ -66,8 +68,7 @@ private:
     uint64_t queued_ = 0;
     int part_ = 1;
 
-    std::unique_ptr<AviWriter> avi_;
-    std::unique_ptr<VideoEncoder> enc_;
+    std::unique_ptr<VideoSink> sink_;
     std::thread thread_;
     mutable std::mutex m_;
     std::condition_variable cv_, space_;
