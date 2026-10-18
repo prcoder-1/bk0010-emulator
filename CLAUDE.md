@@ -56,8 +56,8 @@ ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, ove
 the СМК-512 or the «Самара» controller, `docs/hdd.md`),
 `--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
-`--video <file.avi>` / `--video-codec zmbv` / `--video-size 1024x768|512x256` (screen capture,
-GUI and headless, `docs/video.md`),
+`--video <file.avi>` / `--video-codec zmbv` / `--video-size 1024x768|512x256` /
+`--video-audio` / `--no-video-audio` (screen capture with sound, GUI and headless, `docs/video.md`),
 `--scanline` (per-scanline rendering — each line drawn with the palette/screen values live
 when the beam crossed it and the scroll latched for the field, driven off the `Vp037` raster; OFF by default,
 see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
@@ -359,6 +359,11 @@ Key cross-cutting facts to know before editing the CPU or screen:
   300 frames, one deflate stream reset only on keyframes. Files split at ~1 GB (AVI 1.0 limit)
   into `name_002.avi`… with a fresh keyframe. 512x256 mode adds an OpenDML `vprp` 4:3 aspect.
   SIGINT/SIGTERM close the GUI normally (`MainWindow::requestQuit`) so the AVI index is written.
+  Sound: a second PCM stream (16-bit mono, Speaker's 44.1 kHz) from a separate lossless tap
+  (`Speaker::setCapture/takeCaptured`) — independent of the sound-card FIFO, its trimming, mute
+  and `setEnabled(false)` (feed() still runs while capturing). Each frame's samples go into an
+  `01wb` chunk right after its `00dc`; the tap is armed at a frame START (GUI: `frameRec_` at
+  phase 0), so audio and video start together and stay in sync (903.168 samples/frame).
   New codecs: implement `VideoEncoder`, register in `videoCodecs()`/`makeVideoEncoder`.
 - **`MpiDevice` has two read paths**: `mpiRead` (side effects allowed — reading
   `0177132` clears TR) for the CPU and `mpiPeek` (const, side-effect-free) for the

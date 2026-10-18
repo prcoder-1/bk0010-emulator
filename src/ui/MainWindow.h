@@ -59,8 +59,8 @@ public:
     void setHddWritable(bool on) { hddRw_ = on; }   // --hdd-rw: изменения — в файл
     void setHddController(bk::Board::HddController c);   // --hdd-ctl
     // Запись экрана в видео (меню «Видео», --video). Пустой path — спросить имя;
-    // пустой codec и aspect < 0 — из настроек.
-    bool startVideo(const QString& path, const QString& codec = QString(), int aspect = -1);
+    // пустой codec, aspect < 0 и audio < 0 — из настроек.
+    bool startVideo(const QString& path, const QString& codec = QString(), int aspect = -1, int audio = -1);
     void stopVideo();
     // Из обработчика сигнала: закрыть окно на следующем тике таймера.
     static void requestQuit() { quitRequested_ = 1; }
@@ -163,8 +163,10 @@ private:
     std::unique_ptr<bk::VideoCapture> video_;
     QAction* videoAction_ = nullptr;
     QLabel* videoLabel_ = nullptr;
-    bool frameDone_ = false;
-    static inline volatile std::sig_atomic_t quitRequested_ = 0;          // за этот круг слайсов досчитан кадр БК
+    bool frameDone_ = false;          // за этот круг слайсов досчитан кадр БК
+    bool frameRec_ = false;           // кадр начат при идущей записи — он попадёт в видео
+    std::vector<int16_t> videoAudio_; // звук кадра для записи
+    static inline volatile std::sig_atomic_t quitRequested_ = 0;   // запрос закрытия из обработчика сигнала
     void updateVideoLabel();
     void openHdd(int unit);
     void detachHdds();

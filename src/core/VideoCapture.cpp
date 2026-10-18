@@ -26,7 +26,7 @@ bool VideoCapture::openPart(std::string* err) {
     const std::string name = partName(part_);
     // 512x256 показывается 4:3 (пиксель БК не квадратный); 1024x768 уже 4:3 сам.
     if (!avi_->open(name, outW_, outH_, enc_->fourcc(), enc_->bitCount(), fpsNum_, fpsDen_,
-                    opt_.aspect43 ? 0 : 4, opt_.aspect43 ? 0 : 3, err))
+                    opt_.aspect43 ? 0 : 4, opt_.aspect43 ? 0 : 3, err, opt_.audioRate, 1))
         return false;
     std::lock_guard<std::mutex> l(m_);
     file_ = name;
@@ -53,16 +53,18 @@ bool VideoCapture::start(const std::string& path, const Options& opt, int srcW, 
     return true;
 }
 
-void VideoCapture::addFrame(const uint32_t* argb) {
+void VideoCapture::addFrame(const uint32_t* argb, const int16_t* audio, size_t count) {
     if (!active_) return;
     std::unique_lock<std::mutex> l(m_);
     // Очередь ограничена: если кодировщик не успевает, эмуляция подождёт — кадры
     // не теряются, иначе сбилась бы частота.
     space_.wait(l, [&] { return queue_.size() < 16; });
-    std::vector<uint32_t> buf;
-    if (!spare_.empty()) { buf.swap(spare_.back()); spare_.pop_back(); }
-    buf.assign(argb, argb + static_cast<size_t>(srcW_) * srcH_);
-    queue_.push_back(std::move(buf));
+    Item it;
+    if (!spare_.empty()) { it = std::move(spare_.back()); spare_.pop_back(); }
+    it.frame.assign(argb, argb + static_cast<size_t>(srcW_) * srcH_);
+    if (opt_.audioRate > 0 && audio) it.audio.assign(audio, audio + count);
+    else it.audio.clear();
+    queue_.push_back(std::move(it));
     ++queued_;
     cv_.notify_one();
 }
@@ -72,15 +74,16 @@ void VideoCapture::worker() {
     std::vector<uint8_t> packet;
     bool forceKey = true;
     for (;;) {
-        std::vector<uint32_t> src;
+        Item item;
         {
             std::unique_lock<std::mutex> l(m_);
             cv_.wait(l, [&] { return stopping_ || !queue_.empty(); });
             if (queue_.empty()) break;               // stopping_ и всё записано
-            src.swap(queue_.front());
+            item = std::move(queue_.front());
             queue_.pop_front();
             space_.notify_one();
         }
+        const std::vector<uint32_t>& src = item.frame;
         const uint32_t* frame = src.data();
         if (opt_.aspect43) {
             scaled.resize(static_cast<size_t>(outW_) * outH_);
@@ -103,12 +106,13 @@ void VideoCapture::worker() {
             if (!ok) { std::lock_guard<std::mutex> l(m_); error_ = err.empty() ? "ошибка записи" : err; }
         }
         bool key = false;
-        if (ok) ok = enc_->encode(frame, forceKey, packet, key) && avi_->writeFrame(packet.data(), packet.size(), key);
+        if (ok) ok = enc_->encode(frame, forceKey, packet, key) && avi_->writeFrame(packet.data(), packet.size(), key)
+                     && avi_->writeAudio(item.audio.data(), item.audio.size());
         forceKey = false;
         {
             std::lock_guard<std::mutex> l(m_);
             if (!ok && error_.empty()) error_ = "ошибка записи " + file_;
-            if (spare_.size() < 4) spare_.push_back(std::move(src));
+            if (spare_.size() < 4) spare_.push_back(std::move(item));
         }
         if (!ok) {                                       // дальше писать некуда — сливаем очередь
             std::lock_guard<std::mutex> l(m_);

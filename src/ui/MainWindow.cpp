@@ -221,6 +221,10 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
         sizeGroup->addAction(a);
         connect(a, &QAction::triggered, this, [v] { QSettings().setValue("video/aspect43", v == 1); });
     }
+    QAction* vAudio = vid->addAction("Записывать &звук");
+    vAudio->setCheckable(true);
+    vAudio->setChecked(QSettings().value("video/audio", true).toBool());
+    connect(vAudio, &QAction::toggled, this, [](bool on) { QSettings().setValue("video/audio", on); });
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
@@ -304,7 +308,7 @@ MainWindow::~MainWindow() { stopVideo(); }
 
 // Запись видео. path пусто — спросить имя (по умолчанию bk_ГГГГММДД_ЧЧММСС.avi в папке
 // прошлой записи); codec пусто и aspect < 0 — из настроек.
-bool MainWindow::startVideo(const QString& path, const QString& codec, int aspect) {
+bool MainWindow::startVideo(const QString& path, const QString& codec, int aspect, int audio) {
     stopVideo();
     QString file = path;
     if (file.isEmpty()) {
@@ -320,6 +324,12 @@ bool MainWindow::startVideo(const QString& path, const QString& codec, int aspec
     bk::VideoCapture::Options o;
     o.codec = (codec.isEmpty() ? QSettings().value("video/codec", "zmbv").toString() : codec).toStdString();
     o.aspect43 = aspect < 0 ? QSettings().value("video/aspect43", true).toBool() : aspect != 0;
+    // Звук — тот же поток, что идёт в колонки (пищалка, AY, Covox), но с отдельного
+    // отвода: выключенный звук (Ctrl+M) запись не глушит. Отвод включается в начале
+    // следующего кадра (runOneSlice), чтобы звук и картинка начались вместе.
+    if (audio < 0 ? QSettings().value("video/audio", true).toBool() : audio != 0)
+        o.audioRate = board_->sound().sampleRate();
+    frameRec_ = false;
     if (!video_) video_ = std::make_unique<bk::VideoCapture>();
     std::string err;
     if (!video_->start(file.toStdString(), o, bk::Screen::TEX_W, bk::Screen::TEX_H,
@@ -329,9 +339,10 @@ bool MainWindow::startVideo(const QString& path, const QString& codec, int aspec
         return false;
     }
     videoAction_->setChecked(true);
-    status_->setText(QString("Запись видео: %1 (%2, %3×%4, %5 Гц)").arg(file, QString::fromStdString(o.codec).toUpper())
+    status_->setText(QString("Запись видео: %1 (%2, %3×%4, %5 Гц%6)").arg(file, QString::fromStdString(o.codec).toUpper())
                          .arg(video_->outWidth()).arg(video_->outHeight())
-                         .arg(double(board_->cpuFreqHz()) / board_->ticksPerFrame(), 0, 'f', 6));
+                         .arg(double(board_->cpuFreqHz()) / board_->ticksPerFrame(), 0, 'f', 6)
+                         .arg(o.audioRate ? QString(", звук %1 Гц").arg(o.audioRate) : QString(", без звука")));
     updateVideoLabel();
     return true;
 }
@@ -342,6 +353,8 @@ void MainWindow::stopVideo() {
     const uint64_t n = video_->frames();
     const double sec = video_->seconds();
     const bool ok = video_->stop();
+    board_->sound().setCapture(false);
+    frameRec_ = false;
     if (videoAction_) videoAction_->setChecked(false);
     if (videoLabel_) videoLabel_->hide();
     if (status_)
@@ -389,8 +402,14 @@ void MainWindow::runOneSlice(int kSlices) {
             board_->pressKey(keyFeed_.front());
             keyFeed_.pop_front();
         }
+        // Запись видео: кадр попадает в файл, только если начался при идущей записи, —
+        // тогда и звук для него набран с его первого такта.
+        if (phase_ == 0 && video_ && video_->active()) {
+            if (!frameRec_ && video_->hasAudio()) board_->sound().setCapture(true);
+            frameRec_ = true;
+        }
         board_->runFrameSlice(phase_, kSlices);
-        if (phase_ == kSlices - 1) frameDone_ = true;   // кадр БК досчитан — в видео
+        if (phase_ == kSlices - 1) frameDone_ = frameRec_;   // кадр БК досчитан — в видео
         if (board_->breakHit()) {          // stopped at a breakpoint
             board_->clearBreakHit();
             setPaused(true);
@@ -403,7 +422,8 @@ void MainWindow::runOneSlice(int kSlices) {
     phase_ = 0;
     renderScreen();
     if (frameDone_ && video_ && video_->active()) {
-        video_->addFrame(board_->screen().pixels());
+        if (video_->hasAudio()) board_->sound().takeCaptured(videoAudio_);
+        video_->addFrame(board_->screen().pixels(), videoAudio_.data(), video_->hasAudio() ? videoAudio_.size() : 0);
         if (!video_->error().empty()) stopVideo();
         else if (video_->frames() % 25 == 0) updateVideoLabel();
     }
