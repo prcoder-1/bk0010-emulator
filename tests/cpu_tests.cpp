@@ -13,6 +13,14 @@
 #include "Ay8910.h"
 #include "Zmbv.h"
 #include "VideoCapture.h"
+#include "VideoSink.h"
+#ifdef BK_HAVE_FFMPEG
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
+}
+#endif
 #include <zlib.h>
 #include <fstream>
 #include <algorithm>
@@ -3001,6 +3009,89 @@ int main() {
                   "Видео: звук PCM 44,1 кГц вторым потоком, кусок на кадр, длина дорожки в отсчётах");
             std::filesystem::remove(wav);
         }
+        CHECK(videoCodecForPath("/x/a.MP4") && videoCodecForPath("/x/a.MP4")->name == "h264"
+              && videoCodecForPath("a.avi") && videoCodecForPath("a.avi")->name == "zmbv"
+              && !videoCodecForPath("a.mkv") && !videoCodecForPath("dir.mp4/a") && findVideoCodec("zmbv"),
+              "Видео: кодек по расширению (.mp4 — h264, .avi — zmbv), ZMBV есть всегда");
+#ifdef BK_HAVE_FFMPEG
+        // MP4 для Telegram: H.264 + AAC, faststart, частота 3125/64, кадр всегда 2x3.
+        if (findVideoCodec("h264")) {
+            const std::string mp4 = (dir / "bk_cpu_tests_video.mp4").string();
+            VideoCapture vm;
+            VideoCapture::Options mo;
+            mo.codec = "h264";
+            mo.aspect43 = false;                       // MP4 сам переходит на 2x3
+            mo.audioRate = 44100;
+            std::vector<int16_t> tone(903);
+            for (size_t i = 0; i < tone.size(); ++i) tone[i] = int16_t((i / 50) & 1 ? 8000 : -8000);
+            bool okM = vm.start(mp4, mo, W, H, 3000000, 61440);
+            for (int t = 0; t < 60 && okM; ++t) { const auto f = scene(t); vm.addFrame(f.data(), tone.data(), tone.size()); }
+            okM = okM && vm.stop();
+            const std::vector<uint8_t> v = rd(mp4);
+            const size_t moov = find(v, "moov"), mdat = find(v, "mdat");
+            AVFormatContext* fc = nullptr;
+            bool streams = false, picture = false;
+            double vdur = 0, adur = 0;
+            if (okM && avformat_open_input(&fc, mp4.c_str(), nullptr, nullptr) == 0 && avformat_find_stream_info(fc, nullptr) >= 0) {
+                const AVStream* vs = nullptr; const AVStream* as = nullptr;
+                for (unsigned i = 0; i < fc->nb_streams; ++i) {
+                    if (fc->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) vs = fc->streams[i];
+                    if (fc->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) as = fc->streams[i];
+                }
+                streams = vs && as && vs->codecpar->codec_id == AV_CODEC_ID_H264 && as->codecpar->codec_id == AV_CODEC_ID_AAC
+                          && vs->codecpar->width == 2 * W && vs->codecpar->height == 3 * H
+                          && vs->codecpar->format == AV_PIX_FMT_YUV420P
+                          && vs->avg_frame_rate.num * 64 == vs->avg_frame_rate.den * 3125
+                          && as->codecpar->sample_rate == 44100 && as->codecpar->ch_layout.nb_channels == 1;
+                if (vs) vdur = double(vs->duration) * av_q2d(vs->time_base);
+                if (as) adur = double(as->duration) * av_q2d(as->time_base);
+                // Первый кадр: декодировать и сравнить с исходным (сжатие с потерями).
+                if (vs) {
+                    const AVCodec* dc = avcodec_find_decoder(vs->codecpar->codec_id);
+                    AVCodecContext* cc = avcodec_alloc_context3(dc);
+                    avcodec_parameters_to_context(cc, vs->codecpar);
+                    AVPacket* pk = av_packet_alloc(); AVFrame* fr = av_frame_alloc();
+                    if (avcodec_open2(cc, dc, nullptr) == 0) {
+                        bool got = false;
+                        while (!got && av_read_frame(fc, pk) >= 0) {
+                            if (pk->stream_index == vs->index && avcodec_send_packet(cc, pk) >= 0)
+                                got = avcodec_receive_frame(cc, fr) == 0;
+                            av_packet_unref(pk);
+                        }
+                        if (!got) { avcodec_send_packet(cc, nullptr); got = avcodec_receive_frame(cc, fr) == 0; }
+                        if (got) {
+                            std::vector<uint32_t> rgb(size_t(2 * W) * 3 * H);
+                            SwsContext* sc = sws_getContext(fr->width, fr->height, AVPixelFormat(fr->format), fr->width, fr->height,
+                                                            AV_PIX_FMT_BGRA, SWS_POINT, nullptr, nullptr, nullptr);
+                            sws_setColorspaceDetails(sc, sws_getCoefficients(SWS_CS_ITU709), 0,
+                                                     sws_getCoefficients(SWS_CS_DEFAULT), 1, 0, 1 << 16, 1 << 16);
+                            uint8_t* dst[1] = {reinterpret_cast<uint8_t*>(rgb.data())};
+                            const int ds[1] = {2 * W * 4};
+                            sws_scale(sc, fr->data, fr->linesize, 0, fr->height, dst, ds);
+                            sws_freeContext(sc);
+                            const auto f0 = scene(0);
+                            double e = 0;
+                            for (int y = 0; y < H; ++y)
+                                for (int x = 0; x < W; ++x) {
+                                    const uint32_t a = f0[y * W + x], b = rgb[size_t(3 * y + 1) * 2 * W + 2 * x];
+                                    for (int k = 0; k < 24; k += 8) e += std::abs(int((a >> k) & 255) - int((b >> k) & 255));
+                                }
+                            picture = e / (W * H * 3) < 8.0;
+                        }
+                    }
+                    av_frame_free(&fr); av_packet_free(&pk); avcodec_free_context(&cc);
+                }
+                avformat_close_input(&fc);
+            }
+            const double want = 60 * 64.0 / 3125;
+            CHECK(okM && streams, "MP4: H.264 yuv420p 2x3 кадра + AAC 44,1 кГц моно, 3125/64 кадра/с");
+            CHECK(moov != size_t(-1) && mdat != size_t(-1) && moov < mdat, "MP4: faststart — moov перед mdat");
+            CHECK(std::fabs(vdur - want) < 0.03 && std::fabs(adur - want) < 0.05,
+                  "MP4: длительности видео и звука — 60 кадров БК (1,229 с)");
+            CHECK(picture, "MP4: первый кадр после сжатия близок к исходному");
+            std::filesystem::remove(mp4);
+        }
+#endif
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

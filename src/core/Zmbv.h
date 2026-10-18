@@ -18,11 +18,6 @@ public:
     virtual bool encode(const uint32_t* argb, bool keyframe, std::vector<uint8_t>& out, bool& isKey) = 0;
 };
 
-// Названия кодеков для настроек и ключа --video-codec; первый — по умолчанию.
-const std::vector<std::string>& videoCodecs();
-// nullptr — кодек неизвестен.
-std::unique_ptr<VideoEncoder> makeVideoEncoder(const std::string& name, int width, int height);
-
 // ZMBV — Zip Motion Blocks Video, кодек записи экрана DOSBox (FourCC «ZMBV»): кадр
 // режется на блоки 16x16, для каждого ищется вектор сдвига относительно прошлого
 // кадра, и записывается XOR с ним; всё вместе сжимается одним потоком deflate,

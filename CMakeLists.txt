@@ -36,10 +36,24 @@ add_library(bkcore STATIC
     src/core/AviWriter.cpp
     src/core/Zmbv.cpp
     src/core/VideoCapture.cpp
+    src/core/VideoSink.cpp
 )
 target_include_directories(bkcore PUBLIC src/core)
 find_package(Threads REQUIRED)
 target_link_libraries(bkcore PUBLIC ZLIB::ZLIB Threads::Threads)
+# FFmpeg (необязательно) — запись видео в MP4: H.264 (libx264) + AAC, формат для Telegram.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(FFMPEG IMPORTED_TARGET libavcodec libavformat libavutil libswscale)
+endif()
+if(FFMPEG_FOUND)
+    target_sources(bkcore PRIVATE src/core/FfmpegVideo.cpp)
+    target_compile_definitions(bkcore PUBLIC BK_HAVE_FFMPEG=1)
+    target_link_libraries(bkcore PUBLIC PkgConfig::FFMPEG)
+    message(STATUS "FFmpeg found: video recording to MP4 (H.264 + AAC) enabled")
+else()
+    message(STATUS "FFmpeg NOT found: MP4 recording disabled, AVI (ZMBV) only")
+endif()
 
 # --- GUI application ---
 set(APP_SOURCES

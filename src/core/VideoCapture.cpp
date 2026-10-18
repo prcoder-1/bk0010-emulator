@@ -1,6 +1,5 @@
 #include "VideoCapture.h"
-#include "AviWriter.h"
-#include "Zmbv.h"
+#include "VideoSink.h"
 #include <cstdio>
 #include <numeric>
 
@@ -20,14 +19,16 @@ std::string VideoCapture::partName(int part) const {
 }
 
 bool VideoCapture::openPart(std::string* err) {
-    enc_ = makeVideoEncoder(opt_.codec, outW_, outH_);
-    if (!enc_) { if (err) *err = "неизвестный кодек " + opt_.codec; return false; }
-    avi_ = std::make_unique<AviWriter>();
+    if (!sink_) sink_ = makeVideoSink(opt_.codec);
+    if (!sink_) { if (err) *err = videoCodecUnavailableReason(opt_.codec); return false; }
     const std::string name = partName(part_);
-    // 512x256 показывается 4:3 (пиксель БК не квадратный); 1024x768 уже 4:3 сам.
-    if (!avi_->open(name, outW_, outH_, enc_->fourcc(), enc_->bitCount(), fpsNum_, fpsDen_,
-                    opt_.aspect43 ? 0 : 4, opt_.aspect43 ? 0 : 3, err, opt_.audioRate, 1))
-        return false;
+    VideoParams p;
+    p.width = outW_; p.height = outH_;
+    p.fpsNum = fpsNum_; p.fpsDen = fpsDen_;
+    // 512x256 показывается 4:3: точка БК 2:3; 1024x768 уже 4:3 сам.
+    if (!opt_.aspect43) { p.sarNum = 2; p.sarDen = 3; }
+    p.audioRate = opt_.audioRate;
+    if (!sink_->open(name, p, err)) { sink_.reset(); return false; }
     std::lock_guard<std::mutex> l(m_);
     file_ = name;
     return true;
@@ -38,15 +39,20 @@ bool VideoCapture::start(const std::string& path, const Options& opt, int srcW, 
     stop();
     opt_ = opt;
     path_ = path;
+    sink_ = makeVideoSink(opt_.codec);
+    if (!sink_) { if (err) *err = videoCodecUnavailableReason(opt_.codec); return false; }
+    // MP4 для телефонов и Telegram — только квадратная точка: форму точки там могут
+    // не учесть, и 512x256 показалось бы сплюснутым.
+    if (sink_->squarePixelsOnly()) opt_.aspect43 = true;
     srcW_ = srcW; srcH_ = srcH;
-    outW_ = opt.aspect43 ? srcW * 2 : srcW;
-    outH_ = opt.aspect43 ? srcH * 3 : srcH;
+    outW_ = opt_.aspect43 ? srcW * 2 : srcW;
+    outH_ = opt_.aspect43 ? srcH * 3 : srcH;
     const uint32_t g = std::gcd(fpsNum, fpsDen);
     fpsNum_ = fpsNum / (g ? g : 1); fpsDen_ = fpsDen / (g ? g : 1);
     part_ = 1;
     queued_ = 0;
     error_.clear();
-    if (!openPart(err)) { avi_.reset(); enc_.reset(); return false; }
+    if (!openPart(err)) return false;
     stopping_ = false;
     active_ = true;
     thread_ = std::thread(&VideoCapture::worker, this);
@@ -71,7 +77,6 @@ void VideoCapture::addFrame(const uint32_t* argb, const int16_t* audio, size_t c
 
 void VideoCapture::worker() {
     std::vector<uint32_t> scaled;
-    std::vector<uint8_t> packet;
     bool forceKey = true;
     for (;;) {
         Item item;
@@ -96,29 +101,28 @@ void VideoCapture::worker() {
             }
             frame = scaled.data();
         }
-        bool ok = avi_ && avi_->isOpen();
-        if (ok && avi_->bytes() >= opt_.splitBytes) {    // следующий файл — с опорного кадра
-            ok = avi_->close();
+        bool ok = sink_ != nullptr;
+        if (ok && sink_->splittable() && sink_->bytes() >= opt_.splitBytes) {   // следующий файл — с опорного кадра
+            ok = sink_->close();
+            sink_.reset();
             ++part_;
             std::string err;
             ok = ok && openPart(&err);
             forceKey = true;
             if (!ok) { std::lock_guard<std::mutex> l(m_); error_ = err.empty() ? "ошибка записи" : err; }
         }
-        bool key = false;
-        if (ok) ok = enc_->encode(frame, forceKey, packet, key) && avi_->writeFrame(packet.data(), packet.size(), key)
-                     && avi_->writeAudio(item.audio.data(), item.audio.size());
+        if (ok) ok = sink_->write(frame, item.audio.data(), item.audio.size(), forceKey);
         forceKey = false;
         {
             std::lock_guard<std::mutex> l(m_);
-            if (!ok && error_.empty()) error_ = "ошибка записи " + file_;
+            if (!ok && error_.empty()) error_ = (sink_ && !sink_->error().empty() ? sink_->error() : "ошибка записи") + " — " + file_;
             if (spare_.size() < 4) spare_.push_back(std::move(item));
         }
         if (!ok) {                                       // дальше писать некуда — сливаем очередь
             std::lock_guard<std::mutex> l(m_);
             queue_.clear();
             space_.notify_all();
-            if (avi_) avi_->close();
+            if (sink_) { sink_->close(); sink_.reset(); }
         }
     }
 }
@@ -133,10 +137,11 @@ bool VideoCapture::stop() {
     if (thread_.joinable()) thread_.join();
     active_ = false;
     bool ok = error_.empty();
-    if (avi_ && avi_->isOpen()) ok = avi_->close() && ok;
+    if (sink_) {
+        if (!sink_->close()) { ok = false; if (error_.empty()) error_ = sink_->error() + " — " + file_; }
+        sink_.reset();
+    }
     if (!ok && error_.empty()) error_ = "ошибка записи " + file_;
-    avi_.reset();
-    enc_.reset();
     return ok;
 }
 

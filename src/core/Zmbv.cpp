@@ -6,16 +6,6 @@
 
 namespace bk {
 
-const std::vector<std::string>& videoCodecs() {
-    static const std::vector<std::string> names = {"zmbv"};
-    return names;
-}
-
-std::unique_ptr<VideoEncoder> makeVideoEncoder(const std::string& name, int width, int height) {
-    if (name == "zmbv") return std::make_unique<ZmbvEncoder>(width, height);
-    return nullptr;
-}
-
 struct ZmbvEncoder::Z {
     z_stream s{};
     bool ok = false;
