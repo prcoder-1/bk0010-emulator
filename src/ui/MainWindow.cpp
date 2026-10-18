@@ -10,6 +10,10 @@
 #include "HotChartWidget.h"
 #include "AudioOut.h"
 #include "Disasm.h"
+#include "VideoCapture.h"
+#include "Zmbv.h"
+#include <QDateTime>
+#include <QStandardPaths>
 #include <vector>
 #include <QMenuBar>
 #include <QMenu>
@@ -186,6 +190,38 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     joyStatus->setEnabled(false);
     syncMachineMenu();
 
+    // Запись экрана в видео. Кодек и размер кадра — настройки, действуют со следующей
+    // записи; ключи --video-codec / --video-size перекрывают их на один запуск.
+    QMenu* vid = menuBar()->addMenu("&Видео");
+    videoAction_ = vid->addAction("&Записывать видео…");
+    videoAction_->setCheckable(true);
+    videoAction_->setShortcut(QKeySequence("Ctrl+F5"));
+    connect(videoAction_, &QAction::triggered, this, [this](bool on) {
+        if (on) startVideo(QString(), QString(), -1); else stopVideo();
+    });
+    QMenu* codecMenu = vid->addMenu("&Кодек");
+    auto* codecGroup = new QActionGroup(this);
+    const QString curCodec = QSettings().value("video/codec", QString::fromStdString(bk::videoCodecs().front())).toString();
+    for (const auto& c : bk::videoCodecs()) {
+        const QString name = QString::fromStdString(c);
+        QAction* a = codecMenu->addAction(name == "zmbv" ? "ZMBV — Zip Motion Blocks Video (DOSBox), без потерь" : name.toUpper());
+        a->setCheckable(true);
+        a->setChecked(name == curCodec);
+        codecGroup->addAction(a);
+        connect(a, &QAction::triggered, this, [name] { QSettings().setValue("video/codec", name); });
+    }
+    QMenu* sizeMenu = vid->addMenu("Кадр &видео");
+    auto* sizeGroup = new QActionGroup(this);
+    const bool cur43 = QSettings().value("video/aspect43", true).toBool();
+    for (int v = 1; v >= 0; --v) {
+        QAction* a = sizeMenu->addAction(v ? "1024×768 — точка БК блоком 2×3 (4:3, как в окне)"
+                                           : "512×256 — как буфер экрана, с пометкой «показывать 4:3»");
+        a->setCheckable(true);
+        a->setChecked(cur43 == (v == 1));
+        sizeGroup->addAction(a);
+        connect(a, &QAction::triggered, this, [v] { QSettings().setValue("video/aspect43", v == 1); });
+    }
+
     QMenu* dbg = menuBar()->addMenu("&Отладка");
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
     dbg->addAction("&ДОЗУ СМК-512 по страницам…", this, &MainWindow::openSmkRam, QKeySequence("Ctrl+D"));
@@ -230,6 +266,10 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
 
     status_ = new QLabel("Готов", this);
     statusBar()->addWidget(status_);
+    videoLabel_ = new QLabel(this);
+    videoLabel_->setStyleSheet("color: #d22; font-weight: bold;");
+    videoLabel_->hide();
+    statusBar()->addPermanentWidget(videoLabel_);
 
     // --- Таймер эмуляции. Кадр разбит на 4 слайса, чтобы звук подавался непрерывно,
     // а не одним всплеском на кадр (это давало слышимое «вобблирование»); экран и
@@ -260,9 +300,64 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     resize(1024, 768);
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() { stopVideo(); }
+
+// Запись видео. path пусто — спросить имя (по умолчанию bk_ГГГГММДД_ЧЧММСС.avi в папке
+// прошлой записи); codec пусто и aspect < 0 — из настроек.
+bool MainWindow::startVideo(const QString& path, const QString& codec, int aspect) {
+    stopVideo();
+    QString file = path;
+    if (file.isEmpty()) {
+        QSettings st;
+        QString dir = st.value("video/dir").toString();
+        if (dir.isEmpty()) dir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+        const QString def = dir + "/bk_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".avi";
+        file = QFileDialog::getSaveFileName(this, "Записывать видео в файл", def, "Видео AVI (*.avi)");
+        if (file.isEmpty()) { videoAction_->setChecked(false); return false; }
+        if (!file.endsWith(".avi", Qt::CaseInsensitive)) file += ".avi";
+        st.setValue("video/dir", QFileInfo(file).absolutePath());
+    }
+    bk::VideoCapture::Options o;
+    o.codec = (codec.isEmpty() ? QSettings().value("video/codec", "zmbv").toString() : codec).toStdString();
+    o.aspect43 = aspect < 0 ? QSettings().value("video/aspect43", true).toBool() : aspect != 0;
+    if (!video_) video_ = std::make_unique<bk::VideoCapture>();
+    std::string err;
+    if (!video_->start(file.toStdString(), o, bk::Screen::TEX_W, bk::Screen::TEX_H,
+                       static_cast<uint32_t>(board_->cpuFreqHz()), static_cast<uint32_t>(board_->ticksPerFrame()), &err)) {
+        status_->setText(QString("Видео не записывается: %1 — %2").arg(file, QString::fromStdString(err)));
+        videoAction_->setChecked(false);
+        return false;
+    }
+    videoAction_->setChecked(true);
+    status_->setText(QString("Запись видео: %1 (%2, %3×%4, %5 Гц)").arg(file, QString::fromStdString(o.codec).toUpper())
+                         .arg(video_->outWidth()).arg(video_->outHeight())
+                         .arg(double(board_->cpuFreqHz()) / board_->ticksPerFrame(), 0, 'f', 6));
+    updateVideoLabel();
+    return true;
+}
+
+void MainWindow::stopVideo() {
+    if (!video_ || !video_->active()) return;
+    const QString file = QString::fromStdString(video_->currentFile());
+    const uint64_t n = video_->frames();
+    const double sec = video_->seconds();
+    const bool ok = video_->stop();
+    if (videoAction_) videoAction_->setChecked(false);
+    if (videoLabel_) videoLabel_->hide();
+    if (status_)
+        status_->setText(ok ? QString("Видео записано: %1 — %2 кадров, %3 с").arg(file).arg(n).arg(sec, 0, 'f', 1)
+                            : QString("Ошибка записи видео: %1").arg(QString::fromStdString(video_->error())));
+}
+
+void MainWindow::updateVideoLabel() {
+    if (!video_ || !video_->active()) return;
+    const int s = static_cast<int>(video_->seconds());
+    videoLabel_->setText(QString("● ЗАПИСЬ %1:%2").arg(s / 60, 2, 10, QChar('0')).arg(s % 60, 2, 10, QChar('0')));
+    videoLabel_->show();
+}
 
 void MainWindow::onTick() {
+    if (quitRequested_) { quitRequested_ = 0; close(); return; }
     static constexpr int kSlices = 4;   // слайсов на кадр
     // Длительность слайса в наносекундах: кадр 61440 тактов при 3 МГц (81920 при
     // 4 МГц у БК-0011М) = 20,48 мс.
@@ -295,6 +390,7 @@ void MainWindow::runOneSlice(int kSlices) {
             keyFeed_.pop_front();
         }
         board_->runFrameSlice(phase_, kSlices);
+        if (phase_ == kSlices - 1) frameDone_ = true;   // кадр БК досчитан — в видео
         if (board_->breakHit()) {          // stopped at a breakpoint
             board_->clearBreakHit();
             setPaused(true);
@@ -306,6 +402,12 @@ void MainWindow::runOneSlice(int kSlices) {
     if (++phase_ < kSlices) return;
     phase_ = 0;
     renderScreen();
+    if (frameDone_ && video_ && video_->active()) {
+        video_->addFrame(board_->screen().pixels());
+        if (!video_->error().empty()) stopVideo();
+        else if (video_->frames() % 25 == 0) updateVideoLabel();
+    }
+    frameDone_ = false;
     if (paused_) overlay_->update();
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
     if (smkram_ && smkram_->isVisible()) smkram_->refresh();
@@ -557,6 +659,7 @@ void MainWindow::loadAnnotations(const QString& path) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {
+    stopVideo();                          // дописать индекс AVI
     saveAnnotations(annotationsPath());   // persist symbols/comments next to the .bin
     saveDisks();
     QMainWindow::closeEvent(e);

@@ -14,6 +14,8 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGLWidgets)
 # Multimedia is optional (used only for sound, Stage 3). Build works without it.
 find_package(Qt6 QUIET COMPONENTS Multimedia)
+# zlib — сжатие кадров видео (кодек ZMBV)
+find_package(ZLIB REQUIRED)
 
 # --- Core emulation library (no Qt dependency) ---
 add_library(bkcore STATIC
@@ -31,8 +33,13 @@ add_library(bkcore STATIC
     src/core/Kngmd.cpp
     src/core/Board.cpp
     src/core/Vm1Timing.cpp
+    src/core/AviWriter.cpp
+    src/core/Zmbv.cpp
+    src/core/VideoCapture.cpp
 )
 target_include_directories(bkcore PUBLIC src/core)
+find_package(Threads REQUIRED)
+target_link_libraries(bkcore PUBLIC ZLIB::ZLIB Threads::Threads)
 
 # --- GUI application ---
 set(APP_SOURCES

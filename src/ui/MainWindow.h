@@ -19,7 +19,9 @@ class FlameWidget;
 class FlameChartWidget;
 class HotChartWidget;
 class AudioOut;
+namespace bk { class VideoCapture; }
 #include <QElapsedTimer>
+#include <csignal>
 class QAction;
 
 class QTimer;
@@ -56,6 +58,12 @@ public:
     bool attachHdd(const QString& path, int unit = 0, bool boot = true);
     void setHddWritable(bool on) { hddRw_ = on; }   // --hdd-rw: изменения — в файл
     void setHddController(bk::Board::HddController c);   // --hdd-ctl
+    // Запись экрана в видео (меню «Видео», --video). Пустой path — спросить имя;
+    // пустой codec и aspect < 0 — из настроек.
+    bool startVideo(const QString& path, const QString& codec = QString(), int aspect = -1);
+    void stopVideo();
+    // Из обработчика сигнала: закрыть окно на следующем тике таймера.
+    static void requestQuit() { quitRequested_ = 1; }
 
     // Потактовая эмуляция арбитража КР1801ВП1-037 (ожидания доступа к ДОЗУ).
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
@@ -152,6 +160,12 @@ private:
     QString lastHdd_;       // последний подключённый образ винчестера
     bool hddRw_ = false;
     std::vector<std::pair<QAction*, bk::Board::HddController>> hddCtlActions_;
+    std::unique_ptr<bk::VideoCapture> video_;
+    QAction* videoAction_ = nullptr;
+    QLabel* videoLabel_ = nullptr;
+    bool frameDone_ = false;
+    static inline volatile std::sig_atomic_t quitRequested_ = 0;          // за этот круг слайсов досчитан кадр БК
+    void updateVideoLabel();
     void openHdd(int unit);
     void detachHdds();
     void saveDisks();

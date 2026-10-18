@@ -11,11 +11,16 @@
 #include "Speaker.h"
 #include "Fdd.h"
 #include "Ay8910.h"
+#include "Zmbv.h"
+#include "VideoCapture.h"
+#include <zlib.h>
+#include <fstream>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -2823,6 +2828,134 @@ int main() {
             CHECK(b.attachHdd(0, path, true) && !b.hddSamara(), "«Самара»: --hdd-ctl smk перекрывает разметку");
         }
         std::filesystem::remove(path);
+    }
+
+    // ---- Видео: ZMBV туда и обратно, AVI с частотой БК, продолжение в новом файле ----
+    {
+        // Минимальный декодер ZMBV (8 бит, по ffmpeg zmbv.c): кадр -> ARGB.
+        struct Dec {
+            int w, h; z_stream s{}; uint8_t pal[768] = {};
+            std::vector<uint8_t> prev, cur, buf;
+            Dec(int w_, int h_) : w(w_), h(h_), prev(w_ * h_, 0), cur(w_ * h_, 0), buf(w_ * h_ * 2 + 4096) { inflateInit(&s); }
+            ~Dec() { inflateEnd(&s); }
+            bool frame(const std::vector<uint8_t>& d, std::vector<uint32_t>& out) {
+                size_t p = 1;
+                const uint8_t fl = d[0];
+                if (fl & ZmbvEncoder::KEYFRAME) {
+                    if (d[1] != 0 || d[2] != 1 || d[3] != 1 || d[4] != ZmbvEncoder::FMT_8BPP || d[5] != 16 || d[6] != 16) return false;
+                    p = 7;
+                    inflateReset(&s);
+                }
+                s.next_in = const_cast<uint8_t*>(d.data() + p); s.avail_in = uInt(d.size() - p);
+                s.next_out = buf.data(); s.avail_out = uInt(buf.size());
+                if (inflate(&s, Z_SYNC_FLUSH) != Z_OK) return false;
+                const uint8_t* b = buf.data();
+                if (fl & ZmbvEncoder::KEYFRAME) {
+                    std::copy(b, b + 768, pal);
+                    std::copy(b + 768, b + 768 + w * h, cur.begin());
+                } else {
+                    if (fl & ZmbvEncoder::DELTA_PALETTE) { for (int i = 0; i < 768; ++i) pal[i] ^= b[i]; b += 768; }
+                    const int bx = (w + 15) / 16, by = (h + 15) / 16;
+                    const uint8_t* vec = b;
+                    const uint8_t* x8 = b + ((bx * by * 2 + 3) & ~3);
+                    for (int j = 0; j < by; ++j)
+                        for (int i = 0; i < bx; ++i) {
+                            const int k = j * bx + i;
+                            const int dx = int8_t(vec[2 * k]) >> 1, dy = int8_t(vec[2 * k + 1]) >> 1;
+                            const bool xr = vec[2 * k] & 1;
+                            const int bw = std::min(16, w - i * 16), bh = std::min(16, h - j * 16);
+                            for (int y = 0; y < bh; ++y)
+                                for (int x = 0; x < bw; ++x) {
+                                    const int sx = i * 16 + x + dx, sy = j * 16 + y + dy;
+                                    uint8_t v = (sx < 0 || sy < 0 || sx >= w || sy >= h) ? 0 : prev[sy * w + sx];
+                                    if (xr) v ^= *x8++;
+                                    cur[(j * 16 + y) * w + i * 16 + x] = v;
+                                }
+                        }
+                }
+                out.resize(w * h);
+                for (int i = 0; i < w * h; ++i)
+                    out[i] = 0xFF000000u | pal[cur[i] * 3] << 16 | pal[cur[i] * 3 + 1] << 8 | pal[cur[i] * 3 + 2];
+                prev = cur;
+                return true;
+            }
+        };
+        const int W = 72, H = 40;                       // края блоков неполные: 72 = 4·16+8, 40 = 2·16+8
+        auto scene = [&](int t) {                       // полосы, ползущие вправо; с 5-го кадра — новые цвета
+            std::vector<uint32_t> f(W * H);
+            const uint32_t c[5] = {0xFF000000u, 0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFFFFFF00u};
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x)
+                    f[y * W + x] = c[((x - t) / 3 + y / 7 + 100) % (t >= 5 ? 5 : 3)];
+            if (t == 9) f[5 * W + 7] = 0xFF123456u;     // одна точка нового цвета
+            return f;
+        };
+        ZmbvEncoder enc(W, H, 4, 7);                     // опорный — каждые 7 кадров
+        Dec dec(W, H);
+        bool rt = true, sawDeltaPal = false, sawVector = false, keys = true;
+        std::vector<uint8_t> pkt; std::vector<uint32_t> back;
+        for (int t = 0; t < 20 && rt; ++t) {
+            const std::vector<uint32_t> f = scene(t);
+            bool key = false;
+            rt = enc.encode(f.data(), false, pkt, key) && dec.frame(pkt, back) && back == f;
+            keys = keys && key == (t % 7 == 0);
+            sawDeltaPal |= !key && (pkt[0] & ZmbvEncoder::DELTA_PALETTE);
+        }
+        // Сдвиг на точку должен находиться вектором, а не XOR всего блока.
+        {
+            ZmbvEncoder e2(64, 32, 4, 1000);
+            std::vector<uint32_t> a(64 * 32), b2(64 * 32);
+            for (int i = 0; i < 64 * 32; ++i) a[i] = (((i % 64) * 7 + (i / 64) * 13) % 5) ? 0xFFFFFFFFu : 0xFF0000FFu;
+            for (int y = 0; y < 32; ++y) for (int x = 0; x < 64; ++x) b2[y * 64 + x] = a[y * 64 + std::max(0, x - 1)];
+            std::vector<uint8_t> p1, p2; bool k;
+            e2.encode(a.data(), true, p1, k);
+            e2.encode(b2.data(), false, p2, k);
+            Dec d2(64, 32); std::vector<uint32_t> o;
+            sawVector = d2.frame(p1, o) && d2.frame(p2, o) && o == b2 && p2.size() < 64;
+        }
+        CHECK(rt && keys, "ZMBV: 20 кадров туда и обратно без потерь, опорные — по интервалу");
+        CHECK(sawDeltaPal, "ZMBV: новые цвета — изменение палитры в промежуточном кадре");
+        CHECK(sawVector, "ZMBV: сдвиг картинки кодируется векторами блоков (кадр меньше 64 байт)");
+
+        // AVI: частота 3125/64 из такта ЦП и длины кадра, размеры в заголовках, продолжение файла.
+        const auto dir = std::filesystem::temp_directory_path();
+        const std::string base = (dir / "bk_cpu_tests_video.avi").string();
+        const std::string part2 = (dir / "bk_cpu_tests_video_002.avi").string();
+        std::filesystem::remove(base); std::filesystem::remove(part2);
+        VideoCapture vc;
+        VideoCapture::Options vo;
+        vo.aspect43 = false;
+        vo.splitBytes = 1000;                            // маленький порог — проверить продолжение
+        bool started = vc.start(base, vo, W, H, 3000000, 61440);
+        for (int t = 0; t < 30 && started; ++t) { const auto f = scene(t * 3); vc.addFrame(f.data()); }
+        const bool stopped = vc.stop();
+        auto rd = [](const std::string& p) {
+            std::ifstream in(p, std::ios::binary);
+            return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        auto u32 = [](const std::vector<uint8_t>& v, size_t o) { return o + 4 <= v.size() ? uint32_t(v[o] | v[o+1] << 8 | v[o+2] << 16 | uint32_t(v[o+3]) << 24) : 0u; };
+        const std::vector<uint8_t> a1 = rd(base), a2 = rd(part2);
+        auto find = [](const std::vector<uint8_t>& v, const char* tag) {
+            for (size_t i = 0; i + 4 <= v.size(); ++i) if (!std::memcmp(&v[i], tag, 4)) return i;
+            return size_t(-1);
+        };
+        bool hdr = a1.size() > 200 && !std::memcmp(a1.data(), "RIFF", 4) && u32(a1, 4) == a1.size() - 8;
+        const size_t strh = find(a1, "strh"), avih = find(a1, "avih"), idx = find(a1, "idx1");
+        uint32_t frames1 = 0, frames2 = 0;
+        if (hdr && strh != size_t(-1) && avih != size_t(-1) && idx != size_t(-1)) {
+            frames1 = u32(a1, avih + 8 + 16);
+            hdr = u32(a1, strh + 8 + 20) == 64 && u32(a1, strh + 8 + 24) == 3125   // dwScale, dwRate
+                  && u32(a1, avih + 8) == 20480                                     // мкс на кадр
+                  && u32(a1, strh + 8 + 32) == frames1 && u32(a1, idx + 4) == frames1 * 16
+                  && find(a1, "vprp") != size_t(-1);
+        }
+        const size_t avih2 = find(a2, "avih");
+        if (avih2 != size_t(-1)) frames2 = u32(a2, avih2 + 8 + 16);
+        CHECK(started && stopped && hdr, "Видео: AVI 3125/64 кадра/с (20480 мкс), счётчики кадров и idx1 сходятся");
+        const std::string part3 = (dir / "bk_cpu_tests_video_003.avi").string();
+        CHECK(frames1 > 0 && frames2 > 0 && !std::filesystem::exists(part3) && frames1 + frames2 == 30,
+              "Видео: файл больше порога продолжается в имя_002.avi, кадры не теряются");
+        std::filesystem::remove(base); std::filesystem::remove(part2); std::filesystem::remove(part3);
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

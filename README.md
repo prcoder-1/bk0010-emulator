@@ -33,6 +33,11 @@
   (вектор 0100) и прерывание клавиатуры (векторы 060 / 0274).
 - **Звук пищалки** — генерация сэмплов в ядре (`Speaker`) с воспроизведением через
   `QAudioSink` (при наличии Qt6 Multimedia). Отключение звука — `Ctrl+M`.
+- **Запись видео** экрана в AVI — меню «Видео» (`Ctrl+F5`) или `--video файл.avi`: кадр
+  видео — кадр БК, частота точно 48,828125 Гц (3125/64), время эмулируемое (пауза в
+  файл не попадает). Кодек выбирается в настройках; сейчас — **ZMBV** (кодек записи
+  экрана DOSBox, без потерь), кадр 1024×768 (точка БК 2×3, как в окне) или 512×256.
+  Подробности — [docs/video.md](docs/video.md).
 - **Отладчик Soft-ICE** (`F12`) — полупрозрачный оверлей поверх экрана БК:
   регистры/PSW, дизассемблер с подсветкой PC и точками останова, дамп памяти, стек.
   Пошаговая отладка с одновременным показом экрана БК.
@@ -76,17 +81,17 @@
 ### Зависимости
 
 Обязательно: CMake ≥ 3.16, компилятор C++17, Qt 6 (Core, Gui, Widgets,
-OpenGLWidgets) с заголовками (dev-пакеты), OpenGL.
+OpenGLWidgets) с заголовками (dev-пакеты), OpenGL, zlib (сжатие видео ZMBV).
 Опционально: Qt 6 Multimedia — без него эмулятор собирается, но без звука.
 
 Fedora / RHEL:
 ```sh
-sudo dnf install cmake gcc-c++ qt6-qtbase-devel qt6-qtmultimedia-devel mesa-libGL-devel
+sudo dnf install cmake gcc-c++ qt6-qtbase-devel qt6-qtmultimedia-devel mesa-libGL-devel zlib-devel
 ```
 
 Debian / Ubuntu (22.04+):
 ```sh
-sudo apt install cmake g++ qt6-base-dev libgl1-mesa-dev qt6-multimedia-dev
+sudo apt install cmake g++ qt6-base-dev libgl1-mesa-dev qt6-multimedia-dev zlib1g-dev
 ```
 Если CMake не находит `Qt6OpenGLWidgets`, доустановите `libqt6opengl6-dev`.
 
@@ -97,7 +102,7 @@ sudo pacman -S cmake base-devel qt6-base qt6-multimedia
 
 openSUSE:
 ```sh
-sudo zypper install cmake gcc-c++ qt6-base-devel qt6-opengl-devel qt6-multimedia-devel
+sudo zypper install cmake gcc-c++ qt6-base-devel qt6-opengl-devel qt6-multimedia-devel zlib-devel
 ```
 
 macOS (Homebrew):
@@ -251,6 +256,7 @@ XOP2/XOP2N на реальной БК-0010-01. Фазу такта процес�
 | `F11`   | Пропорции пикселей: 3:4 (блок 4×3) ↔ квадратные |
 | `Ctrl+R`| Сброс                                       |
 | `Ctrl+M`| Включить/выключить звук                     |
+| `Ctrl+F5`| Начать/остановить запись видео            |
 | `Ctrl+G`| Горячий путь                                |
 | `Ctrl+K`| Граф вызовов                                |
 | `Ctrl+F`| Пламенный граф                              |
@@ -309,7 +315,8 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 Доступны: `--frames N`, `--shot`, `--dbgshot`, `--memvis`, `--hotpath`,
 `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`, `--no-arb037`, `--cpu-phase 0|1`,
 `--scanline` / `--no-scanline`, `--smk` / `--no-smk`, `--disk <образ>` / `--disk-rw`,
-`--machine bk10|bk11m`, `--ay` / `--no-ay`, `--mstd`, `--key <код>`, `--keyframe N`.
+`--machine bk10|bk11m`, `--ay` / `--no-ay`, `--mstd`, `--key <код>`, `--keyframe N`,
+`--video <файл.avi>` (все `--frames` кадров в видео), `--video-codec`, `--video-size`.
 
 `--scanline` включает **построчную отрисовку**: каждая строка рисуется тем значением
 регистра смещения `0177664`, какое стояло, когда луч её проходил (по модели развёртки
