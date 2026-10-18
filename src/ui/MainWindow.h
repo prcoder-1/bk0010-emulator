@@ -13,6 +13,7 @@ class GlScreen;
 class DebuggerOverlay;
 class MemVisWidget;
 class SmkRamWidget;
+class BkRamWidget;
 class HotPathWidget;
 class CallGraphWidget;
 class FlameWidget;
@@ -97,6 +98,7 @@ private slots:
     void openDisk(int drive = 0);
     void openMemVis();
     void openSmkRam();
+    void openBkRam();
     void openHotPath();
     void openCallGraph();
     void openFlame();
@@ -131,6 +133,7 @@ private:
     DebuggerOverlay* overlay_ = nullptr;
     MemVisWidget* memvis_ = nullptr;
     SmkRamWidget* smkram_ = nullptr;
+    BkRamWidget* bkram_ = nullptr;
     HotPathWidget* hotpath_ = nullptr;
     CallGraphWidget* callgraph_ = nullptr;
     FlameWidget* flame_ = nullptr;

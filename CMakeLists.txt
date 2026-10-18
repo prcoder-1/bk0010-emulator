@@ -63,6 +63,8 @@ set(APP_SOURCES
     src/ui/DebuggerOverlay.cpp
     src/ui/MemVisWidget.cpp
     src/ui/SmkRamWidget.cpp
+    src/ui/HexPageView.cpp
+    src/ui/BkRamWidget.cpp
     src/ui/HotPathWidget.cpp
     src/ui/CallGraphWidget.cpp
     src/ui/FlameWidget.cpp
