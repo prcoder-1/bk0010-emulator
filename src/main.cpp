@@ -27,6 +27,7 @@
 #include "Board.h"
 #include "Fdd.h"
 #include "Disasm.h"
+#include "BkKeys.h"
 #include <QKeyEvent>
 #include <QGuiApplication>
 #include <QSettings>
@@ -228,15 +229,15 @@ static int runHeadless(const QString& romDir, const QString& bin,
     }
     // Optional: type a string, one character every few frames, through the same
     // keyboard queue the GUI uses (verifies the key -> register -> ISR -> echo path).
-    int typeIdx = 0;
+    // Текст — в коды КОИ-7 с переключением РУС/ЛАТ, как bk_type в MCP.
+    bool cyr = false;
+    const std::vector<uint16_t> typeCodes = bk::bkEncodeText(typeStr.toStdString(), cyr);
+    size_t typeIdx = 0;
     for (int i = 0; i < frames; ++i) {
         if (keyCode >= 0 && i == keyFrame) board.pressKey(static_cast<uint16_t>(keyCode));
         for (const auto& kv : keys) if (kv.first == i) board.pressKey(static_cast<uint16_t>(kv.second));
-        if (!typeStr.isEmpty() && i >= 60 && typeIdx < typeStr.size() && !board.keyReady()) {
-            QChar c = typeStr[typeIdx++];
-            uint16_t code = (c == '\n') ? 012 : static_cast<uint16_t>(c.unicode() & 0x7f);
-            board.pressKey(code);
-        }
+        if (i >= 60 && typeIdx < typeCodes.size() && !board.keyReady())
+            board.pressKey(typeCodes[typeIdx++]);
         board.runFrame();
         if (video.active()) {
             if (!board.scanlineRender()) board.screen().render(board.memory());
@@ -500,7 +501,7 @@ static void printHelp(const char* prog) {
         "                         разметке образа: «Самара» — её контроллер, иначе СМК\n"
         "\n"
         "Видео (запись экрана со звуком в AVI или MP4, частота кадров БК — 48,828125 Гц):\n"
-        "  --video <файл.avi>     записывать экран с первого кадра (GUI — до остановки\n"
+        "  --video <файл.avi|.mp4>  записывать экран с первого кадра (GUI — до остановки\n"
         "                         записи или выхода, безголовый режим — все --frames кадров)\n"
         "  --video-codec zmbv|h264  zmbv — AVI без потерь (ZMBV + PCM); h264 — MP4 (H.264 +\n"
         "                         AAC) для Telegram и телефонов, нужна сборка с FFmpeg. Без\n"
@@ -509,7 +510,7 @@ static void printHelp(const char* prog) {
         "  --video-size 1024x768|512x256  кадр: точка БК блоком 2x3 (4:3, по умолчанию)\n"
         "                         или как буфер экрана с пометкой «показывать 4:3» (только AVI)\n"
         "  --no-video-audio       без звука (по умолчанию звук пищалки, AY и Covox пишется\n"
-        "                         в тот же файл: PCM 44,1 кГц моно); --video-audio — со звуком\n"
+        "                         в тот же файл, стерео 44,1 кГц); --video-audio — со звуком\n"
         "\n"
         "Тайминг и экран:\n"
         "  --cpu-phase 0|1        фаза такта ЦП относительно окна 037 (по умолчанию 0)\n"
@@ -577,8 +578,10 @@ int main(int argc, char** argv) {
             bk::Board::HddController hddCtl = bk::Board::HddController::Auto;
             int machine = 1, ay = -1, ay2 = -1, covox = -1;   // по умолчанию — БК-0011М
             for (int j = 1; j < argc; ++j) {
-                if (std::string(argv[j]) == "--machine" && j + 1 < argc)
-                    machine = std::max(0, parseMachine(QString::fromLocal8Bit(argv[j + 1])));
+                if (std::string(argv[j]) == "--machine" && j + 1 < argc) {
+                    const int m = parseMachine(QString::fromLocal8Bit(argv[j + 1]));
+                    if (m >= 0) machine = m;     // опечатка — машина по умолчанию, как в GUI
+                }
                 else if (std::string(argv[j]) == "--bk11m") machine = 1;
                 else if (std::string(argv[j]) == "--bk10") machine = 0;
                 else if (std::string(argv[j]) == "--ay") ay = 1;
