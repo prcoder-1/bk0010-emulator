@@ -16,8 +16,6 @@ void Cpu::reset(uint16_t pc, uint16_t initPsw) {
 // ---------------------------------------------------------------------------
 // Effective-address load/store (ports ea.c)
 // ---------------------------------------------------------------------------
-static bool eaIllegalFlag = false; // set by loadEa on mode 0
-
 uint16_t Cpu::loadSrc() {
     int m = srcMode(), reg = srcReg();
     uint16_t addr, ind, data;
@@ -125,9 +123,9 @@ void Cpu::storebDst2(uint8_t v) {
 uint16_t Cpu::loadEa() {
     int m = dstMode(), reg = dstReg();
     uint16_t ind;
-    eaIllegalFlag = false;
+    eaIllegal_ = false;
     switch (m) {
-    case 0: eaIllegalFlag = true; return 0;
+    case 0: eaIllegal_ = true; return 0;
     case 1: return r[reg];
     case 2: { uint16_t a = r[reg]; r[reg] += 2; return a; }
     case 3: { ind = r[reg]; r[reg] += 2; return rword(ind); }
@@ -543,14 +541,14 @@ int Cpu::op_sob() {
 int Cpu::op_jmp() {
     lastBranch_ = r[7];
     uint16_t a = loadEa();
-    if (eaIllegalFlag) return R_ILLEGAL;
+    if (eaIllegal_) return R_ILLEGAL;
     r[7] = a;
     return OK;
 }
 int Cpu::op_jsr() {
     lastBranch_ = r[7];
     uint16_t a = loadEa();
-    if (eaIllegalFlag) return R_ILLEGAL;
+    if (eaIllegal_) return R_ILLEGAL;
     push(r[srcReg()]);
     r[srcReg()] = r[7];
     r[7] = a;

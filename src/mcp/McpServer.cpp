@@ -5,9 +5,7 @@
 #include "ScreenOcr.h"
 #include <QJsonDocument>
 #include <QFile>
-#include <QTextStream>
 #include <QStringList>
-#include <QRegularExpression>
 #include <QImage>
 #include <QBuffer>
 #include <tuple>
@@ -36,8 +34,7 @@ static QString keyLabel(uint16_t code) {
     return QString();
 }
 
-// Build a mono 16-bit PCM WAV image in memory.
-// s — стерео-кадры (L, R чередуются).
+// WAV-образ в памяти: PCM 16 бит стерео, s — кадры L, R вперемешку.
 static void writeWavBytes(QByteArray& out, const std::vector<int16_t>& s, int rate) {
     out.clear();
     auto u32 = [&](uint32_t v) { char b[4] = {char(v), char(v >> 8), char(v >> 16), char(v >> 24)}; out.append(b, 4); };
@@ -657,48 +654,12 @@ bool McpServer::resolveAddr(const QJsonObject& args, const char* key, uint16_t& 
     return false;
 }
 
-const std::string* McpServer::symAt(uint16_t a) const {
-    auto it = symName_.find(a);
-    if (it != symName_.end()) return &it->second;
-    const bk::SymbolTable* rom = board_.romSymbols();
-    return rom ? rom->nameAt(a) : nullptr;
-}
+// Имена — общая таблица платы (как у отладчика GUI): свои из bk_symbols, под ними —
+// имена ПЗУ контроллера дисковода (roms/*.sym), пока оно на шине.
+const std::string* McpServer::symAt(uint16_t a) const { return board_.symbols().nameAt(a); }
 
 bool McpServer::symAddrOf(const std::string& name, uint16_t& a) const {
-    auto it = symAddr_.find(name);
-    if (it != symAddr_.end()) { a = it->second; return true; }
-    const bk::SymbolTable* rom = board_.romSymbols();
-    return rom && rom->addrOf(name, a);
-}
-
-int McpServer::loadSymbols(const QString& path) {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return -1;
-    symName_.clear(); symAddr_.clear();
-    QTextStream in(&f);
-    // Match GNU-ld map lines like "  0x0000000000001234   symbol_name"
-    // and simple "symbol = 0x1234 / 0NNN / decimal" definitions.
-    QRegularExpression reLd("^\\s+0x([0-9a-fA-F]+)\\s+([A-Za-z_.$][\\w.$]*)\\s*$");
-    QRegularExpression reEq("^\\s*([A-Za-z_.$][\\w.$]*)\\s*=\\s*(0x[0-9a-fA-F]+|0[0-7]*|\\d+)");
-    int count = 0;
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        auto m = reLd.match(line);
-        if (m.hasMatch()) {
-            bool ok = false; uint32_t a = m.captured(1).toUInt(&ok, 16);
-            if (ok) { uint16_t a16 = a & 0xFFFF; std::string nm = m.captured(2).toStdString();
-                      symName_[a16] = nm; symAddr_[nm] = a16; ++count; }
-            continue;
-        }
-        auto e = reEq.match(line);
-        if (e.hasMatch()) {
-            long n; if (parseNumber(QJsonValue(e.captured(2)), n)) {
-                uint16_t a16 = n & 0xFFFF; std::string nm = e.captured(1).toStdString();
-                symName_[a16] = nm; symAddr_[nm] = a16; ++count;
-            }
-        }
-    }
-    return count;
+    return board_.symbols().addrOf(name, a);
 }
 
 // ---------------------------------------------------------------------------
@@ -725,7 +686,7 @@ QString McpServer::disasmText(uint16_t addr, int count) {
     const bk::Memory& mem = board_.memory();
     QString out;
     for (int i = 0; i < count; ++i) {
-        bk::DisasmLine d = bk::disasm(mem, addr, board_.romSymbols());
+        bk::DisasmLine d = bk::disasm(mem, addr, &board_.symbols());
         QString mark = (addr == board_.cpu().pc()) ? ">" : (board_.hasBreakpoint(addr) ? "*" : " ");
         QString sym; const std::string* it = symAt(addr);
         if (it) sym = QString(" <%1>").arg(QString::fromStdString(*it));
@@ -1187,7 +1148,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         if (rn == "PSW") c.psw = v;
         else if (rn == "SP") c.r[6] = v;
         else if (rn == "PC") c.r[7] = v;
-        else if (rn.size() == 2 && rn[0] == 'R' && rn[1].isDigit()) c.r[rn[1].digitValue()] = v;
+        else if (rn.size() == 2 && rn[0] == 'R' && rn[1] >= '0' && rn[1] <= '7') c.r[rn[1].digitValue()] = v;
         else return fail("unknown register " + rn);
         return textContent(regsText());
     }
@@ -1222,11 +1183,18 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         // и постоянную память. Явный флаг bus перекрывает это правило.
         const bool viaBus = args.contains("bus") ? args.value("bus").toBool()
                                                  : (a >= bk::ADDR_IO_PAGE);
+        // Сначала разобрать все значения: при ошибке память не трогаем вовсе.
+        const bool asWords = args.contains("words");
+        std::vector<long> vals;
+        for (const auto& v : args.value(asWords ? "words" : "bytes").toArray()) {
+            long x;
+            if (!parseNumber(v, x)) return fail(QString("bad value #%1 '%2' — nothing written")
+                                                    .arg(vals.size()).arg(v.toVariant().toString()));
+            vals.push_back(x);
+        }
         int n = 0;
-        if (args.contains("words")) {
-            QJsonArray w = args.value("words").toArray();
-            for (const auto& v : w) {
-                long x; parseNumber(v, x);
+        if (asWords) {
+            for (long x : vals) {
                 const uint16_t ad = (uint16_t)(a + n * 2), val = (uint16_t)(x & 0xFFFF);
                 if (viaBus) board_.memory().writeWord(ad, val); else board_.memory().pokeWord(ad, val);
                 ++n;
@@ -1235,9 +1203,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                                    .arg(viaBus ? "через шину" : "напрямую в память"));
         }
         if (args.contains("bytes")) {
-            QJsonArray b = args.value("bytes").toArray();
-            for (const auto& v : b) {
-                long x; parseNumber(v, x);
+            for (long x : vals) {
                 const uint16_t ad = (uint16_t)(a + n);
                 if (viaBus) board_.memory().writeByte(ad, (uint8_t)(x & 0xFF));
                 else        board_.memory().pokeByte(ad, (uint8_t)(x & 0xFF));
@@ -1269,7 +1235,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             QString rhs = when.mid(pos + (int)QString(ops[oi]).size()).trimmed();
             long val; if (!parseNumber(QJsonValue(rhs), val)) return fail("bad value in condition");
             c.val = (uint16_t)(val & 0xFFFF);
-            if (lhs.size() == 2 && (lhs[0] == 'R' || lhs[0] == 'r') && lhs[1].isDigit()) {
+            if (lhs.size() == 2 && (lhs[0] == 'R' || lhs[0] == 'r') && lhs[1] >= '0' && lhs[1] <= '7') {
                 c.kind = 0; c.a = lhs[1].digitValue();
             } else if (lhs.startsWith('@')) {
                 bool byte = lhs.endsWith(".b");
@@ -1565,7 +1531,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
                            + regsText());
     }
     if (name == "bk_symbols") {
-        int n = loadSymbols(args.value("path").toString());
+        int n = board_.loadSymbols(args.value("path").toString().toStdString());
         if (n < 0) return fail("cannot open " + args.value("path").toString());
         return textContent(QString("Loaded %1 symbols from %2.").arg(n).arg(args.value("path").toString()));
     }
@@ -1580,7 +1546,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         QString out = QString("Hot instructions (%1 unique executed):\n").arg(hot.size());
         for (int i = 0; i < count && i < (int)hot.size(); ++i) {
             uint16_t a = hot[i].second;
-            bk::DisasmLine d = bk::disasm(board_.memory(), a, board_.romSymbols());
+            bk::DisasmLine d = bk::disasm(board_.memory(), a, &board_.symbols());
             QString sym; const std::string* it = symAt(a);
             if (it) sym = QString(" <%1>").arg(QString::fromStdString(*it));
             out += QString("%1%2  %3  x%4\n").arg(oct6(a)).arg(sym).arg(QString::fromStdString(d.text)).arg(hot[i].first);

@@ -90,6 +90,7 @@ private:
     Memory& mem_;
     uint16_t ir_ = 0;          // current instruction register
     uint16_t eaAddr_ = 0;      // cached destination address (modify-in-place)
+    bool eaIllegal_ = false;   // loadEa: режим 0 у JMP/JSR — недопустимая команда
     uint16_t lastBranch_ = 0;  // PC of the last control-flow instruction
     bool halted_ = false;
     bool waiting_ = false;

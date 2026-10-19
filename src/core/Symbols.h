@@ -10,8 +10,8 @@ namespace bk {
 // Symbol table loaded from a linker .map file. Supports GNU-ld map lines
 // ("   0x1234   name") and simple "name = value" definitions (value in 0x hex,
 // leading-0 octal or decimal). Pure C++ (no Qt) so both the core/GUI and the
-// disassembler can resolve addresses to names. Same formats the MCP bk_symbols
-// tool accepts.
+// disassembler can resolve addresses to names. MCP bk_symbols loads into the same
+// table (Board::symbols()), so the GUI and the MCP server share names.
 class SymbolTable {
 public:
     // Load from `path`, replacing any current symbols. Returns the count loaded,

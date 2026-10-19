@@ -73,7 +73,9 @@ Two layers, deliberately decoupled:
 - **`src/core/`** — pure C++, no Qt. `Board` owns everything and is the entry point:
   it wires `Cpu` + `Memory` + `Screen` + `Speaker` + `Trace`, implements the
   memory-mapped I/O registers (`IoBus`), drives the frame loop (48.83 Hz — see below), delivers
-  interrupts, and does `.BIN` loading and save/restore of state.
+  interrupts, and does `.BIN` loading and save/restore of state (`BK10ST1` / `BK11ST1` + a
+  tagged `BKX1` tail with sound/port/keyboard/IRQ/timer-phase state — `Board::saveStateExt`;
+  add new fields THERE, at the end, so old snapshots and old builds keep working).
 - **`src/ui/`** — Qt6. `MainWindow` owns a `Board`, drives it from a 50 Hz `QTimer`
   (single-threaded — emulation runs in the GUI thread; one frame = 61440 ticks is
   fast enough), and hosts `GlScreen` + the debugger widgets. The GUI paces itself by

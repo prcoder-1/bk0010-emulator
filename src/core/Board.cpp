@@ -1039,6 +1039,7 @@ void Board::saveStateMem(std::vector<uint8_t>& out) const {
                              static_cast<uint16_t>(prevTeDram_),
                              static_cast<uint16_t>(prevTeFast_)};
     put(bus, sizeof bus);
+    saveStateExt(out);
 }
 
 bool Board::loadStateMem(const std::vector<uint8_t>& in) {
@@ -1091,6 +1092,7 @@ bool Board::loadStateMem(const std::vector<uint8_t>& in) {
     screen_.setScroll(scroll_);
     rasterScroll_ = scroll_; scrollLatched_ = true;
     vp037_.setM256(scroll_ & 01000);   // фаза выровняется на следующем кадре
+    loadStateExt(in, off);
     return true;
 }
 
@@ -1130,6 +1132,7 @@ void Board::saveState11(std::vector<uint8_t>& out) const {
     put(smk, sizeof smk);
     if (smkOn_) put(smk_.ram().data(), Smk512::RAM_BYTES);
     put(ay2_.regs(), 16);   // второй AY (раньше хвоста не было — тогда он молчит)
+    saveStateExt(out);
 }
 
 bool Board::loadState11(const std::vector<uint8_t>& in) {
@@ -1194,7 +1197,90 @@ bool Board::loadState11(const std::vector<uint8_t>& in) {
     screen_.setScroll(scroll_);
     rasterScroll_ = scroll_; scrollLatched_ = true;
     vp037_.setM256(scroll_ & 01000);
+    loadStateExt(in, off);
     return true;
+}
+
+// Хвост «BKX1»: метка, длина, поля по порядку. Старые снимки его не имеют (тогда всё
+// это — как после включения), а старые версии эмулятора его просто не дочитывают.
+namespace {
+constexpr char kExtTag[4] = {'B', 'K', 'X', '1'};
+enum : uint16_t {
+    EXT_AY = 1, EXT_AY2 = 2, EXT_COVOX = 4, EXT_AY2_SEEN = 010, EXT_SYS_WRITE = 020,
+    EXT_IRQ_FRAME = 040, EXT_STOP = 0100, EXT_BUS_ERROR = 0200, EXT_KEY_IRQ = 0400,
+    EXT_COVOX_STEREO = 01000,
+};
+}
+
+void Board::saveStateExt(std::vector<uint8_t>& out) const {
+    std::vector<uint8_t> p;
+    auto put = [&](const void* v, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(v);
+        p.insert(p.end(), b, b + n);
+    };
+    auto put8 = [&](unsigned v) { p.push_back(static_cast<uint8_t>(v)); };
+    const uint16_t flags = (ayOn_ ? EXT_AY : 0) | (ay2On_ ? EXT_AY2 : 0) | (covoxOn_ ? EXT_COVOX : 0)
+        | (ay2Seen_ ? EXT_AY2_SEEN : 0) | (sysWriteFlag_ ? EXT_SYS_WRITE : 0)
+        | (irqFramePending_ ? EXT_IRQ_FRAME : 0) | (stopPending_ ? EXT_STOP : 0)
+        | (busErrorPending_ ? EXT_BUS_ERROR : 0) | (keyIntPending_ ? EXT_KEY_IRQ : 0)
+        | (covoxStereo_ ? EXT_COVOX_STEREO : 0);
+    const uint16_t w[6] = {flags, portOut_, keyIntVec_, cpuMode_, aySel_, tsChip_};
+    put(w, sizeof w);
+    put(ay_.regs(), 16);  put8(ay_.address());
+    put(ay2_.regs(), 16); put8(ay2_.address());
+    put8(covoxHist_); put8(covoxN_); put8(covoxL_); put8(covoxH_); put8(static_cast<unsigned>(covoxMode_));
+    // Моменты событий — относительно текущего такта: счёт тактов в снимок не входит.
+    const uint64_t t[3] = {kbdReadyClearAt_ ? kbdReadyClearAt_ - totalTicks_ : 0,
+                           keyIntDeferAt_ > totalTicks_ ? keyIntDeferAt_ - totalTicks_ : 0,
+                           totalTicks_ - timerStart_};
+    put(t, sizeof t);
+    const uint32_t len = static_cast<uint32_t>(p.size());
+    out.insert(out.end(), kExtTag, kExtTag + 4);
+    out.insert(out.end(), reinterpret_cast<const uint8_t*>(&len), reinterpret_cast<const uint8_t*>(&len) + 4);
+    out.insert(out.end(), p.begin(), p.end());
+}
+
+void Board::loadStateExt(const std::vector<uint8_t>& in, size_t off) {
+    uint32_t len = 0;
+    if (in.size() < off + 8 || std::memcmp(in.data() + off, kExtTag, 4) != 0) return;
+    std::memcpy(&len, in.data() + off + 4, 4);
+    off += 8;
+    const size_t end = std::min(in.size(), off + len);
+    auto get = [&](void* v, size_t n) {
+        if (off + n > end) { std::memset(v, 0, n); return false; }
+        std::memcpy(v, in.data() + off, n); off += n; return true;
+    };
+    uint16_t w[6];
+    uint8_t ay[17], ay2[17], cv[5];
+    uint64_t t[3];
+    if (!get(w, sizeof w) || !get(ay, 17) || !get(ay2, 17) || !get(cv, 5) || !get(t, sizeof t)) return;
+    setAy(w[0] & EXT_AY);
+    setAy2(w[0] & EXT_AY2);
+    setCovox(w[0] & EXT_COVOX);
+    portOut_ = w[1]; keyIntVec_ = w[2]; cpuMode_ = w[3] & 7;
+    sysWriteFlag_ = w[0] & EXT_SYS_WRITE;
+    irqFramePending_ = w[0] & EXT_IRQ_FRAME;
+    stopPending_ = w[0] & EXT_STOP;
+    busErrorPending_ = w[0] & EXT_BUS_ERROR;
+    keyIntPending_ = w[0] & EXT_KEY_IRQ;
+    ay_.reset(); ay2_.reset();
+    for (int r = 0; r < 16; ++r) { ay_.writeReg(static_cast<uint8_t>(r), ay[r]); ay2_.writeReg(static_cast<uint8_t>(r), ay2[r]); }
+    ay_.writeAddress(ay[16]); ay2_.writeAddress(ay2[16]);
+    aySel_ = static_cast<uint8_t>(w[4] & 3); tsChip_ = static_cast<uint8_t>(w[5] & 1);
+    ay2Seen_ = ay2On_ && (w[0] & EXT_AY2_SEEN);
+    syncSound();
+    covoxHist_ = cv[0]; covoxN_ = cv[1]; covoxL_ = cv[2]; covoxH_ = cv[3];
+    covoxMode_ = cv[4] <= static_cast<uint8_t>(CovoxMode::Active) ? static_cast<CovoxMode>(cv[4]) : CovoxMode::Idle;
+    covoxStereo_ = w[0] & EXT_COVOX_STEREO;
+    if (covoxOn_ && covoxMode_ == CovoxMode::Active) {
+        const double l = (covoxL_ - 128.0) / 128.0;
+        sound_.setCovoxLevel(l, covoxStereo_ ? (covoxH_ - 128.0) / 128.0 : l);
+    } else {
+        sound_.setCovoxLevel(0.0);
+    }
+    kbdReadyClearAt_ = t[0] ? totalTicks_ + t[0] : 0;
+    keyIntDeferAt_ = totalTicks_ + t[1];
+    timerStart_ = totalTicks_ - t[2];   // по модулю 2^64: timerCheck считает разность
 }
 
 bool Board::saveState(const std::string& path) {

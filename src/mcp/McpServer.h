@@ -36,8 +36,6 @@ private:
     std::string romDir_;
     bool        romsOk_ = false;
     QString     lastBin_;
-    std::map<uint16_t, std::string> symName_; // addr -> symbol
-    std::map<std::string, uint16_t> symAddr_; // symbol -> addr
     // Свои имена (bk_symbols), а за ними — имена ПЗУ контроллера дисковода (roms/*.sym).
     const std::string* symAt(uint16_t a) const;
     bool symAddrOf(const std::string& name, uint16_t& a) const;
@@ -85,7 +83,6 @@ private:
 
     // --- helpers ---
     bool    resolveAddr(const QJsonObject& args, const char* key, uint16_t& out, QString& err);
-    int     loadSymbols(const QString& path);
     QString regsText();
     // Включить другую машину (как выключить одну и включить другую): ПЗУ, частота, карта
     // памяти, отрисовка по лучу на 11М, сброс. false — машина уже такая.

@@ -836,6 +836,49 @@ int main() {
         CHECK(!b.loadStateMem(std::vector<uint8_t>(8, 0)), "мусор отвергается");
     }
 
+    // ---- Снимок: хвост BKX1 — звук, порт, клавиатура, фаза таймера (обе машины) ----
+    for (int mach = 0; mach < 2; ++mach) {
+        Board b;
+        b.setMachine(mach ? Machine::Bk0011m : Machine::Bk0010);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.reset();
+        Memory& m = b.memory();
+        m.pokeWord(01000, 0000777);                     // BR .
+        m.pokeWord(02000, 0000777); m.pokeWord(0274, 02000);
+        m.pokeWord(03000, 0000777); m.pokeWord(060, 03000);
+        b.cpu().reset(01000, 0340);
+        b.setAy(true); b.setAy2(true); b.setCovox(true);
+        b.ayChip(0).writeReg(8, 13);
+        b.ayChip(1).writeReg(9, 7);
+        m.writeWord(0177714, 1);                        // TurboSound: выбран второй AY
+        m.writeWord(0177706, 0100);
+        m.writeWord(0177712, 020);                      // таймер: пуск, перезагрузка
+        b.runTicks(1000);
+        b.pressKey(0201);                               // АР2: вектор 0274
+        std::vector<uint8_t> snap;
+        b.saveStateMem(snap);
+        b.runTicks(3000);
+        const uint16_t c1 = m.readWord(0177710);
+        b.setAy(false); b.setAy2(false); b.setCovox(false);
+        b.ayChip(0).writeReg(8, 0);
+        m.writeWord(0177714, 0);
+        b.pressKey(0101);                               // вектор 060
+        CHECK(b.loadStateMem(snap), "BKX1: снимок читается");
+        b.runTicks(3000);
+        const uint16_t c2 = m.readWord(0177710);
+        CHECK(b.ay() && b.ay2() && b.covox() && b.ay2Active() && b.ayTurboChip() == 1
+              && b.ayChip(0).regs()[8] == 13 && b.ayChip(1).regs()[9] == 7 && b.portOut() == 1,
+              mach ? "BKX1 (11М): AY, второй AY, Covox и выход порта восстановлены"
+                   : "BKX1 (БК-0010): AY, второй AY, Covox и выход порта восстановлены");
+        CHECK(c1 == c2, mach ? "BKX1 (11М): фаза таймера восстановлена"
+                             : "BKX1 (БК-0010): фаза таймера восстановлена");
+        b.cpu().psw = 0;
+        b.runTicks(b.ticksPerFrame());
+        CHECK(b.cpu().pc() == 02000 || b.cpu().pc() == 02002,
+              mach ? "BKX1 (11М): прерывание клавиатуры — по восстановленному вектору 0274"
+                   : "BKX1 (БК-0010): прерывание клавиатуры — по восстановленному вектору 0274");
+    }
+
     // ---- Лог обращений к В-В: чтения, фильтр адреса, PC инструкции ----
     {
         Board b; b.reset();

@@ -718,6 +718,7 @@ bool MainWindow::loadBinFromPath(const QString& path) {
     uint16_t addr = 0, len = 0;
     // Машину выбирает программа (Board::binTargetsBk11): палитра 0177662 или вызовы БОС —
     // БК-0011М, иначе БК-0010-01. Сохранённый выбор машины это не меняет.
+    if (path != lastBin_) forgetBin();
     const bool want11 = bk::Board::binTargetsBk11(path.toStdString());
     if (want11 != board_->bk11()) setMachine(want11 ? 1 : 0, false);
     // The monitor ROM must have initialised before a game is started; when a bin
@@ -729,8 +730,10 @@ bool MainWindow::loadBinFromPath(const QString& path) {
         QMessageBox::warning(this, "БК", QString("Не удалось загрузить %1").arg(path));
         return false;
     }
+    const bool fresh = lastBin_ != path;
     lastBin_ = path;
-    loadAnnotations(annotationsPath());   // pick up "<bin>.bkdb" symbols/comments if present
+    boot_ = Boot::Bin;
+    if (fresh) loadAnnotations(annotationsPath());   // "<bin>.bkdb" — символы и комментарии
     status_->setText(QString("Загружено %1: адрес %2, длина %3 (восьм.)")
         .arg(QFileInfo(path).fileName())
         .arg(QString::number(addr, 8))
@@ -745,8 +748,33 @@ void MainWindow::resetMachine() {
     keyFeed_.clear();
     heldKeys_.clear();
     board_->setKeyHeld(false);
-    if (!lastBin_.isEmpty()) loadBinFromPath(lastBin_);
+    // Сброс повторяет последний пуск: программу, дискету в приводе A или винчестер.
+    switch (boot_) {
+    case Boot::Bin:
+        if (!lastBin_.isEmpty()) loadBinFromPath(lastBin_);
+        break;
+    case Boot::Disk:
+        if (board_->diskAttached(0)) { board_->ensureMonitorBooted(); board_->bootFromDisk(); }
+        break;
+    case Boot::Hdd:
+        board_->bootFromHdd();
+        break;
+    case Boot::None:
+        break;
+    }
     status_->setText("Сброс");
+}
+
+void MainWindow::forgetBin() {
+    if (!lastBin_.isEmpty()) {
+        saveAnnotations(annotationsPath());
+        board_->symbols().clear();
+        board_->clearComments();
+        board_->clearAllData();
+        lastBin_.clear();
+    }
+    if (boot_ == Boot::Bin) boot_ = Boot::None;
+    updateTitle();
 }
 
 // Подключение и снятие платы — операция «при выключенном питании»: меняется вся
@@ -787,7 +815,7 @@ void MainWindow::setMachine(int m, bool persist) {
     // Плата — своя настройка у каждой машины (на БК-0011М её ставят реже).
     board_->setSmk512(QSettings().value(smkKey(), true).toBool());
     applyScanline();
-    lastBin_.clear();                  // .BIN другой машины перезапускать нельзя
+    forgetBin();                       // .BIN другой машины перезапускать нельзя
     syncMachineMenu();
     resetMachine();
     updateTitle();
@@ -982,13 +1010,17 @@ void MainWindow::saveDisks() {
 
 bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
     saveDisks();
-    // Второй привод не перезапускает машину: дискету в него меняют на ходу.
-    if (drive == 0) { resetMachine(); board_->ensureMonitorBooted(); }
     if (!board_->attachDisk(drive, path.toStdString(), !diskRw_)) {
         status_->setText("Не удалось вставить образ — нет roms/disk326.rom или файл не читается");
         return false;
     }
-    if (drive == 0) board_->bootFromDisk();
+    // Второй привод не перезапускает машину: дискету в него меняют на ходу. Привод A —
+    // пуск с диска (монитор, затем автозагрузчик контроллера), и сброс повторяет его.
+    if (drive == 0) {
+        forgetBin();
+        boot_ = Boot::Disk;
+        resetMachine();
+    }
     lastDisk_ = path;
     // СМК и дисковод уживаются на шине вместе (это и есть историческая машина с
     // диском), поэтому плату не снимаем. Наоборот, без неё большинству систем
@@ -1032,7 +1064,7 @@ bool MainWindow::attachHdd(const QString& path, int unit, bool boot) {
         return false;
     }
     lastHdd_ = path;
-    if (boot) { lastBin_.clear(); resetMachine(); }
+    if (boot) { forgetBin(); boot_ = Boot::Hdd; resetMachine(); }
     const bk::HddDrive& d = board_->ide().drive(unit);
     status_->setText(QString("Винчестер %1 (%9): %2 — %3/%4/%5, %6 Мбайт%7%8")
         .arg(unit ? "slave" : "master").arg(QFileInfo(path).fileName())
@@ -1051,6 +1083,7 @@ void MainWindow::detachHdds() {
     if (!board_->hddAttached(0) && !board_->hddAttached(1)) return;
     board_->detachHdd(0);
     board_->detachHdd(1);
+    if (boot_ == Boot::Hdd) boot_ = Boot::None;
     resetMachine();
     status_->setText("Винчестеры отключены, машина перезапущена");
 }

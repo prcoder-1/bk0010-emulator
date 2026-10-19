@@ -212,10 +212,10 @@ public:
     // всё идёт в первый чип, как на плате с одним AY.
     void setAy2(bool on);
     bool ay2() const { return ay2On_; }
-    // Covox — 8-разрядный ЦАП на младших линиях порта 0177714 (вывод у эмулятора моно,
-    // стерео «Мультизвука» не моделируется). Вместе с AY — автоопределение этой карты:
-    // слова и байты вперемешку — протокол AY, ЦАП молчит; молчит он и пока программа
-    // читает порт (джойстик, мышь).
+    // Covox — два 8-разрядных ЦАП «Мультизвука» на порту 0177714: младший байт — левый
+    // канал, старший — правый; только слова — стерео, есть байты — моно (левый отсчёт в
+    // оба канала). Вместе с AY — автоопределение этой карты: слова и байты вперемешку —
+    // протокол AY, ЦАП молчит; молчит он и пока программа читает порт (джойстик, мышь).
     void setCovox(bool on);
     bool covox() const { return covoxOn_; }
     enum class CovoxMode { Off, Idle, AyMuted, PortInput, Active };
@@ -251,7 +251,7 @@ public:
 
     // --- Breakpoints / debugger support ---
     void toggleBreakpoint(uint16_t addr) {
-        if (breakpoints_.count(addr)) breakpoints_.erase(addr); else breakpoints_.insert(addr);
+        if (breakpoints_.count(addr)) removeBreakpoint(addr); else breakpoints_.insert(addr);
     }
     void addBreakpoint(uint16_t addr) { breakpoints_.insert(addr); }
     void removeBreakpoint(uint16_t addr) { breakpoints_.erase(addr); breakConds_.erase(addr); }
@@ -407,6 +407,10 @@ public:
     // Снимок БК-0011М (магия BK11ST1). loadStateMem переключает машину по магии.
     void saveState11(std::vector<uint8_t>& out) const;
     bool loadState11(const std::vector<uint8_t>& in);
+    // Хвост «BKX1» обоих форматов: звук (AY, 2AY, Covox), выход порта, вектор и
+    // отложенные события клавиатуры, взведённые прерывания, фаза таймера.
+    void saveStateExt(std::vector<uint8_t>& out) const;
+    void loadStateExt(const std::vector<uint8_t>& in, size_t off);
 
     // IoBus
     bool ioRead(uint16_t addr, uint16_t& value) override;

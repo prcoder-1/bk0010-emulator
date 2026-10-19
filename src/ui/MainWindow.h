@@ -158,6 +158,10 @@ private:
     void syncMachineMenu();                // галки меню — по состоянию платы (без сигналов)
     QAction* aspectAction_ = nullptr;   // галка «Пиксели 3:4»
     QString lastBin_;
+    // С чего машина запущена — сброс (Ctrl+R, смена платы или машины) повторяет этот пуск.
+    enum class Boot { None, Bin, Disk, Hdd };
+    Boot boot_ = Boot::None;
+    void forgetBin();       // программа больше не та: сохранить её разметку и убрать
     QString lastDisk_;      // последний вставленный образ диска
     bool diskRw_ = false;
     QString lastHdd_;       // последний подключённый образ винчестера
