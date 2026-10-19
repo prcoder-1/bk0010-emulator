@@ -241,7 +241,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
         if (video.active()) {
             if (!board.scanlineRender()) board.screen().render(board.memory());
             board.sound().takeCaptured(videoAudio);
-            video.addFrame(board.screen().pixels(), videoAudio.data(), videoAudio.size());
+            video.addFrame(board.screen().pixels(), videoAudio.data(), videoAudio.size() / 2);
         }
     }
     board.sound().setCapture(false);
@@ -441,10 +441,10 @@ static int runHeadless(const QString& romDir, const QString& bin,
 
     // Report speaker sample activity (verifies the audio sample path).
     {
-        std::vector<int16_t> s(board.sound().available());
-        size_t n = s.empty() ? 0 : board.sound().read(s.data(), s.size());
+        std::vector<int16_t> s(2 * board.sound().available());   // стерео: L, R
+        size_t n = s.empty() ? 0 : board.sound().read(s.data(), s.size() / 2);
         int16_t lo = 0, hi = 0;
-        for (size_t i = 0; i < n; ++i) { if (s[i] < lo) lo = s[i]; if (s[i] > hi) hi = s[i]; }
+        for (size_t i = 0; i < 2 * n; ++i) { if (s[i] < lo) lo = s[i]; if (s[i] > hi) hi = s[i]; }
         std::printf("headless: audio samples=%zu range=[%d..%d]%s\n", n, lo, hi,
                     (hi - lo > 1000) ? " (speaker active)" : " (silent)");
     }

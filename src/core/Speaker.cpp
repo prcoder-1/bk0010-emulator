@@ -29,7 +29,7 @@ void Speaker::feed(int level, int ticks) {
     // drop the oldest quarter to catch up, rather than dropping the newest samples
     // which would gap the live sound. In normal play read() keeps the backlog far
     // below this.
-    const size_t maxBuf = static_cast<size_t>(sampleRate_) / 4;
+    const size_t maxBuf = static_cast<size_t>(sampleRate_) / 4 * 2;   // отсчётов (L+R)
 
     double span = ticks * samplesPerTick;   // длительность этого куска в отсчётах
     std::lock_guard<std::mutex> lk(mtx_);
@@ -45,56 +45,71 @@ void Speaker::feed(int level, int ticks) {
         filtered_ += (target - filtered_) * a;
         if (ay_) ay_->advance(take / sampleRate_);
         if (ay_ && ay2_) ay2_->advance(take / sampleRate_);
-        if (covox_) covoxAcc_ += covoxLevel_ * take;
+        if (covox_) { covoxAccL_ += covoxL_ * take; covoxAccR_ += covoxR_ * take; }
         acc_  += take;
         span  -= take;
         if (acc_ < 1.0) break;                            // отсчёт ещё не набран
         acc_ = 0.0;
         dc_ += (filtered_ - dc_) * dcRc;                  // DC-блокер: покой -> тишина
-        double v = filtered_ - dc_;
+        const double beep = filtered_ - dc_;              // пищалка — в оба канала
+        double l = beep, r = beep;
         if (ay_) {
-            // Полная громкость трёх каналов (выход 1.0) — 28000 в размахе; два чипа —
-            // по 18000, чтобы шесть каналов не упирались в потолок.
-            const double ay = ay2_ ? (ay_->takeSample() + ay2_->takeSample()) * 18000.0
-                                   : ay_->takeSample() * 28000.0;
-            ayDc_ += (ay - ayDc_) * dcRc;
-            v += ay - ayDc_;
+            // Полная громкость трёх каналов моно (1.0) — 28000 в размахе; два чипа —
+            // по 18000, чтобы шесть каналов не упирались в потолок. В стерео ABC канал
+            // набирает до 0,716 от этого (панорама GID).
+            double l1, r1;
+            ay_->takeSampleLR(l1, r1);
+            double al, ar;
+            if (ay2_) {
+                double l2, r2;
+                ay2_->takeSampleLR(l2, r2);
+                al = (l1 + l2) * 18000.0; ar = (r1 + r2) * 18000.0;
+            } else {
+                al = l1 * 28000.0; ar = r1 * 28000.0;
+            }
+            ayDcL_ += (al - ayDcL_) * dcRc;
+            ayDcR_ += (ar - ayDcR_) * dcRc;
+            l += al - ayDcL_;
+            r += ar - ayDcR_;
         }
         if (covox_) {
             // Полная шкала ЦАП — ±16000: громко, но с запасом под AY и пищалку.
-            const double cv = covoxAcc_ * 16000.0;
-            covoxAcc_ = 0.0;
-            covoxDc_ += (cv - covoxDc_) * dcRc;
-            v += cv - covoxDc_;
+            const double cl = covoxAccL_ * 16000.0, cr = covoxAccR_ * 16000.0;
+            covoxAccL_ = covoxAccR_ = 0.0;
+            covoxDcL_ += (cl - covoxDcL_) * dcRc;
+            covoxDcR_ += (cr - covoxDcR_) * dcRc;
+            l += cl - covoxDcL_;
+            r += cr - covoxDcR_;
         }
-        if (v > 32767.0) v = 32767.0; else if (v < -32767.0) v = -32767.0;
-        const int16_t smp = static_cast<int16_t>(v);
+        auto clip = [](double v) { return static_cast<int16_t>(v > 32767.0 ? 32767.0 : v < -32767.0 ? -32767.0 : v); };
+        const int16_t sl = clip(l), sr = clip(r);
         if (enabled_) {
-            if (buf_.size() >= maxBuf) for (size_t i = 0; i < maxBuf / 4; ++i) buf_.pop_front();
-            buf_.push_back(smp);
+            if (buf_.size() >= maxBuf) for (size_t i = 0; i < (maxBuf / 4 & ~size_t(1)); ++i) buf_.pop_front();
+            buf_.push_back(sl);
+            buf_.push_back(sr);
         }
-        if (capture_) cap_.push_back(smp);
+        if (capture_) { cap_.push_back(sl); cap_.push_back(sr); }
     }
 }
 
-size_t Speaker::read(int16_t* out, size_t maxSamples) {
+size_t Speaker::read(int16_t* outLR, size_t maxFrames) {
     std::lock_guard<std::mutex> lk(mtx_);
     // Plain FIFO drain. The consumer (AudioOut) primes a latency cushion before
     // it starts serving and caps runaway backlog via trimTo(), so no dropping is
     // done here — dropping mid-stream would gap the 1-bit beeper and crackle.
-    size_t n = std::min(maxSamples, buf_.size());
-    for (size_t i = 0; i < n; ++i) { out[i] = buf_.front(); buf_.pop_front(); }  // O(1) per sample
+    const size_t n = std::min(maxFrames, buf_.size() / 2);
+    for (size_t i = 0; i < 2 * n; ++i) { outLR[i] = buf_.front(); buf_.pop_front(); }  // O(1) per sample
     return n;
 }
 
-void Speaker::trimTo(size_t maxSamples) {
+void Speaker::trimTo(size_t maxFrames) {
     std::lock_guard<std::mutex> lk(mtx_);
-    while (buf_.size() > maxSamples) buf_.pop_front();
+    while (buf_.size() > 2 * maxFrames) { buf_.pop_front(); buf_.pop_front(); }
 }
 
 size_t Speaker::available() {
     std::lock_guard<std::mutex> lk(mtx_);
-    return buf_.size();
+    return buf_.size() / 2;
 }
 
 void Speaker::setCapture(bool on) {

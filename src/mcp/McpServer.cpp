@@ -37,19 +37,20 @@ static QString keyLabel(uint16_t code) {
 }
 
 // Build a mono 16-bit PCM WAV image in memory.
+// s — стерео-кадры (L, R чередуются).
 static void writeWavBytes(QByteArray& out, const std::vector<int16_t>& s, int rate) {
     out.clear();
     auto u32 = [&](uint32_t v) { char b[4] = {char(v), char(v >> 8), char(v >> 16), char(v >> 24)}; out.append(b, 4); };
     auto u16 = [&](uint16_t v) { char b[2] = {char(v), char(v >> 8)}; out.append(b, 2); };
     const uint32_t dataBytes = (uint32_t)s.size() * 2;
     out.append("RIFF", 4); u32(36 + dataBytes); out.append("WAVE", 4);
-    out.append("fmt ", 4); u32(16); u16(1); u16(1);       // PCM, 1 channel
-    u32(rate); u32(rate * 2); u16(2); u16(16);            // byte rate, block align, bits
+    out.append("fmt ", 4); u32(16); u16(1); u16(2);       // PCM, 2 channels
+    u32(rate); u32(rate * 4); u16(4); u16(16);            // byte rate, block align, bits
     out.append("data", 4); u32(dataBytes);
     if (dataBytes) out.append(reinterpret_cast<const char*>(s.data()), dataBytes);
 }
 
-// Write mono 16-bit PCM samples as a WAV file.
+// Write stereo 16-bit PCM frames as a WAV file.
 static bool writeWav(const QString& path, const std::vector<int16_t>& s, int rate) {
     QByteArray wav;
     writeWavBytes(wav, s, rate);
@@ -501,11 +502,13 @@ QJsonArray McpServer::toolDefs() const {
         schema({{"path", P("string", "Optional output PNG path")},
                 {"frames", P("integer", "Run this many 50 Hz frames before the shot (default 0)")},
                 {"mono", P("boolean", "512x256 monochrome (default false=colour)")}})));
-    t.append(tool("bk_audio", "Capture the speaker (piezo, 0177716 bit 6) as 44100 Hz mono PCM and "
-                  "report peak/RMS, an ASCII envelope and the TONE breakdown (frequency + duration "
-                  "per segment, derived from the speaker edges — exact, not guessed from the PCM). "
-                  "Returns the WAV inline as audio content when the client protocol supports it; "
-                  "`path` also writes it to disk, `raw_ms` dumps raw int16 samples.",
+    t.append(tool("bk_audio", "Capture the emulator's sound output (piezo 0177716, AY in ABC stereo — A left, "
+                  "B centre, C right with GID's panning — and Covox, stereo on word writes as on the "
+                  "Multizvuk card) as 44100 Hz STEREO PCM and report peak/RMS per channel, an ASCII "
+                  "envelope and the piezo TONE breakdown (frequency + duration per segment, derived from "
+                  "the speaker edges — exact, not guessed from the PCM). Returns the WAV inline as audio "
+                  "content when the client protocol supports it; `path` also writes it to disk, `raw_ms` "
+                  "dumps raw int16 L/R pairs.",
         schema({{"path", P("string", "Optional output WAV path")},
                 {"frames", P("integer", "50 Hz frames to run while capturing (default 100 = 2 s)")},
                 {"run", P("boolean", "false = do not run, just drain what is already buffered (~250 ms)")},
@@ -1435,12 +1438,12 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         uint64_t tick0 = board_.totalTicks();
 
         board_.sound().setEnabled(true);
-        std::vector<int16_t> samples;
-        int16_t tmp[8192];
+        std::vector<int16_t> samples;           // стерео: L, R чередуются
+        int16_t tmp[2 * 4096];
         auto drain = [&]() {
             size_t got;
-            while ((got = board_.sound().read(tmp, 8192)) > 0)
-                samples.insert(samples.end(), tmp, tmp + got);
+            while ((got = board_.sound().read(tmp, 4096)) > 0)
+                samples.insert(samples.end(), tmp, tmp + 2 * got);
         };
         RunOutcome r;
         if (doRun) {
@@ -1459,47 +1462,53 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
             r.reason = "no-run";
             // Буфер — это ПРОШЛОЕ: отматываем начало окна назад на его длительность,
             // иначе разбор на тоны искал бы фронты в ещё не наступивших тактах.
-            const uint64_t span = (uint64_t)(samples.size() * double(board_.cpuFreqHz()) / rate);
+            const uint64_t span = (uint64_t)(samples.size() / 2 * double(board_.cpuFreqHz()) / rate);
             tick0 = (tick0 > span) ? tick0 - span : 0;
         }
 
         if (!path.isEmpty() && !writeWav(path, samples, rate))
             return fail("cannot write " + path);
 
-        // --- анализ: пик, RMS, доля «не тишины», длительность
+        // --- анализ: пик, RMS (всего и по каналам), доля «не тишины», длительность
+        const size_t nfr = samples.size() / 2;
         int peak = 0;
         long active = 0;
-        double sumsq = 0;
-        for (int16_t v : samples) {
-            const int a = v < 0 ? -v : v;
-            if (a > peak) peak = a;
-            if (a > 400) ++active;
-            sumsq += double(v) * v;
+        double sumsq = 0, sumL = 0, sumR = 0;
+        for (size_t i = 0; i < nfr; ++i) {
+            const int16_t l = samples[2 * i], rr = samples[2 * i + 1];
+            peak = std::max({peak, std::abs(int(l)), std::abs(int(rr))});
+            if (std::abs(int(l)) > 400 || std::abs(int(rr)) > 400) ++active;
+            sumL += double(l) * l;
+            sumR += double(rr) * rr;
         }
-        const double ms = samples.size() * 1000.0 / rate;
-        const int rms = samples.empty() ? 0 : (int)std::sqrt(sumsq / samples.size());
+        sumsq = sumL + sumR;
+        const double ms = nfr * 1000.0 / rate;
+        const int rms = nfr ? (int)std::sqrt(sumsq / (2.0 * nfr)) : 0;
+        const int rmsL = nfr ? (int)std::sqrt(sumL / nfr) : 0, rmsR = nfr ? (int)std::sqrt(sumR / nfr) : 0;
 
-        QString out = QString("Захвачено %1 сэмплов (%2 мс, 44100 Гц моно)%3\n"
-                              "пик=%4/32767  RMS=%5  не тишина=%6%7")
-            .arg(samples.size()).arg(ms, 0, 'f', 0)
+        QString out = QString("Захвачено %1 стерео-сэмплов (%2 мс, 44100 Гц стерео)%3\n"
+                              "пик=%4/32767  RMS=%5 (левый %8, правый %9)  не тишина=%6%7")
+            .arg(nfr).arg(ms, 0, 'f', 0)
             .arg(path.isEmpty() ? QString() : QString(", записано в " + path))
             .arg(peak).arg(rms)
-            .arg(QString::number(samples.empty() ? 0 : active * 100 / (long)samples.size()) + "%")
-            .arg(doRun ? "\n" + runText(r) : QString());
+            .arg(QString::number(nfr ? active * 100 / (long)nfr : 0) + "%")
+            .arg(doRun ? "\n" + runText(r) : QString())
+            .arg(rmsL).arg(rmsR);
 
         // --- огибающая: RMS по окнам, ASCII-«спарклайн»
-        if (!samples.empty()) {
-            const int cols = std::min<int>(72, std::max<int>(1, (int)samples.size() / 64));
+        if (nfr) {
+            const int cols = std::min<int>(72, std::max<int>(1, (int)nfr / 64));
             const char* ramp = " .:-=+*#%@";
-            QString spark;
-            for (int c = 0; c < cols; ++c) {
-                const size_t a = samples.size() * c / cols, b = samples.size() * (c + 1) / cols;
-                double s = 0;
-                for (size_t i = a; i < b; ++i) s += double(samples[i]) * samples[i];
-                const int lv = (b > a) ? (int)std::sqrt(s / (b - a)) : 0;
-                spark += ramp[std::clamp(lv * 9 / 12000, 0, 9)];
-            }
-            out += QString("\nогибающая (RMS, 0..%1 мс):\n%2\n").arg(ms, 0, 'f', 0).arg(spark);
+            QString spark[2];
+            for (int ch = 0; ch < 2; ++ch)
+                for (int c = 0; c < cols; ++c) {
+                    const size_t a = nfr * c / cols, b = nfr * (c + 1) / cols;
+                    double s = 0;
+                    for (size_t i = a; i < b; ++i) s += double(samples[2 * i + ch]) * samples[2 * i + ch];
+                    const int lv = (b > a) ? (int)std::sqrt(s / (b - a)) : 0;
+                    spark[ch] += ramp[std::clamp(lv * 9 / 12000, 0, 9)];
+                }
+            out += QString("\nогибающая (RMS, 0..%1 мс):\nL %2\nR %3\n").arg(ms, 0, 'f', 0).arg(spark[0], spark[1]);
         }
 
         // --- тоны: по фронтам динамика (точнее, чем нулевые пересечения PCM)
@@ -1509,11 +1518,11 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         if (args.contains("raw_ms") || args.contains("raw_start_ms")) {
             const int startMs = args.value("raw_start_ms").toInt(0);
             const int lenMs = std::clamp(args.value("raw_ms").toInt(5), 1, 200);
-            const size_t a = std::min(samples.size(), (size_t)(startMs * rate / 1000));
-            const size_t b = std::min(samples.size(), a + (size_t)(lenMs * rate / 1000));
-            out += QString("\nсырые сэмплы int16 [%1..%2 мс], %3 шт:\n").arg(startMs).arg(startMs + lenMs).arg(b - a);
+            const size_t a = std::min(nfr, (size_t)(startMs * rate / 1000));
+            const size_t b = std::min(nfr, a + (size_t)(lenMs * rate / 1000));
+            out += QString("\nсырые сэмплы int16 L/R [%1..%2 мс], %3 шт:\n").arg(startMs).arg(startMs + lenMs).arg(b - a);
             for (size_t i = a; i < b; ++i)
-                out += QString::number(samples[i]) + ((i + 1 - a) % 16 == 0 ? "\n" : " ");
+                out += QString("%1/%2").arg(samples[2 * i]).arg(samples[2 * i + 1]) + ((i + 1 - a) % 10 == 0 ? "\n" : " ");
             out += "\n";
         }
 
@@ -2128,8 +2137,11 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bo
         + (board_.ay() ? QString("\n  AY-3-8910 %1").arg(QString::fromStdString(board_.aySummary())) : QString())
         + (board_.ay2Active() ? QString("\n  AY №2     %1").arg(QString::fromStdString(board_.aySummary(1))) : QString())
         + (board_.ay() && board_.ay2() ? QString("\n  2AY       выбор TurboSound: AY№%1").arg(board_.ayTurboChip() + 1) : QString())
-        + (board_.covox() ? QString("\n  Covox     %1, отсчёт %2")
-                                .arg(covoxModeName(board_.covoxMode())).arg(oct6(board_.covoxSample())) : QString())
+        + (board_.covox() ? QString("\n  Covox     %1, %2")
+                                .arg(covoxModeName(board_.covoxMode()))
+                                .arg(board_.covoxStereo()
+                                         ? QString("стерео: левый %1, правый %2").arg(oct6(board_.covoxSample()), oct6(board_.covoxSampleR()))
+                                         : QString("моно (в оба канала): отсчёт %1").arg(oct6(board_.covoxSample()))) : QString())
         + (board_.diskControllerOn() ? fddState() : QString())
         + (board_.ide().any() ? hddState() : QString())
         + ((board_.diskControllerOn() && args.value("fdd_log").toBool())

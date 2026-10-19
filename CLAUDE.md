@@ -235,14 +235,19 @@ Key cross-cutting facts to know before editing the CPU or screen:
   the program hangs. `RESET` must not touch PSW; it resets devices via `Cpu::setResetHook`.
 - **Speaker is 3-bit**: the piezo sums bits 6, 5 and 2 of `0177716` (mask `0144`) into 8
   levels; `Speaker::feed()` takes a level 0..7, not a bit. The AY-3-8910 (`Ay8910`, emu2149
-  semantics, 1.714 MHz) is mixed into the same mono stream past the piezo RC filter; on
+  semantics, 1.714 MHz) is mixed into the same STEREO stream (interleaved L/R frames: `Speaker::read`,
+  `available`, `trimTo` count frames) past the piezo RC filter — ABC panning with GID's
+  coefficients (A 1.149375/0.249375, B 0.75/0.75, C mirrored), the piezo goes to both; on
   0177714 a WORD write selects the register, a BYTE write sends data, both inverted. The "2AY"
   board (`--2ay`, default ON on the 11M with the AY and Covox) understands BOTH chip-select
   protocols at once (`Board::ayWrite`): TurboSound — a word whose logical value has bits 3–7 set
   selects the chip by bit 0 (1 = first); Gryphon — bits 15/14 = 0 of the address word (both →
   both); a plain `~reg` goes to the TurboSound-selected chip. The second chip joins the mix only
   once selected ALONE (CSIDOS polls the mouse with MOV #10,@#177714 = "both"). Covox (`--covox`)
-  is a mono DAC on the port's LOW byte (odd-byte writes don't touch it); it stays silent while
+  is the Multizvuk stereo DAC pair: the port latches the word, LOW byte = left, HIGH = right (an
+  odd-address byte changes the right one); only words in the last 8 writes → stereo, any bytes →
+  mono (left sample in both channels), so a word writer with high byte 0 is left-only, as on the
+  card; it stays silent while
   writes mix words and bytes (AY protocol, the Multizvuk auto-detect) and within a frame of a
   read of 0177714 (joystick/mouse polling). The `RESET` instruction resets both AYs (all
   registers 0 → silence, TurboSound back to chip 1): INIT reaches the AY through contact А1
@@ -366,7 +371,7 @@ Key cross-cutting facts to know before editing the CPU or screen:
   300 frames, one deflate stream reset only on keyframes. Files split at ~1 GB (AVI 1.0 limit)
   into `name_002.avi`… with a fresh keyframe. 512x256 mode adds an OpenDML `vprp` 4:3 aspect.
   SIGINT/SIGTERM close the GUI normally (`MainWindow::requestQuit`) so the AVI index is written.
-  Sound: a second PCM stream (16-bit mono, Speaker's 44.1 kHz) from a separate lossless tap
+  Sound: a second PCM stream (16-bit stereo, Speaker's 44.1 kHz) from a separate lossless tap
   (`Speaker::setCapture/takeCaptured`) — independent of the sound-card FIFO, its trimming, mute
   and `setEnabled(false)` (feed() still runs while capturing). Each frame's samples go into an
   `01wb` chunk right after its `00dc`; the tap is armed at a frame START (GUI: `frameRec_` at

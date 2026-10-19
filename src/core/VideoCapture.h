@@ -18,7 +18,7 @@ class VideoSink;
 // (3 000 000 / 61 440 = 4 000 000 / 81 920 = 48,828125 Гц = 3125/64). Время в файле —
 // эмулируемое: пауза и отладчик в видео не попадают, торможение хоста — тоже.
 //
-// Звук (если включён) — PCM 16 бит моно с частотой отсчётов Speaker: отсчёты, набранные
+// Звук (если включён) — стерео 16 бит с частотой отсчётов Speaker: отсчёты, набранные
 // за кадр БК, пишутся сразу после картинки этого кадра, так что дорожки идут вместе.
 //
 // Кадры копируются в очередь и кодируются в отдельном потоке, чтобы опорный кадр
@@ -41,8 +41,8 @@ public:
     // srcW x srcH — размер буфера экрана (512x256), fpsNum/fpsDen — частота кадров.
     bool start(const std::string& path, const Options& opt, int srcW, int srcH,
                uint32_t fpsNum, uint32_t fpsDen, std::string* err = nullptr);
-    // Один кадр БК в ARGB и звук, набранный за этот кадр (count отсчётов, моно).
-    void addFrame(const uint32_t* argb, const int16_t* audio = nullptr, size_t count = 0);
+    // Один кадр БК в ARGB и звук, набранный за этот кадр: frames стерео-кадров (L, R).
+    void addFrame(const uint32_t* argb, const int16_t* audio = nullptr, size_t frames = 0);
     bool hasAudio() const { return active_ && opt_.audioRate > 0; }
     // Остановить: дописать очередь, закрыть файл. false — была ошибка записи.
     bool stop();

@@ -13,7 +13,7 @@ std::string mp4Unavailable();
 #endif
 
 namespace {
-// AVI 1.0: видео ZMBV и звук PCM.
+// AVI 1.0: видео ZMBV и звук PCM (стерео).
 class AviSink : public VideoSink {
 public:
     bool open(const std::string& path, const VideoParams& p, std::string* err) override {
@@ -28,12 +28,12 @@ public:
         }
         error_.clear();
         return avi_.open(path, p.width, p.height, enc_->fourcc(), enc_->bitCount(), p.fpsNum, p.fpsDen,
-                         ax, ay, err, p.audioRate, 1);
+                         ax, ay, err, p.audioRate, p.audioChannels);
     }
-    bool write(const uint32_t* argb, const int16_t* audio, size_t count, bool forceKey) override {
+    bool write(const uint32_t* argb, const int16_t* audio, size_t frames, bool forceKey) override {
         bool key = false;
         if (!enc_->encode(argb, forceKey, packet_, key)) return fail("ошибка кодирования ZMBV");
-        if (!avi_.writeFrame(packet_.data(), packet_.size(), key) || !avi_.writeAudio(audio, count))
+        if (!avi_.writeFrame(packet_.data(), packet_.size(), key) || !avi_.writeAudio(audio, frames))
             return fail("ошибка записи");
         return true;
     }

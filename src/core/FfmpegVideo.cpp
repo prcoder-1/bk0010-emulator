@@ -76,15 +76,15 @@ public:
         vst_->avg_frame_rate = vc_->framerate;
         vst_->sample_aspect_ratio = vc_->sample_aspect_ratio;
 
-        // --- звук: AAC-LC моно ---
+        // --- звук: AAC-LC стерео ---
         if (p.audioRate > 0) {
             ast_ = avformat_new_stream(fmt_, nullptr);
             ac_ = avcodec_alloc_context3(enc.audio);
             if (!ast_ || !ac_) return fail("FFmpeg: нет памяти");
             ac_->sample_fmt = AV_SAMPLE_FMT_FLTP;
             ac_->sample_rate = p.audioRate;
-            av_channel_layout_default(&ac_->ch_layout, 1);
-            ac_->bit_rate = 96000;
+            av_channel_layout_default(&ac_->ch_layout, 2);
+            ac_->bit_rate = 160000;
             ac_->time_base = AVRational{1, p.audioRate};
             if (global) ac_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
             if ((e = avcodec_open2(ac_, enc.audio, nullptr)) < 0) return fail("AAC не открылся: " + averr(e));
@@ -121,11 +121,11 @@ public:
         vframe_->width = w_;
         vframe_->height = h_;
         if ((e = av_frame_get_buffer(vframe_, 0)) < 0) return fail(averr(e));
-        vpts_ = 0; apts_ = 0; bytes_ = 0; fifo_.clear(); error_.clear();
+        vpts_ = 0; apts_ = 0; bytes_ = 0; fifoL_.clear(); fifoR_.clear(); error_.clear();
         return true;
     }
 
-    bool write(const uint32_t* argb, const int16_t* audio, size_t count, bool forceKey) override {
+    bool write(const uint32_t* argb, const int16_t* audio, size_t frames, bool forceKey) override {
         if (!vc_) return false;
         int e = av_frame_make_writable(vframe_);
         if (e < 0) return setError(averr(e));
@@ -137,9 +137,12 @@ public:
         vframe_->pict_type = forceKey ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
         if ((e = avcodec_send_frame(vc_, vframe_)) < 0) return setError("libx264: " + averr(e));
         if (!drain(vc_, vst_)) return false;
-        if (ac_ && count) {
-            for (size_t i = 0; i < count; ++i) fifo_.push_back(audio[i] / 32768.0f);
-            while (fifo_.size() >= size_t(aframeSize_))
+        if (ac_ && frames) {
+            for (size_t i = 0; i < frames; ++i) {
+                fifoL_.push_back(audio[2 * i] / 32768.0f);
+                fifoR_.push_back(audio[2 * i + 1] / 32768.0f);
+            }
+            while (fifoL_.size() >= size_t(aframeSize_))
                 if (!sendAudio(aframeSize_)) return false;
         }
         return true;
@@ -149,7 +152,7 @@ public:
         bool ok = error_.empty();
         if (headerDone_) {
             if (ac_) {
-                if (!fifo_.empty()) ok = sendAudio(int(fifo_.size())) && ok;   // последний, короткий кадр AAC
+                if (!fifoL_.empty()) ok = sendAudio(int(fifoL_.size())) && ok;   // последний, короткий кадр AAC
                 if (avcodec_send_frame(ac_, nullptr) >= 0) ok = drain(ac_, ast_) && ok;
             }
             if (avcodec_send_frame(vc_, nullptr) >= 0) ok = drain(vc_, vst_) && ok;   // задержанные кадры x264
@@ -171,8 +174,11 @@ private:
         int e = av_frame_make_writable(aframe_);
         if (e < 0) return setError(averr(e));
         aframe_->nb_samples = n;
-        std::copy(fifo_.begin(), fifo_.begin() + n, reinterpret_cast<float*>(aframe_->data[0]));
-        fifo_.erase(fifo_.begin(), fifo_.begin() + n);
+        // fltp — каналы раздельными плоскостями.
+        std::copy(fifoL_.begin(), fifoL_.begin() + n, reinterpret_cast<float*>(aframe_->data[0]));
+        std::copy(fifoR_.begin(), fifoR_.begin() + n, reinterpret_cast<float*>(aframe_->data[1]));
+        fifoL_.erase(fifoL_.begin(), fifoL_.begin() + n);
+        fifoR_.erase(fifoR_.begin(), fifoR_.begin() + n);
         aframe_->pts = apts_;
         apts_ += n;
         if ((e = avcodec_send_frame(ac_, aframe_)) < 0) return setError("AAC: " + averr(e));
@@ -219,7 +225,7 @@ private:
     AVPacket* pkt_ = nullptr;
     int w_ = 0, h_ = 0, aframeSize_ = 1024;
     int64_t vpts_ = 0, apts_ = 0;
-    std::vector<float> fifo_;          // отсчёты звука, ещё не набравшие кадр AAC
+    std::vector<float> fifoL_, fifoR_; // отсчёты звука, ещё не набравшие кадр AAC
     uint64_t bytes_ = 0;
     bool headerDone_ = false;
     std::string error_;
