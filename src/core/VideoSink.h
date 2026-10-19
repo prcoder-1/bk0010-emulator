@@ -11,7 +11,8 @@ struct VideoParams {
     int width = 0, height = 0;           // размер кадра видео
     uint32_t fpsNum = 0, fpsDen = 1;     // частота кадров дробью (у БК 3125/64)
     int sarNum = 1, sarDen = 1;          // форма точки: 512x256 БК — 2:3 (кадр 4:3 на экране)
-    int audioRate = 0;                   // звук: частота отсчётов, моно 16 бит; 0 — без звука
+    int audioRate = 0;                   // звук: частота отсчётов, 16 бит; 0 — без звука
+    int audioChannels = 2;               // каналов звука (стерео: L, R чередуются)
 };
 
 // Контейнер вместе с кодеками: принимает кадры ARGB (0xAARRGGBB) размера видео и звук,
@@ -20,8 +21,9 @@ class VideoSink {
 public:
     virtual ~VideoSink() = default;
     virtual bool open(const std::string& path, const VideoParams& p, std::string* err) = 0;
-    // forceKey — начать с опорного кадра. false — ошибка (текст — error()).
-    virtual bool write(const uint32_t* argb, const int16_t* audio, size_t count, bool forceKey) = 0;
+    // audio — frames кадров звука (отсчёты каналов чередуются); forceKey — начать с
+    // опорного кадра. false — ошибка (текст — error()).
+    virtual bool write(const uint32_t* argb, const int16_t* audio, size_t frames, bool forceKey) = 0;
     virtual bool close() = 0;
     virtual uint64_t bytes() const = 0;
     virtual std::string error() const = 0;

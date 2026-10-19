@@ -1184,10 +1184,10 @@ int main() {
         // даёт слышимую грязь: тот же тест на прежней реализации давал пик 1178.
         Speaker sp;                       // 44100 Гц, ЦП 3 МГц
         for (int i = 0; i < 60000; ++i) sp.feed((i & 1) ? 7 : 0, 10);
-        std::vector<int16_t> buf(sp.available());
-        const size_t n = sp.read(buf.data(), buf.size());
+        std::vector<int16_t> buf(2 * sp.available());       // стерео: L, R
+        const size_t n = sp.read(buf.data(), sp.available());
         int peak = 0;
-        for (size_t i = n / 2; i < n; ++i) { const int a = std::abs((int)buf[i]); if (a > peak) peak = a; }
+        for (size_t i = n; i < 2 * n; ++i) { const int a = std::abs((int)buf[i]); if (a > peak) peak = a; }
         CHECK(n > 1000, "динамик выдал сэмплы");
         CHECK(peak < 800, "150 кГц гасится RC-цепью до выборки, а не сворачивается в полосу");
     }
@@ -2342,6 +2342,20 @@ int main() {
                 double mn = 1, mx = 0;
                 for (int i = 0; i < 4410; ++i) { ay.advance(1.0 / 44100); const double v = ay.takeSample(); mn = std::min(mn, v); mx = std::max(mx, v); }
                 CHECK(mx - mn < 1e-9, "AY: громкость 0 — тишина");
+                // Стерео ABC с коэффициентами GID: A — влево, B — в центр, C — вправо.
+                auto pan = [&](int ch) {
+                    Ay8910 c;
+                    c.writeReg(7, 077); c.writeReg(8 + ch, 15);   // тон и шум выключены — постоянный уровень
+                    double l = 0, r = 0;
+                    for (int i = 0; i < 441; ++i) { c.advance(1.0 / 44100); c.takeSampleLR(l, r); }
+                    return std::make_pair(l, r);
+                };
+                const auto pa = pan(0), pb = pan(1), pc = pan(2);
+                CHECK(pa.first > 0 && std::abs(pa.first / pa.second - 1.149375 / 0.249375) < 1e-6
+                      && std::abs(pb.first - pb.second) < 1e-12
+                      && std::abs(pc.second / pc.first - 1.149375 / 0.249375) < 1e-6
+                      && std::abs(pa.first - pc.second) < 1e-12,
+                      "AY: стерео ABC как у GID — A влево, B в центр, C вправо");
                 // Два AY: разряд 15 = 0 — первый чип, 14 = 0 — второй (демо «200%»).
                 CHECK(!b.ay2Active(), "2AY: пока программа не выбрала второй чип, он не подключён");
                 auto ayw2 = [&](uint16_t sel, int r, int v) {
@@ -2409,9 +2423,15 @@ int main() {
                 for (int i = 0; i < 8; ++i) m.writeWord(0177714, static_cast<uint16_t>(010200 + i));
                 CHECK(b.covoxMode() == Board::CovoxMode::Active && b.covoxSample() == 0207,
                       "Covox: только слова — звучит младший байт");
+                CHECK(b.covoxStereo() && b.covoxSampleR() == 020,
+                      "Covox: только слова — стерео «Мультизвука», старший байт в правый канал");
                 m.writeByte(0177715, 0377);
-                CHECK(b.covoxSample() == 0207, "Covox: байт по нечётному адресу ЦАП не меняет");
+                CHECK(b.covoxSample() == 0207 && b.covoxMode() == Board::CovoxMode::AyMuted,
+                      "Covox с AY: байт после слов — протокол AY, ЦАП не меняется");
                 b.setAy(false);
+                m.writeByte(0177715, 0377);
+                CHECK(b.covoxSample() == 0207 && b.covoxSampleR() == 0377 && !b.covoxStereo(),
+                      "Covox: байт по нечётному адресу меняет правый ЦАП, с байтами — моно");
                 m.writeByte(0177714, 0123);
                 CHECK(b.covoxMode() == Board::CovoxMode::Active && b.covoxSample() == 0123,
                       "Covox без AY: любая запись сразу идёт в ЦАП");
@@ -2426,11 +2446,32 @@ int main() {
                     m.writeByte(0177714, static_cast<uint8_t>((i / 20) & 1 ? 0300 : 0100));
                     b.runTicks(100);
                 }
-                std::vector<int16_t> pcm(b.sound().available());
-                pcm.resize(b.sound().read(pcm.data(), pcm.size()));
+                std::vector<int16_t> pcm(2 * b.sound().available());
+                pcm.resize(2 * b.sound().read(pcm.data(), pcm.size() / 2));
                 int lo = 0, hi = 0;
                 for (int16_t v : pcm) { lo = std::min<int>(lo, v); hi = std::max<int>(hi, v); }
                 CHECK(pcm.size() > 1000 && hi - lo > 8000, "Covox: меандр в ЦАП слышен на выходе звука");
+                // L − R — только медленный остаток DC-блокеров от прежних записей, меандра в нём нет.
+                int dLo = 1 << 20, dHi = -(1 << 20);
+                for (size_t i = 0; i + 1 < pcm.size(); i += 2) {
+                    dLo = std::min(dLo, pcm[i] - pcm[i + 1]); dHi = std::max(dHi, pcm[i] - pcm[i + 1]);
+                }
+                CHECK(dHi - dLo < 400, "Covox: байты — моно, один отсчёт в оба канала");
+                // Слова: меандр слева, тишина (0200) справа.
+                b.sound().clear();
+                for (int i = 0; i < 2000; ++i) {
+                    m.writeWord(0177714, static_cast<uint16_t>(0100000 | ((i / 20) & 1 ? 0300 : 0100)));
+                    b.runTicks(100);
+                }
+                pcm.assign(2 * b.sound().available(), 0);
+                pcm.resize(2 * b.sound().read(pcm.data(), pcm.size() / 2));
+                int lL = 0, hL = 0, lR = 0, hR = 0;
+                for (size_t i = pcm.size() / 2 & ~size_t(1); i + 1 < pcm.size(); i += 2) {
+                    lL = std::min<int>(lL, pcm[i]);     hL = std::max<int>(hL, pcm[i]);
+                    lR = std::min<int>(lR, pcm[i + 1]); hR = std::max<int>(hR, pcm[i + 1]);
+                }
+                CHECK(b.covoxStereo() && hL - lL > 8000 && hR - lR < 200,
+                      "Covox: слова — стерео, меандр только в левом канале");
                 b.setAy(true);
             }
             // ---- Снимок BK11ST1: ОЗУ 128К и регистры 11М ----
@@ -2985,8 +3026,8 @@ int main() {
             spk.takeCaptured(got);
             bool loud = false;
             for (int16_t v : got) loud |= v > 1000 || v < -1000;
-            CHECK(got.size() == 44100 && spk.available() == 0 && loud,
-                  "Видео: отвод звука — 44100 отсчётов за секунду, при выключенном выводе тоже");
+            CHECK(got.size() == 2 * 44100 && spk.available() == 0 && loud,
+                  "Видео: отвод звука — 44100 стерео-кадров за секунду, при выключенном выводе тоже");
         }
         // AVI со звуком: второй поток PCM, звук кадра — сразу за его картинкой.
         {
@@ -2994,9 +3035,9 @@ int main() {
             VideoCapture va;
             VideoCapture::Options ao;
             ao.audioRate = 44100;
-            std::vector<int16_t> snd(903, 1234);
+            std::vector<int16_t> snd(2 * 904, 1234);     // стерео-кадры: L, R
             bool okA = va.start(wav, ao, W, H, 4000000, 81920);
-            for (int t = 0; t < 10 && okA; ++t) { const auto f = scene(t); va.addFrame(f.data(), snd.data(), snd.size() + (t & 1)); }
+            for (int t = 0; t < 10 && okA; ++t) { const auto f = scene(t); va.addFrame(f.data(), snd.data(), 903 + (t & 1)); }
             okA = okA && va.stop();
             const std::vector<uint8_t> v = rd(wav);
             const size_t avihA = find(v, "avih");
@@ -3012,10 +3053,10 @@ int main() {
                 p2 += 8 + n + (n & 1);
             }
             const bool hdrA = avihA != size_t(-1) && u32(v, avihA + 8 + 24) == 2 && auds != size_t(-1)
-                              && u32(v, auds + 20) == 2 && u32(v, auds + 24) == 88200     // scale = блок, rate = байт/с
+                              && u32(v, auds + 20) == 4 && u32(v, auds + 24) == 176400    // стерео: блок 4, байт/с
                               && u32(v, auds + 32) == 10 * 903 + 5;                        // dwLength — отсчёты
             CHECK(okA && hdrA && dc == 10 && wb == 10,
-                  "Видео: звук PCM 44,1 кГц вторым потоком, кусок на кадр, длина дорожки в отсчётах");
+                  "Видео: звук PCM 44,1 кГц стерео вторым потоком, кусок на кадр, длина дорожки в кадрах");
             std::filesystem::remove(wav);
         }
         CHECK(videoCodecForPath("/x/a.MP4") && videoCodecForPath("/x/a.MP4")->name == "h264"
@@ -3031,10 +3072,10 @@ int main() {
             mo.codec = "h264";
             mo.aspect43 = false;                       // MP4 сам переходит на 2x3
             mo.audioRate = 44100;
-            std::vector<int16_t> tone(903);
-            for (size_t i = 0; i < tone.size(); ++i) tone[i] = int16_t((i / 50) & 1 ? 8000 : -8000);
+            std::vector<int16_t> tone(2 * 903);          // стерео: тон слева, тишина справа
+            for (size_t i = 0; i < 903; ++i) tone[2 * i] = int16_t((i / 50) & 1 ? 8000 : -8000);
             bool okM = vm.start(mp4, mo, W, H, 3000000, 61440);
-            for (int t = 0; t < 60 && okM; ++t) { const auto f = scene(t); vm.addFrame(f.data(), tone.data(), tone.size()); }
+            for (int t = 0; t < 60 && okM; ++t) { const auto f = scene(t); vm.addFrame(f.data(), tone.data(), 903); }
             okM = okM && vm.stop();
             const std::vector<uint8_t> v = rd(mp4);
             const size_t moov = find(v, "moov"), mdat = find(v, "mdat");
@@ -3051,7 +3092,7 @@ int main() {
                           && vs->codecpar->width == 2 * W && vs->codecpar->height == 3 * H
                           && vs->codecpar->format == AV_PIX_FMT_YUV420P
                           && vs->avg_frame_rate.num * 64 == vs->avg_frame_rate.den * 3125
-                          && as->codecpar->sample_rate == 44100 && as->codecpar->ch_layout.nb_channels == 1;
+                          && as->codecpar->sample_rate == 44100 && as->codecpar->ch_layout.nb_channels == 2;
                 if (vs) vdur = double(vs->duration) * av_q2d(vs->time_base);
                 if (as) adur = double(as->duration) * av_q2d(as->time_base);
                 // Первый кадр: декодировать и сравнить с исходным (сжатие с потерями).
@@ -3093,7 +3134,7 @@ int main() {
                 avformat_close_input(&fc);
             }
             const double want = 60 * 64.0 / 3125;
-            CHECK(okM && streams, "MP4: H.264 yuv420p 2x3 кадра + AAC 44,1 кГц моно, 3125/64 кадра/с");
+            CHECK(okM && streams, "MP4: H.264 yuv420p 2x3 кадра + AAC 44,1 кГц стерео, 3125/64 кадра/с");
             CHECK(moov != size_t(-1) && mdat != size_t(-1) && moov < mdat, "MP4: faststart — moov перед mdat");
             CHECK(std::fabs(vdur - want) < 0.03 && std::fabs(adur - want) < 0.05,
                   "MP4: длительности видео и звука — 60 кадров БК (1,229 с)");

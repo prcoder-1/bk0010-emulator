@@ -59,7 +59,7 @@ bool VideoCapture::start(const std::string& path, const Options& opt, int srcW, 
     return true;
 }
 
-void VideoCapture::addFrame(const uint32_t* argb, const int16_t* audio, size_t count) {
+void VideoCapture::addFrame(const uint32_t* argb, const int16_t* audio, size_t frames) {
     if (!active_) return;
     std::unique_lock<std::mutex> l(m_);
     // Очередь ограничена: если кодировщик не успевает, эмуляция подождёт — кадры
@@ -68,7 +68,7 @@ void VideoCapture::addFrame(const uint32_t* argb, const int16_t* audio, size_t c
     Item it;
     if (!spare_.empty()) { it = std::move(spare_.back()); spare_.pop_back(); }
     it.frame.assign(argb, argb + static_cast<size_t>(srcW_) * srcH_);
-    if (opt_.audioRate > 0 && audio) it.audio.assign(audio, audio + count);
+    if (opt_.audioRate > 0 && audio) it.audio.assign(audio, audio + 2 * frames);
     else it.audio.clear();
     queue_.push_back(std::move(it));
     ++queued_;
@@ -111,7 +111,7 @@ void VideoCapture::worker() {
             forceKey = true;
             if (!ok) { std::lock_guard<std::mutex> l(m_); error_ = err.empty() ? "ошибка записи" : err; }
         }
-        if (ok) ok = sink_->write(frame, item.audio.data(), item.audio.size(), forceKey);
+        if (ok) ok = sink_->write(frame, item.audio.data(), item.audio.size() / 2, forceKey);
         forceKey = false;
         {
             std::lock_guard<std::mutex> l(m_);

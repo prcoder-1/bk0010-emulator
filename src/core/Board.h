@@ -220,7 +220,9 @@ public:
     bool covox() const { return covoxOn_; }
     enum class CovoxMode { Off, Idle, AyMuted, PortInput, Active };
     CovoxMode covoxMode() const { return covoxOn_ ? covoxMode_ : CovoxMode::Off; }
-    uint8_t covoxSample() const { return covoxL_; }      // младший байт регистра порта
+    uint8_t covoxSample() const { return covoxL_; }      // младший байт регистра порта (левый ЦАП)
+    uint8_t covoxSampleR() const { return covoxH_; }     // старший байт (правый ЦАП в стерео)
+    bool    covoxStereo() const { return covoxStereo_; } // стерео Covox: в порт идут только слова
     const Ay8910& ayChip(int chip = 0) const { return chip ? ay2_ : ay_; }
     Ay8910&       ayChip(int chip = 0)       { return chip ? ay2_ : ay_; }
     bool ay() const { return ayOn_; }
@@ -654,9 +656,11 @@ private:
     CovoxMode covoxMode_ = CovoxMode::Idle;
     uint8_t covoxHist_ = 0;     // ширина последних записей в порт: 1 — байт
     uint8_t covoxN_ = 0;        // сколько записей в истории (до 8)
-    uint8_t covoxL_ = 0200;     // младший байт регистра порта — то, что слышит ЦАП
+    uint8_t covoxL_ = 0200;     // младший байт регистра порта — левый ЦАП
+    uint8_t covoxH_ = 0200;     // старший байт — правый ЦАП (стерео Covox)
+    bool    covoxStereo_ = false;   // записи только словами — стерео, иначе моно в оба канала
     uint64_t portReadAt_ = 0;   // такт последнего чтения 0177714 + 1 (0 — не читали)
-    void covoxWrite(uint16_t wide, bool isByte);
+    void covoxWrite(uint16_t wide, bool isByte, bool odd);
     Trace   trace_;
 };
 

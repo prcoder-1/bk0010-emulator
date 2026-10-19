@@ -13,7 +13,7 @@ AudioOut::~AudioOut() { stop(); }
 void AudioOut::start() {
     QAudioFormat fmt;
     fmt.setSampleRate(44100);
-    fmt.setChannelCount(2);   // stereo: same mono signal in both channels
+    fmt.setChannelCount(2);   // стерео: пищалка в оба канала, AY по ABC, Covox L/R
     fmt.setSampleFormat(QAudioFormat::Int16);
 
     QAudioDevice dev = QMediaDevices::defaultAudioOutput();
@@ -71,24 +71,32 @@ qint64 AudioOut::readData(char* data, qint64 maxlen) {
     // one-sample gaps continuously — one clean cushion refill instead.
     if (!primed_) {
         if (spk_->available() < static_cast<size_t>(primeSamples_)) {
-            for (qint64 i = 0; i < frames * ch; ++i) out[i] = last_;
+            fill(out, frames, ch, 0);
             return frames * ch * 2;
         }
         primed_ = true;
     }
 
-    // Read the mono stream compactly into the front of the buffer...
-    size_t got = spk_->read(out, static_cast<size_t>(frames));
-    if (got > 0) last_ = out[got - 1];
+    // Стерео-кадры (L, R) из FIFO; недогрузку добиваем последним уровнем каналов.
+    tmp_.resize(static_cast<size_t>(frames) * 2);
+    const size_t got = spk_->read(tmp_.data(), static_cast<size_t>(frames));
+    if (got > 0) { lastL_ = tmp_[2 * got - 2]; lastR_ = tmp_[2 * got - 1]; }
     else primed_ = false;            // FIFO ran dry — rebuild the cushion
-    for (size_t i = got; i < static_cast<size_t>(frames); ++i)
-        out[i] = last_; // pad underrun with the last level
-    // ...then fan each mono sample out to every channel (L = R = ...), expanding
-    // in place from the back so the still-unread source samples aren't clobbered.
-    for (qint64 i = frames - 1; i >= 0; --i) {
-        int16_t s = out[i];
-        for (int c = 0; c < ch; ++c) out[i * ch + c] = s;
-    }
+    for (size_t i = got; i < static_cast<size_t>(frames); ++i) { tmp_[2 * i] = lastL_; tmp_[2 * i + 1] = lastR_; }
+    fill(out, frames, ch, tmp_.data());
     return frames * ch * 2;
+}
+
+// Разложить стерео-кадры по каналам устройства: 2 — как есть, 1 — среднее, больше —
+// L и R в первые два, остальные — среднее. lr == nullptr — последний уровень.
+void AudioOut::fill(int16_t* out, qint64 frames, int ch, const int16_t* lr) {
+    for (qint64 i = 0; i < frames; ++i) {
+        const int16_t l = lr ? lr[2 * i] : lastL_, r = lr ? lr[2 * i + 1] : lastR_;
+        const int16_t m = static_cast<int16_t>((int(l) + int(r)) / 2);
+        int16_t* f = out + i * ch;
+        if (ch == 1) { f[0] = m; continue; }
+        f[0] = l; f[1] = r;
+        for (int c = 2; c < ch; ++c) f[c] = m;
+    }
 }
 #endif // HAVE_QT_MULTIMEDIA

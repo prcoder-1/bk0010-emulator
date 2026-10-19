@@ -680,7 +680,7 @@ void Board::reset() {
     ay_.reset(); ay2_.reset();
     ay2Seen_ = false; aySel_ = 1; tsChip_ = 0;
     syncSound();
-    covoxHist_ = 0; covoxN_ = 0; covoxL_ = 0200;
+    covoxHist_ = 0; covoxN_ = 0; covoxL_ = covoxH_ = 0200; covoxStereo_ = false;
     covoxMode_ = CovoxMode::Idle;
     portReadAt_ = 0;
     sound_.setCovoxLevel(0.0);
@@ -1933,7 +1933,7 @@ void Board::setAy2(bool on) {
 
 void Board::setCovox(bool on) {
     covoxOn_ = on;
-    covoxHist_ = 0; covoxN_ = 0; covoxL_ = 0200;
+    covoxHist_ = 0; covoxN_ = 0; covoxL_ = covoxH_ = 0200; covoxStereo_ = false;
     covoxMode_ = CovoxMode::Idle;
     sound_.setCovox(on);
 }
@@ -1973,7 +1973,7 @@ void Board::ayWrite(uint16_t value, uint16_t wide, bool isByte) {
 // Covox: ЦАП на линиях порта. Пока стоит и AY, ЦАП включается только после того, как
 // по ширине последних восьми записей ясно, что это не протокол AY (слова вперемешку с
 // байтами): иначе каждый выбор регистра щёлкал бы в динамике. Без AY — любая запись.
-void Board::covoxWrite(uint16_t wide, bool isByte) {
+void Board::covoxWrite(uint16_t wide, bool isByte, bool odd) {
     covoxHist_ = static_cast<uint8_t>((covoxHist_ << 1) | (isByte ? 1 : 0));
     if (covoxN_ < 8) ++covoxN_;
     const uint8_t mask = static_cast<uint8_t>((1u << covoxN_) - 1);
@@ -1989,11 +1989,18 @@ void Board::covoxWrite(uint16_t wide, bool isByte) {
         mute(CovoxMode::PortInput);
         return;
     }
-    // ЦАП висит на младших линиях регистра порта: его меняет слово и байт по чётному
-    // адресу, а байт по нечётному — нет (как в эталонном bk, covox.c, и моно-Covox GID).
-    if (!isByte || (wide & 0377) || !(wide >> 8)) covoxL_ = static_cast<uint8_t>(wide);
+    // Регистр порта защёлкивает слово целиком: младший байт — левый ЦАП, старший —
+    // правый («Мультизвук», БК-docs §13.10). Байт по чётному адресу меняет левый, по
+    // нечётному — правый.
+    if (!isByte || !odd) covoxL_ = static_cast<uint8_t>(wide);
+    if (!isByte || odd) covoxH_ = static_cast<uint8_t>(wide >> 8);
     covoxMode_ = CovoxMode::Active;
-    sound_.setCovoxLevel((covoxL_ - 128.0) / 128.0);
+    // Автоопределение «Мультизвука»: идут только слова — стерео Covox (левый/правый);
+    // есть байты — моно Covox, левый отсчёт в оба канала (программы для простого Covox
+    // пишут байт, а в старшем байте шины у них мусор).
+    covoxStereo_ = h == 0;
+    const double l = (covoxL_ - 128.0) / 128.0;
+    sound_.setCovoxLevel(l, covoxStereo_ ? (covoxH_ - 128.0) / 128.0 : l);
 }
 
 bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
@@ -2050,7 +2057,7 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // нечётному адресу приходит в старший байт, младший тогда 0 → данные 0377.
             ayWrite(value, wide, isByte);
         }
-        if (covoxOn_) covoxWrite(wide, isByte);
+        if (covoxOn_) covoxWrite(wide, isByte, (addrIn & 1) != 0);
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
     case REG_KBD_DATA:

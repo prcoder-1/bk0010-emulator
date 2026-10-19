@@ -445,7 +445,7 @@ void MainWindow::runOneSlice(int kSlices) {
     renderScreen();
     if (frameDone_ && video_ && video_->active()) {
         if (video_->hasAudio()) board_->sound().takeCaptured(videoAudio_);
-        video_->addFrame(board_->screen().pixels(), videoAudio_.data(), video_->hasAudio() ? videoAudio_.size() : 0);
+        video_->addFrame(board_->screen().pixels(), videoAudio_.data(), video_->hasAudio() ? videoAudio_.size() / 2 : 0);
         if (!video_->error().empty()) stopVideo();
         else if (video_->frames() % 25 == 0) updateVideoLabel();
     }
