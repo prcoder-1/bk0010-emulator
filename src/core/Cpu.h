@@ -54,14 +54,9 @@ public:
 
     uint16_t pc() const { return r[7]; }
     uint16_t sp() const { return r[6]; }
-    uint16_t lastBranch() const { return lastBranch_; }
 
-    // Approximate CPU-tick cost of the instruction with opcode word `ir` (base
-    // timing by addressing mode, ignoring operand extension words). Used by the
-    // profiler views to estimate per-instruction execution time.
-    int instrTicks(uint16_t ir) const { return timingFor(ir); }
-    // То же для памяти, которую 037 не арбитрирует (страницы СМК-512, ПЗУ) —
-    // вторая таблица, снятая на реальном железе; запасной путь, см. Cpu::timingFast.
+    // Такты команды `ir` в памяти, которую 037 не арбитрирует (страницы СМК-512, ПЗУ), —
+    // таблица, снятая на реальном железе; запасной путь, см. Cpu::timingFast.
     int instrTicksFast(uint16_t ir) const { return timingFast(ir); }
 
     // Добавка к timingFor за арбитраж КР1801ВП1-037, когда команда читает ДОЗУ
@@ -91,7 +86,6 @@ private:
     uint16_t ir_ = 0;          // current instruction register
     uint16_t eaAddr_ = 0;      // cached destination address (modify-in-place)
     bool eaIllegal_ = false;   // loadEa: режим 0 у JMP/JSR — недопустимая команда
-    uint16_t lastBranch_ = 0;  // PC of the last control-flow instruction
     bool halted_ = false;
     bool waiting_ = false;
     bool traceTrap_ = false;

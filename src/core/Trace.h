@@ -5,6 +5,8 @@
 #include <vector>
 #include <utility>
 #include <deque>
+#include <set>
+#include "Instr.h"
 
 namespace bk {
 
@@ -18,6 +20,7 @@ public:
     void reset() {
         now_ = 1; execMax_ = 0;
         lastRead_.fill(0); lastWrite_.fill(0); lastExec_.fill(0); execCount_.fill(0);
+        execTicks_.clear();
         edges_.clear();
         flameReset();
     }
@@ -45,6 +48,14 @@ public:
         lastExec_[static_cast<uint16_t>(pc + 1)] = now_;
         if (++execCount_[pc] > execMax_) execMax_ = execCount_[pc];
     }
+    // Такты, потраченные командой по адресу pc, — по модели шины, как их отсчитала плата
+    // (с ожиданиями 037, быстрой памятью и ловушкой T-бита). На них стоят все окна
+    // профилировщика: стоимость одна и та же, что в графе вызовов, что в пламени.
+    void ticks(uint16_t pc, int t) {
+        if (!enabled_) return;
+        if (execTicks_.empty()) execTicks_.assign(0x10000, 0);
+        execTicks_[pc] += static_cast<uint64_t>(t);
+    }
     void edge(uint16_t from, uint16_t to) { if (enabled_) ++edges_[(uint32_t(from) << 16) | to]; }
 
     // Raw last-access timestamps (0 = never).
@@ -61,8 +72,26 @@ public:
     }
 
     uint32_t execCount(uint16_t pc) const { return execCount_[pc]; }
+    uint64_t execTicks(uint16_t pc) const { return execTicks_.empty() ? 0 : execTicks_[pc]; }
     uint32_t execMax() const { return execMax_; }
+    // Рёбра переходов: ключ — (откуда << 16) | куда, значение — сколько раз.
     const std::unordered_map<uint32_t, uint32_t>& edges() const { return edges_; }
+    static uint16_t edgeFrom(uint32_t key) { return static_cast<uint16_t>(key >> 16); }
+    static uint16_t edgeTo(uint32_t key)   { return static_cast<uint16_t>(key & 0xFFFF); }
+    // Точки входа подпрограмм — цели JSR, по которым прошла трасса (команду в источнике
+    // ребра смотрим в памяти `mem`).
+    std::set<uint16_t> callTargets(const Memory& mem) const {
+        std::set<uint16_t> out;
+        for (const auto& e : edges_)
+            if (isJsr(mem.peekWord(edgeFrom(e.first)))) out.insert(edgeTo(e.first));
+        return out;
+    }
+    // Подпрограмма, которой принадлежит адрес: ближайшая точка входа не выше него
+    // (0 — адрес ниже всех точек входа).
+    static uint16_t funcOf(const std::set<uint16_t>& entries, uint16_t addr) {
+        auto it = entries.upper_bound(addr);
+        return it == entries.begin() ? 0 : *--it;
+    }
 
     // ---- Calling-context tree (flame graph) -------------------------------
     // A node is one call frame reached along a specific call path; `self` is the
@@ -93,7 +122,7 @@ public:
         spans_.clear();
         for (auto& s : fstack_) s.start = flameTick_;
     }
-    void execClear() { execCount_.fill(0); execMax_ = 0; }
+    void execClear() { execCount_.fill(0); execMax_ = 0; execTicks_.clear(); }
     const std::vector<FlameNode>& flame() const { return flame_; }
     // Time-ordered spans + the running flame-tick clock (ticks charged while the
     // profiler was on). Currently-open frames are appended (end = now) by openFrames.
@@ -121,7 +150,7 @@ public:
             }
             fstack_.pop_back();
         }
-        if (ir >= 0004000 && ir <= 0004777) flamePush(pcNow, sp);   // JSR
+        if (isJsr(ir)) flamePush(pcNow, sp);
     }
     // Called by Board when it dispatches an interrupt to `handler` (sp already
     // holds the pushed PSW+PC). The ISR becomes a frame above the interrupted one.
@@ -166,6 +195,7 @@ private:
     std::array<uint32_t, 0x10000> lastWrite_{};
     std::array<uint32_t, 0x10000> lastExec_{};
     std::array<uint32_t, 0x10000> execCount_{};
+    std::vector<uint64_t> execTicks_;   // по адресу команды; выделяется при первом такте
     std::unordered_map<uint32_t, uint32_t> edges_; // (from<<16|to) -> count
 };
 

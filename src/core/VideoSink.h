@@ -37,6 +37,7 @@ struct VideoCodecInfo {
     std::string name;                    // для настроек и --video-codec
     std::string title;                   // для меню
     std::string ext;                     // расширение файла, с точкой
+    std::string format;                  // коротко — для строки состояния
 };
 
 // Кодеки, доступные в этой сборке; первый — по умолчанию. «h264» (MP4) есть, только

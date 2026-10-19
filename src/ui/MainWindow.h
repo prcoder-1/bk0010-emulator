@@ -19,6 +19,7 @@ class CallGraphWidget;
 class FlameWidget;
 class FlameChartWidget;
 class HotChartWidget;
+class ProfilerView;
 class AudioOut;
 namespace bk { class VideoCapture; }
 #include <QElapsedTimer>
@@ -53,6 +54,8 @@ public:
     // --disk-rw: образы вставляются без защиты записи; изменённые пишутся обратно в
     // файл при выходе и перед заменой дискеты
     void setDiskWritable(bool on) { diskRw_ = on; }
+    // --disk-rom: прошивка контроллера (smk512.rom, disk326.rom или свой файл).
+    void setDiskRom(const QString& nameOrPath) { board_->setDiskRom(nameOrPath.toStdString()); }
     // Подключить образ винчестера (HDI) к плате СМК-512: unit 0 — master, 1 — slave.
     // boot — включить питание, чтобы прошивка платы загрузилась с винчестера. Плату
     // ставит сама на этот запуск, если её нет (настройку не меняет).
@@ -112,7 +115,10 @@ private:
     void renderScreen();
     // Linked highlighting: relay a hovered address to every profiler window (and
     // the debugger's disassembler) except the one it came from.
-    void broadcastHighlight(int addr, QWidget* src);
+    void broadcastHighlight(int addr, ProfilerView* src);
+    // Окно профилировщика создаётся при первом открытии и попадает в profilers_; трасса
+    // включается (flame/spans — ещё дерево вызовов и хронология).
+    template <class W> void openProfiler(W*& w, QSize size, bool flame = false, bool spans = false);
     void setPaused(bool paused);
     void setSuspended(bool suspended);   // simple pause (Pause key), no debugger
     void stepInto();
@@ -139,6 +145,7 @@ private:
     FlameWidget* flame_ = nullptr;
     FlameChartWidget* flamechart_ = nullptr;
     HotChartWidget* hotchart_ = nullptr;
+    std::vector<ProfilerView*> profilers_;   // все открывавшиеся окна профилировщика
     AudioOut* audio_ = nullptr;
     QTimer* timer_ = nullptr;
     QLabel* status_ = nullptr;

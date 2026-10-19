@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "QtFormat.h"
 #include "GlScreen.h"
 #include "DebuggerOverlay.h"
 #include "MemVisWidget.h"
@@ -361,7 +362,7 @@ bool MainWindow::startVideo(const QString& path, const QString& codec, int aspec
         return false;
     }
     videoAction_->setChecked(true);
-    status_->setText(QString("Запись видео: %1 (%2, %3×%4, %5 Гц%6)").arg(file, cname == "h264" ? "H.264 + AAC" : "ZMBV")
+    status_->setText(QString("Запись видео: %1 (%2, %3×%4, %5 Гц%6)").arg(file, QString::fromStdString(bk::findVideoCodec(cname)->format))
                          .arg(video_->outWidth()).arg(video_->outHeight())
                          .arg(double(board_->cpuFreqHz()) / board_->ticksPerFrame(), 0, 'f', 6)
                          .arg(o.audioRate ? QString(", звук %1 Гц").arg(o.audioRate) : QString(", без звука")));
@@ -454,11 +455,8 @@ void MainWindow::runOneSlice(int kSlices) {
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
     if (smkram_ && smkram_->isVisible()) smkram_->refresh();
     if (bkram_ && bkram_->isVisible()) bkram_->refresh();
-    if (hotpath_ && hotpath_->isVisible()) hotpath_->refresh();
-    if (callgraph_ && callgraph_->isVisible()) callgraph_->refresh();
-    if (flame_ && flame_->isVisible()) flame_->refresh();
-    if (flamechart_ && flamechart_->isVisible()) flamechart_->refresh();
-    if (hotchart_ && hotchart_->isVisible()) hotchart_->refresh();
+    for (ProfilerView* p : profilers_)
+        if (p->isVisible()) p->refresh();
 }
 
 void MainWindow::renderScreen() {
@@ -520,7 +518,7 @@ void MainWindow::runToCursor() {
     uint16_t target = overlay_->cursorAddr();
     if (target == board_->cpu().pc()) return;  // уже на месте
     overlay_->snapshotRegs();
-    board_->runUntil(target, 60'000'000);
+    board_->runUntil(target, 3 * bk::Board::kDebugRunTicks);   // до курсора бывает и далеко
     board_->clearBreakHit();
     overlay_->setCursor(board_->cpu().pc());   // курсор — куда реально дошли
     overlay_->followPc();
@@ -530,19 +528,7 @@ void MainWindow::runToCursor() {
 
 void MainWindow::stepOver() {
     overlay_->snapshotRegs();   // so registers changed by this step are highlighted
-    uint16_t pc = board_->cpu().pc();
-    bk::DisasmLine d = bk::disasm(board_->memory(), pc);
-    uint16_t ir = board_->memory().peekWord(pc);
-    int idx = ir >> 6;
-    bool isCall = (idx >= 040 && idx <= 047) ||           // JSR
-                  (idx >= 01040 && idx <= 01047);         // EMT/TRAP
-    if (isCall) {
-        uint16_t ret = pc + d.words * 2;
-        board_->runUntil(ret, 20'000'000);                // cap to avoid hangs
-        board_->clearBreakHit();
-    } else {
-        board_->stepInstruction();
-    }
+    board_->stepOver();
     overlay_->setCursor(board_->cpu().pc());  // курсор — на исполняемую инструкцию
     overlay_->followPc();
     renderScreen();
@@ -566,7 +552,6 @@ void MainWindow::showEvent(QShowEvent* e) {
 }
 
 // ---- Interactive-disassembler annotations (symbols + comments) --------------
-static QString octAddr(uint16_t a) { return QString("%1").arg(a, 6, 8, QChar('0')); }
 
 void MainWindow::nameCursorSymbol() {
     if (!paused_) return;
@@ -574,7 +559,7 @@ void MainWindow::nameCursorSymbol() {
     const std::string* cur = board_->symbols().nameAt(a);
     bool ok = false;
     QString name = QInputDialog::getText(this, "Символ",
-        QString("Имя для адреса %1 (пусто — удалить):").arg(octAddr(a)),
+        QString("Имя для адреса %1 (пусто — удалить):").arg(oct6(a)),
         QLineEdit::Normal, cur ? QString::fromStdString(*cur) : QString(), &ok);
     if (!ok) return;
     name = name.trimmed();
@@ -589,7 +574,7 @@ void MainWindow::commentCursor() {
     const std::string* cur = board_->comment(a);
     bool ok = false;
     QString text = QInputDialog::getText(this, "Комментарий",
-        QString("Комментарий к адресу %1 (пусто — удалить):").arg(octAddr(a)),
+        QString("Комментарий к адресу %1 (пусто — удалить):").arg(oct6(a)),
         QLineEdit::Normal, cur ? QString::fromStdString(*cur) : QString(), &ok);
     if (!ok) return;
     board_->setComment(a, text.trimmed().toStdString());   // empty clears
@@ -639,12 +624,12 @@ void MainWindow::xrefsDialog() {
     if (!paused_) return;
     uint16_t t = overlay_->cursorAddr();
     std::vector<uint16_t> refs = overlay_->xrefsTo(t);
-    QString what = QString("%1").arg(t, 6, 8, QChar('0'));
+    QString what = oct6(t);
     if (const std::string* nm = board_->symbols().nameAt(t)) what += " (" + QString::fromStdString(*nm) + ")";
     if (refs.empty()) { status_->setText("Нет ссылок на " + what); return; }
     QStringList items;
     for (uint16_t a : refs)
-        items << QString("%1  %2").arg(a, 6, 8, QChar('0'))
+        items << QString("%1  %2").arg(oct6(a))
                      .arg(QString::fromStdString(bk::disasm(board_->memory(), a, &board_->symbols()).text));
     bool ok = false;
     QString sel = QInputDialog::getItem(this, "Ссылки на " + what,
@@ -706,6 +691,9 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     saveAnnotations(annotationsPath());   // persist symbols/comments next to the .bin
     saveDisks();
     QMainWindow::closeEvent(e);
+    // Окна отладки — отдельные окна верхнего уровня и держали бы приложение открытым
+    // уже без платы (она принадлежит главному окну).
+    QCoreApplication::quit();
 }
 
 void MainWindow::openBin() {
@@ -1112,102 +1100,39 @@ void MainWindow::openSmkRam() {
         status_->setText("СМК-512 не установлен: окно ДОЗУ пустое");
 }
 
-void MainWindow::broadcastHighlight(int addr, QWidget* src) {
-    if (hotpath_    && hotpath_    != src) hotpath_->setHighlight(addr);
-    if (callgraph_  && callgraph_  != src) callgraph_->setHighlight(addr);
-    if (flame_      && flame_      != src) flame_->setHighlight(addr);
-    if (flamechart_ && flamechart_ != src) flamechart_->setHighlight(addr);
+void MainWindow::broadcastHighlight(int addr, ProfilerView* src) {
+    for (ProfilerView* p : profilers_)
+        if (p != src) p->setHighlight(addr);
     if (overlay_) overlay_->setHighlight(addr);   // debugger disasm is always a receiver
 }
 
-void MainWindow::openHotPath() {
-    if (!hotpath_) {
-        hotpath_ = new HotPathWidget(board_.get());
-        hotpath_->resize(720, 620);
-        // Clicking a row jumps the debugger's disassembler to that address,
-        // opening the debugger overlay if it isn't already showing.
-        connect(hotpath_, &HotPathWidget::addressPicked, this, [this](uint16_t addr) {
+template <class W>
+void MainWindow::openProfiler(W*& w, QSize size, bool flame, bool spans) {
+    if (!w) {
+        w = new W(board_.get());
+        if (size.isValid()) w->resize(size);
+        ProfilerView* v = w;
+        // Щелчок по адресу ведёт дизассемблер отладчика туда (отладчик открывается).
+        connect(v, &ProfilerView::addressPicked, this, [this](uint16_t addr) {
             if (!paused_) setPaused(true);   // setPaused re-anchors disasm to PC…
             overlay_->setDisasmAddr(addr);   // …so set the picked address after it
             overlay_->update();
         });
-        connect(hotpath_, &HotPathWidget::hoverAddress, this,
-                [this](int a) { broadcastHighlight(a, hotpath_); });
+        connect(v, &ProfilerView::hoverAddress, this, [this, v](int a) { broadcastHighlight(a, v); });
+        profilers_.push_back(v);
     }
     board_->trace().setEnabled(true);
-    hotpath_->show();
-    hotpath_->raise();
+    if (flame) board_->trace().setFlameEnabled(true);
+    if (spans) board_->trace().setSpansEnabled(true);
+    w->show();
+    w->raise();
 }
 
-void MainWindow::openCallGraph() {
-    if (!callgraph_) {
-        callgraph_ = new CallGraphWidget(board_.get());
-        callgraph_->resize(900, 680);
-        // Clicking a function box jumps the debugger's disassembler to its entry.
-        connect(callgraph_, &CallGraphWidget::addressPicked, this, [this](uint16_t addr) {
-            if (!paused_) setPaused(true);
-            overlay_->setDisasmAddr(addr);
-            overlay_->update();
-        });
-        connect(callgraph_, &CallGraphWidget::hoverAddress, this,
-                [this](int a) { broadcastHighlight(a, callgraph_); });
-    }
-    board_->trace().setEnabled(true);
-    callgraph_->show();
-    callgraph_->raise();
-}
-
-void MainWindow::openFlame() {
-    if (!flame_) {
-        flame_ = new FlameWidget(board_.get());
-        flame_->resize(820, 560);
-        connect(flame_, &FlameWidget::addressPicked, this, [this](uint16_t addr) {
-            if (!paused_) setPaused(true);
-            overlay_->setDisasmAddr(addr);
-            overlay_->update();
-        });
-        connect(flame_, &FlameWidget::hoverAddress, this,
-                [this](int a) { broadcastHighlight(a, flame_); });
-    }
-    board_->trace().setEnabled(true);
-    board_->trace().setFlameEnabled(true);
-    flame_->show();
-    flame_->raise();
-}
-
-void MainWindow::openFlameChart() {
-    if (!flamechart_) {
-        flamechart_ = new FlameChartWidget(board_.get());
-        flamechart_->resize(900, 480);
-        connect(flamechart_, &FlameChartWidget::addressPicked, this, [this](uint16_t addr) {
-            if (!paused_) setPaused(true);
-            overlay_->setDisasmAddr(addr);
-            overlay_->update();
-        });
-        connect(flamechart_, &FlameChartWidget::hoverAddress, this,
-                [this](int a) { broadcastHighlight(a, flamechart_); });
-    }
-    board_->trace().setEnabled(true);
-    board_->trace().setFlameEnabled(true);
-    board_->trace().setSpansEnabled(true);
-    flamechart_->show();
-    flamechart_->raise();
-}
-
-void MainWindow::openHotChart() {
-    if (!hotchart_) {
-        hotchart_ = new HotChartWidget(board_.get());
-        // Clicking a legend row jumps the debugger's disassembler to that address.
-        connect(hotchart_, &HotChartWidget::addressPicked, this, [this](uint16_t addr) {
-            if (!paused_) setPaused(true);
-            overlay_->setDisasmAddr(addr);
-            overlay_->update();
-        });
-    }
-    board_->trace().setEnabled(true);
-    hotchart_->show();
-    hotchart_->raise();
-}
+void MainWindow::openHotPath()    { openProfiler(hotpath_, QSize(720, 620)); }
+void MainWindow::openCallGraph()  { openProfiler(callgraph_, QSize(900, 680)); }
+void MainWindow::openFlame()      { openProfiler(flame_, QSize(820, 560), true); }
+void MainWindow::openFlameChart() { openProfiler(flamechart_, QSize(900, 480), true, true); }
+void MainWindow::openHotChart()   { openProfiler(hotchart_, QSize()); }
 
 void MainWindow::saveState() {
     QString path = QFileDialog::getSaveFileName(this, "Сохранить состояние", QString(),

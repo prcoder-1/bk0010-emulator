@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include "ProfilerView.h"
 #include <QRectF>
 #include <QPoint>
 #include <cstdint>
@@ -13,16 +14,12 @@ namespace bk { class Board; }
 // timestamped call spans. The right edge is "now"; wheel zooms the time window,
 // drag scrolls depth, click jumps the disassembler, hover highlights across
 // windows. Opened from the Отладка menu.
-class FlameChartWidget : public QWidget {
+class FlameChartWidget : public ProfilerView {
     Q_OBJECT
 public:
     explicit FlameChartWidget(bk::Board* board, QWidget* parent = nullptr);
-    void refresh();
-    void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
+    void refresh() override;
 
-signals:
-    void addressPicked(uint16_t addr);
-    void hoverAddress(int addr);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -39,7 +36,6 @@ private:
     int    rowH_ = 16;
     double scroll_ = 0.0;        // vertical (depth) scroll, px
     int    maxDepth_ = 0;
-    int    link_ = -1, hoverEmit_ = -2;
     bool   dragging_ = false;
     QPoint pressPos_, lastDrag_;
     std::vector<Bar> bars_;      // laid-out bars from the last paint (hit test)

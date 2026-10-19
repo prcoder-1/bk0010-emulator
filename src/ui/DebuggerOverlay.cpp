@@ -1,6 +1,8 @@
 #include "DebuggerOverlay.h"
+#include "QtFormat.h"
 #include "Board.h"
 #include "Disasm.h"
+#include "Instr.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QWheelEvent>
@@ -111,12 +113,9 @@ int DebuggerOverlay::analyzeProcedures() {
     for (const auto& n : board_->trace().flame())
         if (n.func && n.func < 0100000) cands.insert(n.func);
     // Static: every JSR call target throughout memory (calls, not plain jumps).
-    uint16_t t;
     for (uint32_t a = 0; a <= 0177776; a += 2) {
-        uint16_t ir = mem.peekWord(static_cast<uint16_t>(a));
-        int idx = ir >> 6;
-        if (idx >= 040 && idx <= 047 && targetOf(static_cast<uint16_t>(a), t) && t < 0100000)
-            cands.insert(t);
+        const bk::InstrInfo in = bk::instrInfo(mem, static_cast<uint16_t>(a));
+        if (in.flow == bk::Flow::Call && in.hasTarget && in.target < 0100000) cands.insert(in.target);
     }
     int added = 0;
     for (uint16_t c : cands) {
@@ -132,39 +131,16 @@ int DebuggerOverlay::analyzeProcedures() {
 }
 
 std::vector<uint16_t> DebuggerOverlay::xrefsTo(uint16_t target) const {
-    // Linear scan: every even address treated as a potential instruction start.
-    // Mid-instruction false positives are possible (no full flow analysis), but
-    // this catches essentially all real branch/call/jump references cheaply.
-    std::vector<uint16_t> refs;
-    uint16_t t;
-    for (uint32_t a = 0; a <= 0177776 && refs.size() < 500; a += 2)
-        if (targetOf(static_cast<uint16_t>(a), t) && t == target) refs.push_back(static_cast<uint16_t>(a));
-    return refs;
+    return bk::staticXrefs(board_->memory(), target);
 }
 
 bool DebuggerOverlay::targetOf(uint16_t addr, uint16_t& out) const {
-    const bk::Memory& mem = board_->memory();
-    uint16_t ir = mem.peekWord(addr);
-    int idx = ir >> 6;
-    // Branches (idx 004..037 and 01000..01037): PC-relative signed byte offset.
-    if ((idx >= 0004 && idx <= 0037) || (idx >= 01000 && idx <= 01037)) {
-        int off = ir & 0377; if (off & 0200) off |= 0177400;
-        out = static_cast<uint16_t>(addr + 2 + off * 2); return true;
-    }
-    if (idx >= 0770 && idx <= 0777) {                    // SOB: backward
-        out = static_cast<uint16_t>(addr + 2 - (ir & 077) * 2); return true;
-    }
-    bool jmp = (idx == 001), jsr = (idx >= 040 && idx <= 047);
-    if (jmp || jsr) {                                    // destination operand
-        int dm = (ir & 070) >> 3, dr = ir & 07;
-        if (dr == 7) {
-            if (dm == 3) { out = mem.peekWord(addr + 2); return true; }               // @#abs
-            if (dm == 6) { out = static_cast<uint16_t>(addr + 4 + mem.peekWord(addr + 2)); return true; } // x(PC)
-            if (dm == 7) { out = mem.peekWord(static_cast<uint16_t>(addr + 4 + mem.peekWord(addr + 2))); return true; } // @x(PC)
-        }
-        // register-indirect (e.g. JMP (R0)) — not statically resolvable
-    }
-    return false;
+    // Переходы, SOB, JMP/JSR по @#a, a(PC), @a(PC); косвенные через регистр статически
+    // не разрешить.
+    const bk::InstrInfo in = bk::instrInfo(board_->memory(), addr);
+    if (!in.hasTarget) return false;
+    out = in.target;
+    return true;
 }
 
 bool DebuggerOverlay::addrTokenAtX(const QString& text, int relX, const QFontMetrics& fm,
@@ -202,7 +178,6 @@ static QString flagsStr(uint16_t psw) {
     return buf;
 }
 
-static QString oct6(uint16_t v) { char b[8]; std::snprintf(b, sizeof(b), "%06o", v); return b; }
 
 void DebuggerOverlay::paintEvent(QPaintEvent*) {
     QPainter p(this);

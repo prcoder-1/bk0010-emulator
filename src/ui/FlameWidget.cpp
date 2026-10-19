@@ -1,4 +1,5 @@
 #include "FlameWidget.h"
+#include "QtFormat.h"
 #include "Board.h"
 #include "Disasm.h"
 #include <QPainter>
@@ -10,7 +11,6 @@
 
 using bk::Board;
 
-static QString oct6(uint16_t v) { return QString("%1").arg(v, 6, 8, QChar('0')); }
 
 // A stable warm colour per function (flame-graph look): hue in the red→yellow band
 // derived from the address, brighter for the box itself.
@@ -23,7 +23,7 @@ static QColor flameColor(uint16_t func, bool hot) {
 }
 
 FlameWidget::FlameWidget(Board* board, QWidget* parent)
-    : QWidget(parent), board_(board) {
+    : ProfilerView(parent), board_(board) {
     setMinimumSize(420, 260);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
@@ -166,13 +166,12 @@ void FlameWidget::mouseMoveEvent(QMouseEvent* e) {
     const auto& f = board_->trace().flame();
     int addr = (h >= 0 && h < (int)f.size()) ? int(f[h].func) : -1;
     if (addr == 0) addr = -1;                       // root has no address
-    if (addr != hoverEmit_) { hoverEmit_ = addr; setHighlight(addr); emit hoverAddress(addr); }
+    hoverTo(addr);
 }
 
 void FlameWidget::leaveEvent(QEvent*) {
     if (hover_ != -1) { hover_ = -1; update(); }
-    if (hoverEmit_ != -1) { hoverEmit_ = -1; emit hoverAddress(-1); }
-    setHighlight(-1);
+    leaveHover();
 }
 
 void FlameWidget::wheelEvent(QWheelEvent* e) {

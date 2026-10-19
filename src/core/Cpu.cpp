@@ -10,7 +10,6 @@ void Cpu::reset(uint16_t pc, uint16_t initPsw) {
     r[7] = pc;
     psw = initPsw;
     halted_ = waiting_ = false;
-    lastBranch_ = pc;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +140,6 @@ uint16_t Cpu::loadEa() {
 // Trap / interrupt service
 // ---------------------------------------------------------------------------
 void Cpu::service(uint16_t vector) {
-    lastBranch_ = r[7];
     uint16_t oldpsw = psw, oldpc = r[7];
     push(oldpsw);
     push(oldpc);
@@ -367,7 +365,6 @@ int Cpu::op_sxt() {
     return OK;
 }
 int Cpu::op_mark() {
-    lastBranch_ = r[7];
     r[6] = r[7] + (ir_ & 077) * 2;
     r[7] = r[5];
     r[5] = pop();
@@ -482,7 +479,6 @@ int Cpu::op_aslb() {
 
 // ---- branches ----
 int Cpu::brx(uint16_t clear, uint16_t set) {
-    lastBranch_ = r[7];
     const uint16_t f = brFlags();
     if (((f & set) == set) && ((f & clear) == 0)) {
         uint16_t off = ir_ & 0377;
@@ -491,7 +487,7 @@ int Cpu::brx(uint16_t clear, uint16_t set) {
     }
     return OK;
 }
-int Cpu::op_br()   { lastBranch_ = r[7]; uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; return OK; }
+int Cpu::op_br()   { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; return OK; }
 int Cpu::op_bne()  { return brx(CC_Z, 0); }
 int Cpu::op_beq()  { return brx(0, CC_Z); }
 int Cpu::op_bpl()  { return brx(CC_N, 0); }
@@ -502,36 +498,30 @@ int Cpu::op_bvs()  { return brx(0, CC_V); }
 int Cpu::op_bcc()  { return brx(CC_C, 0); }
 int Cpu::op_bcs()  { return brx(0, CC_C); }
 int Cpu::op_blos() {
-    lastBranch_ = r[7];
     if ((brFlags() & CC_C) || (brFlags() & CC_Z)) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
     return OK;
 }
 int Cpu::op_bge() {
-    lastBranch_ = r[7];
     int n = (psw & CC_N) ? 1 : 0, v = (psw & CC_V) ? 1 : 0;
     if ((n ^ v) == 0) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
     return OK;
 }
 int Cpu::op_blt() {
-    lastBranch_ = r[7];
     int n = (psw & CC_N) ? 1 : 0, v = (psw & CC_V) ? 1 : 0;
     if ((n ^ v) == 1) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
     return OK;
 }
 int Cpu::op_ble() {
-    lastBranch_ = r[7];
     int n = (psw & CC_N) ? 1 : 0, v = (psw & CC_V) ? 1 : 0;
     if (((n ^ v) == 1) || (psw & CC_Z)) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
     return OK;
 }
 int Cpu::op_bgt() {
-    lastBranch_ = r[7];
     int n = (psw & CC_N) ? 1 : 0, v = (psw & CC_V) ? 1 : 0;
     if (((n ^ v) == 0) && ((psw & CC_Z) == 0)) { uint16_t off = ir_ & 0377; if (off & 0200) off |= 0177400; r[7] += off * 2; }
     return OK;
 }
 int Cpu::op_sob() {
-    lastBranch_ = r[7];
     r[srcReg()] -= 1;
     if (r[srcReg()]) r[7] -= (ir_ & 077) * 2;
     return OK;
@@ -539,14 +529,12 @@ int Cpu::op_sob() {
 
 // ---- jumps / control ----
 int Cpu::op_jmp() {
-    lastBranch_ = r[7];
     uint16_t a = loadEa();
     if (eaIllegal_) return R_ILLEGAL;
     r[7] = a;
     return OK;
 }
 int Cpu::op_jsr() {
-    lastBranch_ = r[7];
     uint16_t a = loadEa();
     if (eaIllegal_) return R_ILLEGAL;
     push(r[srcReg()]);
@@ -555,7 +543,6 @@ int Cpu::op_jsr() {
     return OK;
 }
 int Cpu::op_rts() {
-    lastBranch_ = r[7];
     r[7] = r[dstReg()];
     r[dstReg()] = pop();
     return OK;

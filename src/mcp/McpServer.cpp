@@ -1,5 +1,7 @@
 #include "McpServer.h"
+#include "../ui/QtFormat.h"
 #include "Disasm.h"
+#include "Instr.h"
 #include "Screen.h"
 #include "BkKeys.h"
 #include "ScreenOcr.h"
@@ -20,7 +22,6 @@ using bk::Board;
 // ---------------------------------------------------------------------------
 // small helpers
 // ---------------------------------------------------------------------------
-static QString oct6(uint16_t v) { return QString::asprintf("%06o", v); }
 
 // Читаемая подпись кода КОИ-7: " <enter>", " 'A'", " 'Ю'" — или пусто.
 static QString keyLabel(uint16_t code) {
@@ -58,7 +59,10 @@ static bool writeWav(const QString& path, const std::vector<int16_t>& s, int rat
     return ok;
 }
 
-static QJsonObject textContent(const QString& text, bool isError = false) {
+static QJsonObject textContent(const QString& text, bool isError = false);
+static QJsonObject fail(const QString& m) { return textContent("Error: " + m, true); }
+
+static QJsonObject textContent(const QString& text, bool isError) {
     QJsonObject c; c["type"] = "text"; c["text"] = text;
     QJsonArray arr; arr.append(c);
     QJsonObject r; r["content"] = arr; r["isError"] = isError;
@@ -80,34 +84,28 @@ static bool parseNumber(const QJsonValue& v, long& out) {
     return false;
 }
 
-McpServer::McpServer(std::string romDir, bool smk512, std::string disk, bool diskRw,
-                     int machine, int ay, std::string hdd, bool hddRw, int ay2, int covox,
-                     bk::Board::HddController hddCtl)
+McpServer::McpServer(std::string romDir, const bk::Board::Setup& setup, const bk::Board::Media& media)
     : romDir_(std::move(romDir)) {
-    board_.setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
-    if (ay >= 0) board_.setAy(ay != 0);
-    if (ay2 >= 0) board_.setAy2(ay2 != 0);
-    if (covox >= 0) board_.setCovox(covox != 0);
-    // На БК-0011М палитра меняется по ходу кадра — экран рисуется построчно.
-    board_.setScanlineRender(board_.bk11());
-    romsOk_ = board_.loadRoms(romDir_);
-    board_.setSmk512(smk512);             // --smk: блок расширения памяти в разъёме МПИ
-    board_.reset();
-    // --disk <образ>: вставить дискету и отдать управление автозагрузчику ПЗУ
-    // контроллера. Монитор к этому моменту поднимаем, как и в безголовом режиме.
-    if (!disk.empty()) {
-        for (int i = 0; i < 25; ++i) board_.runFrame();
-        if (board_.attachDisk(0, disk, !diskRw)) {
-            board_.kngmd().fdd().setLog(true);   // сервер — инструмент отладки: журнал сразу
-            board_.bootFromDisk();
-        }
-    }
-    // --hdd <образ.hdi>: винчестер на СМК-512 или «Самаре»; грузит с него прошивка контроллера.
-    board_.setHddController(hddCtl);
-    if (!hdd.empty() && board_.attachHdd(0, hdd, !hddRw)) board_.bootFromHdd();
+    romsOk_ = board_.powerOn(setup, romDir_);
+    board_.kngmd().fdd().setLog(true);    // сервер — инструмент отладки: журнал НГМД сразу
+    std::string err;
+    if (!media.empty() && (!board_.bootMedia(media, err) || !err.empty()))
+        std::cerr << "mcp: " << err << "\n";
     board_.trace().setEnabled(true);      // collect hot-spot data from the start
     board_.trace().setFlameEnabled(true); // maintain the shadow call stack (bk_backtrace)
     board_.setSpeakerLog(true);           // фронты динамика — для разбора звука в bk_audio
+    // Описания инструментов (toolDefs) и обработчики (BK_MCP_TOOLS) живут в разных местах —
+    // расхождение видно сразу при запуске.
+    QStringList declared;
+#define BK_MCP_NAME(n) declared << #n;
+    BK_MCP_TOOLS(BK_MCP_NAME)
+#undef BK_MCP_NAME
+    QStringList described;
+    for (const QJsonValue& t : toolDefs()) described << t.toObject().value("name").toString();
+    for (const QString& n : described)
+        if (!declared.contains(n)) std::cerr << "mcp: у инструмента " << n.toStdString() << " нет обработчика\n";
+    for (const QString& n : declared)
+        if (!described.contains(n)) std::cerr << "mcp: у обработчика " << n.toStdString() << " нет описания\n";
 }
 
 bool McpServer::switchMachine(bool want11) {
@@ -159,9 +157,8 @@ QString McpServer::fddLog(int limit) const {
     const bk::Fdd& f = board_.kngmd().fdd();
     const auto& lg = f.log();
     QString out = QString("\nЖурнал НГМД (последние %1 из %2):").arg(limit).arg(lg.size());
-    // Кольцо: если оно заполнено, самая старая запись лежит в logPos().
     const int n = static_cast<int>(lg.size());
-    const int start = (n < 4096) ? 0 : static_cast<int>(f.logPos());
+    const int start = static_cast<int>(f.logStart());
     const int show = std::min(limit, n);
     for (int j = n - show; j < n; ++j) {
         const auto& e = lg[(start + j) % n];
@@ -326,8 +323,7 @@ void McpServer::handleMessage(const QJsonObject& req) {
         const QJsonObject params = req.value("params").toObject();
         const QString name = params.value("name").toString();
         const QJsonObject args = params.value("arguments").toObject();
-        bool isError = false;
-        QJsonObject result = callTool(name, args, isError);
+        QJsonObject result = callTool(name, args);
         reply(id, result);
         return;
     }
@@ -618,7 +614,9 @@ QJsonArray McpServer::toolDefs() const {
                   "game loaded/saved, load address, length, and result). Useful for multi-part loaders.",
         schema({{"count", P("integer", "How many recent ops to show (default 40)")}})));
     t.append(tool("bk_xrefs", "Cross-references from the recorded control-flow edges: who calls/jumps/"
-                  "branches TO an address, and where it goes FROM there, with counts.",
+                  "branches TO an address, and where it goes FROM there, with counts; plus static "
+                  "references (every word of memory tried as an instruction, like the GUI debugger's X) "
+                  "that also show branches not executed yet.",
         schema({{"addr", addrArg}}, {"addr"})));
     t.append(tool("bk_io_state", "Decode the current I/O-register state (keyboard, scroll, timer, "
                   "joystick port decoded under the active layout, system/speaker) — a hardware snapshot.",
@@ -934,1281 +932,1339 @@ bool McpServer::parseInputScript(const QJsonArray& arr, std::vector<InputStep>& 
 // ---------------------------------------------------------------------------
 // tool dispatch
 // ---------------------------------------------------------------------------
-QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args, bool& isError) {
-    isError = false;
-    auto fail = [&](const QString& m) { isError = true; return textContent("Error: " + m, true); };
-    const bk::Memory& cmem = board_.memory();
-    (void)cmem;
+// Таблица инструментов: имя → обработчик. Список имён — BK_MCP_TOOLS в McpServer.h;
+// описания и схемы аргументов — toolDefs(), их соответствие сверяет конструктор.
+QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args) {
+    using Handler = QJsonObject (McpServer::*)(const QJsonObject&);
+    static const std::map<QString, Handler> table = {
+#define BK_MCP_HANDLER(n) {#n, &McpServer::tool_##n},
+        BK_MCP_TOOLS(BK_MCP_HANDLER)
+#undef BK_MCP_HANDLER
+    };
+    const auto it = table.find(name);
+    return it == table.end() ? fail("unknown tool: " + name) : (this->*it->second)(args);
+}
 
-    if (name == "bk_load") {
-        if (!romsOk_) return fail("ROMs not loaded from " + QString::fromStdString(romDir_));
-        // Машину выбирает программа (запись в 0177662 — БК-0011М), если её не задали явно.
-        const QString path = args.value("path").toString();
-        bool want11 = bk::Board::binTargetsBk11(path.toStdString());
-        if (args.contains("machine")) {
-            const QString m = args.value("machine").toString().toLower();
-            want11 = m.contains("11");
-            if (!want11 && !m.contains("10")) return fail("machine must be \"bk10\" or \"bk11m\"");
-        }
-        QString switched;
-        if (switchMachine(want11))
-            switched = QString("Машина переключена на %1%2. ")
-                .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
-                .arg(args.contains("machine") ? QString() : want11
-                     ? QString(" (программа для неё: палитра 0177662 или вызовы БОС)") : QString());
-        if (args.value("reset").toBool(false)) {
-            board_.reset();          // заодно сбрасывает трассу: данные двух игр не смешиваются
-            cyrState_ = false;
-        }
-        board_.ensureMonitorBooted();
-        uint16_t a = 0, l = 0;
-        bool run = args.value("run").toBool(true);
-        if (!board_.loadBin(args.value("path").toString().toStdString(), run, &a, &l))
-            return fail("cannot load " + args.value("path").toString());
-        lastBin_ = args.value("path").toString();
-        const uint16_t pc = board_.cpu().pc();
-        QString entry;
-        if (run) {
-            entry = QString(" Точка входа %1").arg(oct6(pc));
-            // Для образов ниже 01000 точка входа выбирается эвристикой автостарта
-            // (заполнение стека) и может не совпадать с адресом загрузки.
-            entry += (pc == a) ? QString(".") : QString(" (автостарт; адрес загрузки %1).").arg(oct6(a));
-        }
-        RunOutcome r;
-        const int frames = args.value("frames").toInt(0);
-        if (frames > 0) r = runFrames(frames);
-        return textContent(switched + QString("Loaded %1: addr=%2 len=%3 (octal).%4%5\n%6")
-            .arg(lastBin_).arg(oct6(a)).arg(oct6(l)).arg(entry)
-            .arg(frames > 0 ? "\n" + runText(r) : QString())
-            .arg(regsText()));
+QJsonObject McpServer::tool_bk_load(const QJsonObject& args) {
+    if (!romsOk_) return fail("ROMs not loaded from " + QString::fromStdString(romDir_));
+    // Машину выбирает программа (запись в 0177662 — БК-0011М), если её не задали явно.
+    const QString path = args.value("path").toString();
+    bool want11 = bk::Board::binTargetsBk11(path.toStdString());
+    if (args.contains("machine")) {
+        bk::Machine m;
+        if (!bk::Board::parseMachine(args.value("machine").toString().toStdString(), m))
+            return fail("machine must be \"bk10\" or \"bk11m\"");
+        want11 = m == bk::Machine::Bk0011m;
     }
-    if (name == "bk_fdd_wlog") {
-        auto& fdd = board_.kngmd().fdd();
-        const QString path = args.value("path").toString();
-        if (path.isEmpty()) return fail("path required");
-        FILE* f = std::fopen(path.toStdString().c_str(), "w");
-        if (!f) return fail("cannot open " + path);
-        for (const auto& e : fdd.writeLog())
-            std::fprintf(f, "%c %06o %u %u %u %06o\n", e.kind == bk::Fdd::LogEntry::Kind::Marker ? 'M'
-                         : 'W',
-                         e.value, e.track, e.side, e.head, e.pc);
-        std::fclose(f);
-        const size_t n = fdd.writeLog().size();
-        if (args.value("clear").toBool()) fdd.clearWriteLog();
-        return textContent(QString("%1 written words dumped to %2").arg(n).arg(path));
-    }
-    if (name == "bk_disk_save") {
-        const int drive = args.value("drive").toInt(0);
-        auto& fdd = board_.kngmd().fdd();
-        if (!fdd.attached(drive)) return fail("no disk in drive " + QString::number(drive));
-        const bool dirty = fdd.dirty(drive);
-        const QString path = args.value("path").toString();
-        const bool ok = path.isEmpty() ? fdd.save(drive) : fdd.saveAs(drive, path.toStdString());
-        if (!ok) return fail("cannot write image");
-        return textContent(QString("Disk %1 written to %2 (%3).").arg(drive)
-            .arg(path.isEmpty() ? QString::fromStdString(fdd.path(drive)) : path)
-            .arg(dirty ? "had changes" : "no changes since attach"));
-    }
-    if (name == "bk_machine") {
-        QString head;
-        if (args.contains("machine")) {
-            const QString m = args.value("machine").toString().toLower();
-            const bool want11 = m.contains("11");
-            if (!want11 && !m.contains("10")) return fail("machine must be \"bk10\" or \"bk11m\"");
-            if (switchMachine(want11)) {
-                head = "Машина переключена, питание включено заново.";
-                if (board_.diskAttached(0) && !board_.bk11()) {
-                    // БК-0010: сначала монитор, потом автозагрузчик контроллера (на 11М это делает БОС).
-                    board_.ensureMonitorBooted();
-                    board_.bootFromDisk();
-                    head += " Загрузка с дискеты A.";
-                }
-            } else {
-                head = "Машина уже такая — ничего не меняю.";
-            }
-        }
-        if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
-        if (args.contains("ay2")) board_.setAy2(args.value("ay2").toBool());
-        if (args.contains("covox")) board_.setCovox(args.value("covox").toBool());
-        RunOutcome r;
-        const int frames = args.value("frames").toInt(0);
-        if (frames > 0) r = runFrames(frames);
-        return textContent((head.isEmpty() ? QString() : head + "\n") + machineText() + "\n"
-                           + (frames > 0 ? runText(r) + "\n" : QString()) + regsText());
-    }
-    if (name == "bk_reset") {
-        if (args.contains("machine")) {
-            const QString m = args.value("machine").toString().toLower();
-            const bool want11 = m.contains("11");
-            if (!want11 && !m.contains("10")) return fail("machine must be \"bk10\" or \"bk11m\"");
-            switchMachine(want11);
-        }
-        if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
-        if (args.contains("ay2")) board_.setAy2(args.value("ay2").toBool());
-        if (args.contains("covox")) board_.setCovox(args.value("covox").toBool());
-        if (args.contains("cpu_phase")) board_.setCpuPhase(args.value("cpu_phase").toInt());
-        if (args.contains("smk")) {
-            // Повторное включение — как установка платы в выключенную машину: ДОЗУ с нуля
-            board_.setSmk512(false);
-            board_.setSmk512(args.value("smk").toBool());
-        }
-        board_.reset();
+    QString switched;
+    if (switchMachine(want11))
+        switched = QString("Машина переключена на %1%2. ")
+            .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
+            .arg(args.contains("machine") ? QString() : want11
+                 ? QString(" (программа для неё: палитра 0177662 или вызовы БОС)") : QString());
+    if (args.value("reset").toBool(false)) {
+        board_.reset();          // заодно сбрасывает трассу: данные двух игр не смешиваются
         cyrState_ = false;
-        QString extra;
-        if (args.contains("disk")) {
-            const QString path = args.value("disk").toString();
-            board_.detachDisk(0);
-            if (!path.isEmpty()) {
-                board_.ensureMonitorBooted();
-                if (!board_.attachDisk(0, path.toStdString(), !args.value("disk_rw").toBool(false)))
-                    return fail("cannot attach disk " + path);
-                board_.kngmd().fdd().setLog(true);
-                board_.bootFromDisk();
-                extra = QString(" Disk %1, booting.").arg(path);
-            } else {
-                extra = " Disk ejected.";
-            }
-        }
-        if (args.contains("hdd_ctl")) {
-            const QString c = args.value("hdd_ctl").toString().toLower();
-            if (c == "auto") board_.setHddController(bk::Board::HddController::Auto);
-            else if (c == "smk") board_.setHddController(bk::Board::HddController::Smk);
-            else if (c == "samara") board_.setHddController(bk::Board::HddController::Samara);
-            else return fail("hdd_ctl: expected auto, smk or samara");
-        }
-        if (args.contains("hdd")) {
-            const QString path = args.value("hdd").toString();
-            board_.detachHdd(0);
-            if (!path.isEmpty()) {
-                // Винчестер СМК — узел платы; «Самаре» плата не нужна.
-                if (board_.resolveHddController(path.toStdString()) == bk::Board::HddController::Smk
-                    && !board_.smk512())
-                    board_.setSmk512(true);
-                std::string err;
-                if (!board_.attachHdd(0, path.toStdString(), !args.value("hdd_rw").toBool(false), &err))
-                    return fail("cannot attach HDD " + path + ": " + QString::fromStdString(err));
-                board_.bootFromHdd();
-                const bk::HddDrive& d = board_.ide().drive(0);
-                extra += QString(" HDD %1 (C/H/S %2/%3/%4) on %5, booting.").arg(path)
-                             .arg(d.cylinders()).arg(d.heads()).arg(d.sectors())
-                             .arg(board_.hddSamara() ? "«Самара»" : "СМК-512");
-            } else {
-                board_.reset();
-                extra += " HDD detached.";
-            }
-        }
-        if (board_.smk512()) extra += " СМК-512 on.";
-        extra = QString(" %1%2.").arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
-                    .arg(board_.ay() ? ", AY on" : "") + extra;
-        RunOutcome r;
-        const int frames = args.value("frames").toInt(0);
-        if (frames > 0) r = runFrames(frames);
-        return textContent(QString("Reset (CPU phase %1).%2\n").arg(board_.cpuPhase()).arg(extra)
-                           + (frames > 0 ? runText(r) + "\n" : QString()) + regsText());
     }
-    if (name == "bk_run") {
-        const int maxFrames = args.value("max_frames").toInt(200);
+    board_.ensureMonitorBooted();
+    uint16_t a = 0, l = 0;
+    bool run = args.value("run").toBool(true);
+    if (!board_.loadBin(args.value("path").toString().toStdString(), run, &a, &l))
+        return fail("cannot load " + args.value("path").toString());
+    lastBin_ = args.value("path").toString();
+    const uint16_t pc = board_.cpu().pc();
+    QString entry;
+    if (run) {
+        entry = QString(" Точка входа %1").arg(oct6(pc));
+        // Для образов ниже 01000 точка входа выбирается эвристикой автостарта
+        // (заполнение стека) и может не совпадать с адресом загрузки.
+        entry += (pc == a) ? QString(".") : QString(" (автостарт; адрес загрузки %1).").arg(oct6(a));
+    }
+    RunOutcome r;
+    const int frames = args.value("frames").toInt(0);
+    if (frames > 0) r = runFrames(frames);
+    return textContent(switched + QString("Loaded %1: addr=%2 len=%3 (octal).%4%5\n%6")
+        .arg(lastBin_).arg(oct6(a)).arg(oct6(l)).arg(entry)
+        .arg(frames > 0 ? "\n" + runText(r) : QString())
+        .arg(regsText()));
+}
+
+QJsonObject McpServer::tool_bk_fdd_wlog(const QJsonObject& args) {
+    auto& fdd = board_.kngmd().fdd();
+    const QString path = args.value("path").toString();
+    if (path.isEmpty()) return fail("path required");
+    FILE* f = std::fopen(path.toStdString().c_str(), "w");
+    if (!f) return fail("cannot open " + path);
+    for (const auto& e : fdd.writeLog())
+        std::fprintf(f, "%c %06o %u %u %u %06o\n", e.kind == bk::Fdd::LogEntry::Kind::Marker ? 'M'
+                     : 'W',
+                     e.value, e.track, e.side, e.head, e.pc);
+    std::fclose(f);
+    const size_t n = fdd.writeLog().size();
+    if (args.value("clear").toBool()) fdd.clearWriteLog();
+    return textContent(QString("%1 written words dumped to %2").arg(n).arg(path));
+}
+
+QJsonObject McpServer::tool_bk_disk_save(const QJsonObject& args) {
+    const int drive = args.value("drive").toInt(0);
+    auto& fdd = board_.kngmd().fdd();
+    if (!fdd.attached(drive)) return fail("no disk in drive " + QString::number(drive));
+    const bool dirty = fdd.dirty(drive);
+    const QString path = args.value("path").toString();
+    const bool ok = path.isEmpty() ? fdd.save(drive) : fdd.saveAs(drive, path.toStdString());
+    if (!ok) return fail("cannot write image");
+    return textContent(QString("Disk %1 written to %2 (%3).").arg(drive)
+        .arg(path.isEmpty() ? QString::fromStdString(fdd.path(drive)) : path)
+        .arg(dirty ? "had changes" : "no changes since attach"));
+}
+
+QJsonObject McpServer::tool_bk_machine(const QJsonObject& args) {
+    QString head;
+    if (args.contains("machine")) {
+        bk::Machine m;
+        if (!bk::Board::parseMachine(args.value("machine").toString().toStdString(), m))
+            return fail("machine must be \"bk10\" or \"bk11m\"");
+        const bool want11 = m == bk::Machine::Bk0011m;
+        if (switchMachine(want11)) {
+            head = "Машина переключена, питание включено заново.";
+            if (board_.diskAttached(0) && !board_.bk11()) {
+                // БК-0010: сначала монитор, потом автозагрузчик контроллера (на 11М это делает БОС).
+                board_.ensureMonitorBooted();
+                board_.bootFromDisk();
+                head += " Загрузка с дискеты A.";
+            }
+        } else {
+            head = "Машина уже такая — ничего не меняю.";
+        }
+    }
+    if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
+    if (args.contains("ay2")) board_.setAy2(args.value("ay2").toBool());
+    if (args.contains("covox")) board_.setCovox(args.value("covox").toBool());
+    RunOutcome r;
+    const int frames = args.value("frames").toInt(0);
+    if (frames > 0) r = runFrames(frames);
+    return textContent((head.isEmpty() ? QString() : head + "\n") + machineText() + "\n"
+                       + (frames > 0 ? runText(r) + "\n" : QString()) + regsText());
+}
+
+QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
+    if (args.contains("machine")) {
+        bk::Machine m;
+        if (!bk::Board::parseMachine(args.value("machine").toString().toStdString(), m))
+            return fail("machine must be \"bk10\" or \"bk11m\"");
+        const bool want11 = m == bk::Machine::Bk0011m;
+        switchMachine(want11);
+    }
+    if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
+    if (args.contains("ay2")) board_.setAy2(args.value("ay2").toBool());
+    if (args.contains("covox")) board_.setCovox(args.value("covox").toBool());
+    if (args.contains("cpu_phase")) board_.setCpuPhase(args.value("cpu_phase").toInt());
+    if (args.contains("smk")) {
+        // Повторное включение — как установка платы в выключенную машину: ДОЗУ с нуля
+        board_.setSmk512(false);
+        board_.setSmk512(args.value("smk").toBool());
+    }
+    board_.reset();
+    cyrState_ = false;
+    QString extra;
+    if (args.contains("disk")) {
+        const QString path = args.value("disk").toString();
+        board_.detachDisk(0);
+        if (!path.isEmpty()) {
+            board_.ensureMonitorBooted();
+            if (!board_.attachDisk(0, path.toStdString(), !args.value("disk_rw").toBool(false)))
+                return fail("cannot attach disk " + path);
+            board_.kngmd().fdd().setLog(true);
+            board_.bootFromDisk();
+            extra = QString(" Disk %1, booting.").arg(path);
+        } else {
+            extra = " Disk ejected.";
+        }
+    }
+    if (args.contains("hdd_ctl")) {
+        bk::Board::HddController c;
+        if (!bk::Board::parseHddController(args.value("hdd_ctl").toString().toStdString(), c))
+            return fail("hdd_ctl: expected auto, smk or samara");
+        board_.setHddController(c);
+    }
+    if (args.contains("hdd")) {
+        const QString path = args.value("hdd").toString();
+        board_.detachHdd(0);
+        if (!path.isEmpty()) {
+            // Винчестер СМК — узел платы; «Самаре» плата не нужна.
+            if (board_.resolveHddController(path.toStdString()) == bk::Board::HddController::Smk
+                && !board_.smk512())
+                board_.setSmk512(true);
+            std::string err;
+            if (!board_.attachHdd(0, path.toStdString(), !args.value("hdd_rw").toBool(false), &err))
+                return fail("cannot attach HDD " + path + ": " + QString::fromStdString(err));
+            board_.bootFromHdd();
+            const bk::HddDrive& d = board_.ide().drive(0);
+            extra += QString(" HDD %1 (C/H/S %2/%3/%4) on %5, booting.").arg(path)
+                         .arg(d.cylinders()).arg(d.heads()).arg(d.sectors())
+                         .arg(board_.hddSamara() ? "«Самара»" : "СМК-512");
+        } else {
+            board_.reset();
+            extra += " HDD detached.";
+        }
+    }
+    if (board_.smk512()) extra += " СМК-512 on.";
+    extra = QString(" %1%2.").arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
+                .arg(board_.ay() ? ", AY on" : "") + extra;
+    RunOutcome r;
+    const int frames = args.value("frames").toInt(0);
+    if (frames > 0) r = runFrames(frames);
+    return textContent(QString("Reset (CPU phase %1).%2\n").arg(board_.cpuPhase()).arg(extra)
+                       + (frames > 0 ? runText(r) + "\n" : QString()) + regsText());
+}
+
+QJsonObject McpServer::tool_bk_run(const QJsonObject& args) {
+    const int maxFrames = args.value("max_frames").toInt(200);
+    std::vector<InputStep> script;
+    QString err;
+    if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
+        return fail(err);
+    const RunOutcome r = runFrames(maxFrames, script);
+    return textContent(QString("%1\n%2\n%3")
+        .arg(runText(r)).arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
+}
+
+QJsonObject McpServer::tool_bk_run_until(const QJsonObject& args) {
+    uint16_t target; QString err;
+    if (!resolveAddr(args, "addr", target, err)) return fail(err);
+    int maxTicks = args.value("max_ticks").toInt(bk::Board::kDebugRunTicks);
+    bool hit = board_.runUntil(target, maxTicks);
+    board_.clearBreakHit();
+    return textContent(QString("%1 target %2.\n%3")
+        .arg(hit ? "Reached" : "Did NOT reach").arg(oct6(target)).arg(regsText()));
+}
+
+QJsonObject McpServer::tool_bk_step(const QJsonObject& args) {
+    int cnt = args.value("count").toInt(1);
+    for (int i = 0; i < cnt && !board_.cpu().halted(); ++i) board_.stepInstruction();
+    return textContent(regsText() + "\n" + disasmText(board_.cpu().pc(), 3));
+}
+
+QJsonObject McpServer::tool_bk_step_over(const QJsonObject&) {
+    board_.stepOver();
+    return textContent(regsText() + "\n" + disasmText(board_.cpu().pc(), 3));
+}
+
+QJsonObject McpServer::tool_bk_regs(const QJsonObject&) {
+    return textContent(regsText());
+}
+
+QJsonObject McpServer::tool_bk_set_reg(const QJsonObject& args) {
+    QString rn = args.value("name").toString().toUpper();
+    long val; if (!parseNumber(args.value("value"), val)) return fail("bad value");
+    uint16_t v = val & 0xFFFF;
+    auto& c = board_.cpu();
+    if (rn == "PSW") c.psw = v;
+    else if (rn == "SP") c.r[6] = v;
+    else if (rn == "PC") c.r[7] = v;
+    else if (rn.size() == 2 && rn[0] == 'R' && rn[1] >= '0' && rn[1] <= '7') c.r[rn[1].digitValue()] = v;
+    else return fail("unknown register " + rn);
+    return textContent(regsText());
+}
+
+QJsonObject McpServer::tool_bk_read_mem(const QJsonObject& args) {
+    uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+    int len = args.value("len").toInt(32);
+    bool bytes = args.value("format").toString() == "bytes";
+    QString out;
+    if (bytes) {
+        for (int i = 0; i < len; i += 16) {
+            QString line = oct6((uint16_t)(a + i)) + ":";
+            for (int j = 0; j < 16 && i + j < len; ++j)
+                line += QString::asprintf(" %03o", board_.memory().peekByte((uint16_t)(a + i + j)));
+            out += line + "\n";
+        }
+    } else {
+        int words = (len + 1) / 2;
+        for (int i = 0; i < words; i += 8) {
+            QString line = oct6((uint16_t)(a + i * 2)) + ":";
+            for (int j = 0; j < 8 && i + j < words; ++j)
+                line += " " + oct6(board_.memory().peekWord((uint16_t)(a + (i + j) * 2)));
+            out += line + "\n";
+        }
+    }
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_write_mem(const QJsonObject& args) {
+    uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+    // Страницу В-В пишем ЧЕРЕЗ ШИНУ, чтобы устройство увидело запись (иначе
+    // правка 0177712 не перезапустила бы таймер, а 0177664 — не сдвинула экран).
+    // Обычную память — poke, минуя защиту ПЗУ: отладчику нужно уметь пропатчить
+    // и постоянную память. Явный флаг bus перекрывает это правило.
+    const bool viaBus = args.contains("bus") ? args.value("bus").toBool()
+                                             : (a >= bk::ADDR_IO_PAGE);
+    // Сначала разобрать все значения: при ошибке память не трогаем вовсе.
+    const bool asWords = args.contains("words");
+    std::vector<long> vals;
+    for (const auto& v : args.value(asWords ? "words" : "bytes").toArray()) {
+        long x;
+        if (!parseNumber(v, x)) return fail(QString("bad value #%1 '%2' — nothing written")
+                                                .arg(vals.size()).arg(v.toVariant().toString()));
+        vals.push_back(x);
+    }
+    int n = 0;
+    if (asWords) {
+        for (long x : vals) {
+            const uint16_t ad = (uint16_t)(a + n * 2), val = (uint16_t)(x & 0xFFFF);
+            if (viaBus) board_.memory().writeWord(ad, val); else board_.memory().pokeWord(ad, val);
+            ++n;
+        }
+        return textContent(QString("Wrote %1 words at %2 (%3).").arg(n).arg(oct6(a))
+                               .arg(viaBus ? "через шину" : "напрямую в память"));
+    }
+    if (args.contains("bytes")) {
+        for (long x : vals) {
+            const uint16_t ad = (uint16_t)(a + n);
+            if (viaBus) board_.memory().writeByte(ad, (uint8_t)(x & 0xFF));
+            else        board_.memory().pokeByte(ad, (uint8_t)(x & 0xFF));
+            ++n;
+        }
+        return textContent(QString("Wrote %1 bytes at %2 (%3).").arg(n).arg(oct6(a))
+                               .arg(viaBus ? "через шину" : "напрямую в память"));
+    }
+    return fail("provide 'words' or 'bytes'");
+}
+
+QJsonObject McpServer::tool_bk_disasm(const QJsonObject& args) {
+    uint16_t a = board_.cpu().pc(); QString err;
+    if (args.contains("addr")) { if (!resolveAddr(args, "addr", a, err)) return fail(err); }
+    return textContent(disasmText(a, args.value("count").toInt(16)));
+}
+
+QJsonObject McpServer::tool_bk_break(const QJsonObject& args) {
+    uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+    board_.addBreakpoint(a);
+    QString when = args.value("when").toString().trimmed();
+    if (!when.isEmpty()) {
+        using Cond = bk::Board::BreakCond;
+        Cond c{};
+        static const char* ops[] = {">=", "<=", "==", "!=", ">", "<"};
+        static const Cond::Op opc[] = {Cond::Op::Ge, Cond::Op::Le, Cond::Op::Eq,
+                                       Cond::Op::Ne, Cond::Op::Gt, Cond::Op::Lt};
+        int oi = -1, pos = -1;
+        for (int k = 0; k < 6; ++k) { int p = when.indexOf(ops[k]); if (p >= 0) { oi = k; pos = p; break; } }
+        if (oi < 0) return fail("condition needs one of == != < > >= <=");
+        c.op = opc[oi];
+        QString lhs = when.left(pos).trimmed();
+        QString rhs = when.mid(pos + (int)QString(ops[oi]).size()).trimmed();
+        long val; if (!parseNumber(QJsonValue(rhs), val)) return fail("bad value in condition");
+        c.val = (uint16_t)(val & 0xFFFF);
+        if (lhs.size() == 2 && (lhs[0] == 'R' || lhs[0] == 'r') && lhs[1] >= '0' && lhs[1] <= '7') {
+            c.lhs = Cond::Lhs::Reg; c.a = lhs[1].digitValue();
+        } else if (lhs.startsWith('@')) {
+            bool byte = lhs.endsWith(".b");
+            QString as = lhs.mid(1, lhs.size() - 1 - (byte ? 2 : 0)).trimmed();
+            c.lhs = byte ? Cond::Lhs::Byte : Cond::Lhs::Word;
+            long n;
+            if (parseNumber(QJsonValue(as), n)) c.a = (uint16_t)(n & 0xFFFF);
+            else { uint16_t sa; if (!symAddrOf(as.toStdString(), sa)) return fail("bad address in condition"); c.a = sa; }
+        } else return fail("condition LHS must be Rn or @addr");
+        board_.setBreakCond(a, c);
+    }
+    return textContent(QString("Breakpoint set at %1%2.").arg(oct6(a))
+        .arg(when.isEmpty() ? QString() : QString(" when %1").arg(when)));
+}
+
+QJsonObject McpServer::tool_bk_unbreak(const QJsonObject& args) {
+    if (args.value("all").toBool(false)) {
+        for (uint16_t bp : std::vector<uint16_t>(board_.breakpoints().begin(), board_.breakpoints().end()))
+            board_.removeBreakpoint(bp);
+        return textContent("All breakpoints removed.");
+    }
+    uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+    board_.removeBreakpoint(a);
+    return textContent(QString("Breakpoint at %1 removed.").arg(oct6(a)));
+}
+
+QJsonObject McpServer::tool_bk_breakpoints(const QJsonObject&) {
+    QString out = "Breakpoints:";
+    if (board_.breakpoints().empty()) out += " (none)";
+    for (uint16_t bp : board_.breakpoints()) {
+        out += " " + oct6(bp);
+        const std::string* it = symAt(bp); if (it) out += QString("<%1>").arg(QString::fromStdString(*it));
+    }
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_key(const QJsonObject& args) {
+    // Защёлкнуть код в 0177662 и выставить «клавиша физически нажата»
+    // (0177716, бит 6, активный низкий). Игры, опрашивающие этот бит (Digger,
+    // PITON), реагируют только пока клавиша удерживается — поэтому frames>0
+    // (нажать / прогнать / отпустить) или hold=true + отдельный bk_run.
+    // «СТОП» — не код КОИ-7: клавиша вынесена из матрицы и вызывает
+    // внеприоритетное прерывание по вектору 4. Обрабатываем отдельно.
+    {
+        const std::string kn = bk::normName(args.value("key").toString().toStdString());
+        if (kn == "stop" || kn == "стоп") {
+            board_.pressStop();
+            const int fr = args.value("frames").toInt(0);
+            QString tail;
+            if (fr > 0) tail = "\n" + runText(runFrames(fr)) + "\n" + regsText();
+            return textContent("Клавиша СТОП: внеприоритетное прерывание по вектору 4." + tail);
+        }
+    }
+    std::vector<uint16_t> codes;
+    bool present = false;
+    QString warn, err;
+    if (!resolveKey(args, codes, present, warn, err)) return fail(err);
+    const bool hold = args.value("hold").toBool(false);
+    const int frames = args.value("frames").toInt(0);
+    const int relFrames = args.value("release_frames").toInt(0);
+
+    QString pre;
+    if (present && codes.size() > 1) {
+        // Префикс РУС/ЛАТ: регистр кода хранит один код, между ними нужен кадр.
+        for (size_t i = 0; i + 1 < codes.size(); ++i) {
+            board_.pressKey(codes[i]);
+            board_.setKeyHeld(true);
+            runFrames(1);
+            board_.setKeyHeld(false);
+        }
+        pre = QString(" (с префиксом %1)").arg(oct6(codes.front()));
+    }
+    const uint16_t code = present ? codes.back() : 0;
+    if (present) board_.pressKey(code);
+
+    QString msg, tail;
+    if (frames > 0) {
+        board_.setKeyHeld(true);
+        const RunOutcome r = runFrames(frames);
+        tail = "\n" + runText(r);
+        if (!hold) {
+            board_.setKeyHeld(false);
+            if (relFrames > 0) tail += "\n" + runText(runFrames(relFrames));
+        }
+        msg = present
+            ? QString("Клавиша %1%2%3 удержана %4 кадр(ов)%5.")
+                  .arg(oct6(code)).arg(keyLabel(code)).arg(pre).arg(frames)
+                  .arg(hold ? ", осталась нажатой" : " и отпущена")
+            : QString("Прогнано %1 кадр(ов) без нажатия.").arg(frames);
+        tail += "\n" + regsText();
+    } else {
+        board_.setKeyHeld(hold);
+        msg = present
+            ? QString("Клавиша %1%2%3 %4.").arg(oct6(code)).arg(keyLabel(code)).arg(pre)
+                  .arg(hold ? "нажата и удерживается" : "нажата (тап)")
+            : (hold ? QString("Клавиша удерживается.") : QString("Клавиша отпущена."));
+    }
+    return textContent(msg + warn + tail);
+}
+
+QJsonObject McpServer::tool_bk_joystick(const QJsonObject& args) {
+    // Джойстик на параллельном порту 0177714 (нажато = 1). Раскладка липкая:
+    // задал один раз — действует на все последующие вызовы и на bk_io_state.
+    if (args.contains("layout")) {
+        bk::JoyStandard s;
+        if (!bk::joyParseStandard(args.value("layout").toString().toStdString(), s))
+            return fail("неизвестная раскладка '" + args.value("layout").toString() +
+                        "' (standard | breakhouse | swcorp | klad2)");
+        joyStd_ = s;
+    }
+    uint16_t v = 0;
+    bool present = false;
+    QString err;
+    if (!resolveJoy(args, v, present, err)) return fail(err);
+    if (present) board_.setJoystick(v);
+    else v = board_.joystick();
+
+    const int frames = args.value("frames").toInt(0);
+    const bool hold = args.value("hold").toBool(false);
+    QString tail;
+    if (frames > 0) {
+        const RunOutcome r = runFrames(frames);
+        tail = "\n" + runText(r);
+        if (!hold) { board_.setJoystick(0); tail += "\n0177714 сброшен в 000000."; }
+        tail += "\n" + regsText();
+    }
+    return textContent(QString("0177714 = %1 [%2]  раскладка=%3 (%4)%5")
+        .arg(oct6(v)).arg(QString::fromStdString(bk::joyDecode(joyStd_, v)))
+        .arg(bk::joyStandardName(joyStd_)).arg(QString::fromUtf8(bk::joyStandardTitle(joyStd_)))
+        .arg(tail));
+}
+
+QJsonObject McpServer::tool_bk_screenshot(const QJsonObject& args) {
+    if (args.value("frames").toInt(0) > 0) runFrames(args.value("frames").toInt(0));
+    // В построчном режиме кадр уже нарисован лучом (с палитрами по ходу кадра);
+    // перерисовка целиком стёрла бы эти эффекты — только для смены цвет/моно.
+    const bool mono = args.value("mono").toBool(false);
+    if (!board_.scanlineRender() || mono == board_.screen().colorMode()) {
+        board_.screen().setColorMode(!mono);
+        board_.screen().render(board_.memory());
+    }
+    QImage img = QImage(reinterpret_cast<const uchar*>(board_.screen().pixels()),
+                        bk::Screen::TEX_W, bk::Screen::TEX_H, QImage::Format_ARGB32).copy();
+    QString path = args.value("path").toString(), note = "BK screen";
+    if (!path.isEmpty()) { if (!img.save(path)) return fail("cannot write " + path); note += " (also written to " + path + ")"; }
+    QByteArray png; QBuffer buf(&png); buf.open(QIODevice::WriteOnly); img.save(&buf, "PNG"); buf.close();
+    QJsonObject txt{{"type", "text"}, {"text", note}};
+    QJsonObject im{{"type", "image"}, {"data", QString::fromLatin1(png.toBase64())}, {"mimeType", "image/png"}};
+    return QJsonObject{{"content", QJsonArray{txt, im}}, {"isError", false}};
+}
+
+QJsonObject McpServer::tool_bk_step_out(const QJsonObject& args) {
+    size_t d = board_.trace().stackDepth();
+    if (d <= 1) { board_.stepInstruction(); return textContent("At top level; stepped one instruction.\n" + regsText() + "\n" + disasmText(board_.cpu().pc(), 3)); }
+    bool ret = board_.runUntilReturn(d, args.value("max_ticks").toInt(bk::Board::kDebugRunTicks));
+    QString extra;
+    if (board_.breakHit()) { extra = board_.watchHit() ? "\n(stopped on a watchpoint)" : "\n(stopped on a breakpoint)"; board_.clearBreakHit(); }
+    return textContent(QString("%1%2\n%3\n%4")
+        .arg(ret ? "Returned to caller." : "Did not return within the tick limit.").arg(extra)
+        .arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
+}
+
+QJsonObject McpServer::tool_bk_audio(const QJsonObject& args) {
+    // Прогнать кадры, захватывая выход пьезодинамика (0177716, бит 6) как PCM.
+    // Отдаём: разбор (пик/RMS/огибающая/тоны), опционально WAV-файл и — если
+    // клиент говорит на протоколе 2025-03-26 и новее — inline-блок type:"audio".
+    const QString path = args.value("path").toString();
+    const bool doRun = args.value("run").toBool(true);
+    long frames = 100;
+    if (args.contains("frames")) parseNumber(args.value("frames"), frames);
+    if (frames < 1) frames = 1;
+    const int rate = 44100;
+    uint64_t tick0 = board_.totalTicks();
+
+    board_.sound().setEnabled(true);
+    std::vector<int16_t> samples;           // стерео: L, R чередуются
+    int16_t tmp[2 * 4096];
+    auto drain = [&]() {
+        size_t got;
+        while ((got = board_.sound().read(tmp, 4096)) > 0)
+            samples.insert(samples.end(), tmp, tmp + 2 * got);
+    };
+    RunOutcome r;
+    if (doRun) {
+        board_.sound().clear();            // отбросить накопленное до захвата
+        board_.setSpeakerLog(true);
+        board_.clearSpeakerLog();
         std::vector<InputStep> script;
         QString err;
         if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
             return fail(err);
-        const RunOutcome r = runFrames(maxFrames, script);
-        return textContent(QString("%1\n%2\n%3")
-            .arg(runText(r)).arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
+        // FIFO динамика сливаем после каждого кадра: он ограничен четвертью
+        // секунды и иначе терял бы начало записи.
+        r = runFrames((int)frames, script, drain);
+    } else {
+        drain();                            // просто забрать то, что уже в FIFO
+        r.reason = "no-run";
+        // Буфер — это ПРОШЛОЕ: отматываем начало окна назад на его длительность,
+        // иначе разбор на тоны искал бы фронты в ещё не наступивших тактах.
+        const uint64_t span = (uint64_t)(samples.size() / 2 * double(board_.cpuFreqHz()) / rate);
+        tick0 = (tick0 > span) ? tick0 - span : 0;
     }
-    if (name == "bk_run_until") {
-        uint16_t target; QString err;
-        if (!resolveAddr(args, "addr", target, err)) return fail(err);
-        int maxTicks = args.value("max_ticks").toInt(20000000);
-        bool hit = board_.runUntil(target, maxTicks);
-        board_.clearBreakHit();
-        return textContent(QString("%1 target %2.\n%3")
-            .arg(hit ? "Reached" : "Did NOT reach").arg(oct6(target)).arg(regsText()));
+
+    if (!path.isEmpty() && !writeWav(path, samples, rate))
+        return fail("cannot write " + path);
+
+    // --- анализ: пик, RMS (всего и по каналам), доля «не тишины», длительность
+    const size_t nfr = samples.size() / 2;
+    int peak = 0;
+    long active = 0;
+    double sumsq = 0, sumL = 0, sumR = 0;
+    for (size_t i = 0; i < nfr; ++i) {
+        const int16_t l = samples[2 * i], rr = samples[2 * i + 1];
+        peak = std::max({peak, std::abs(int(l)), std::abs(int(rr))});
+        if (std::abs(int(l)) > 400 || std::abs(int(rr)) > 400) ++active;
+        sumL += double(l) * l;
+        sumR += double(rr) * rr;
     }
-    if (name == "bk_step") {
-        int cnt = args.value("count").toInt(1);
-        for (int i = 0; i < cnt && !board_.cpu().halted(); ++i) board_.stepInstruction();
-        return textContent(regsText() + "\n" + disasmText(board_.cpu().pc(), 3));
-    }
-    if (name == "bk_step_over") {
-        uint16_t pc = board_.cpu().pc();
-        bk::DisasmLine d = bk::disasm(board_.memory(), pc);
-        int idx = board_.memory().peekWord(pc) >> 6;
-        bool isCall = (idx >= 040 && idx <= 047) || (idx >= 01040 && idx <= 01047);
-        if (isCall) { board_.runUntil((uint16_t)(pc + d.words * 2), 20000000); board_.clearBreakHit(); }
-        else board_.stepInstruction();
-        return textContent(regsText() + "\n" + disasmText(board_.cpu().pc(), 3));
-    }
-    if (name == "bk_regs") return textContent(regsText());
-    if (name == "bk_set_reg") {
-        QString rn = args.value("name").toString().toUpper();
-        long val; if (!parseNumber(args.value("value"), val)) return fail("bad value");
-        uint16_t v = val & 0xFFFF;
-        auto& c = board_.cpu();
-        if (rn == "PSW") c.psw = v;
-        else if (rn == "SP") c.r[6] = v;
-        else if (rn == "PC") c.r[7] = v;
-        else if (rn.size() == 2 && rn[0] == 'R' && rn[1] >= '0' && rn[1] <= '7') c.r[rn[1].digitValue()] = v;
-        else return fail("unknown register " + rn);
-        return textContent(regsText());
-    }
-    if (name == "bk_read_mem") {
-        uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
-        int len = args.value("len").toInt(32);
-        bool bytes = args.value("format").toString() == "bytes";
-        QString out;
-        if (bytes) {
-            for (int i = 0; i < len; i += 16) {
-                QString line = oct6((uint16_t)(a + i)) + ":";
-                for (int j = 0; j < 16 && i + j < len; ++j)
-                    line += QString::asprintf(" %03o", board_.memory().peekByte((uint16_t)(a + i + j)));
-                out += line + "\n";
+    sumsq = sumL + sumR;
+    const double ms = nfr * 1000.0 / rate;
+    const int rms = nfr ? (int)std::sqrt(sumsq / (2.0 * nfr)) : 0;
+    const int rmsL = nfr ? (int)std::sqrt(sumL / nfr) : 0, rmsR = nfr ? (int)std::sqrt(sumR / nfr) : 0;
+
+    QString out = QString("Захвачено %1 стерео-сэмплов (%2 мс, 44100 Гц стерео)%3\n"
+                          "пик=%4/32767  RMS=%5 (левый %8, правый %9)  не тишина=%6%7")
+        .arg(nfr).arg(ms, 0, 'f', 0)
+        .arg(path.isEmpty() ? QString() : QString(", записано в " + path))
+        .arg(peak).arg(rms)
+        .arg(QString::number(nfr ? active * 100 / (long)nfr : 0) + "%")
+        .arg(doRun ? "\n" + runText(r) : QString())
+        .arg(rmsL).arg(rmsR);
+
+    // --- огибающая: RMS по окнам, ASCII-«спарклайн»
+    if (nfr) {
+        const int cols = std::min<int>(72, std::max<int>(1, (int)nfr / 64));
+        const char* ramp = " .:-=+*#%@";
+        QString spark[2];
+        for (int ch = 0; ch < 2; ++ch)
+            for (int c = 0; c < cols; ++c) {
+                const size_t a = nfr * c / cols, b = nfr * (c + 1) / cols;
+                double s = 0;
+                for (size_t i = a; i < b; ++i) s += double(samples[2 * i + ch]) * samples[2 * i + ch];
+                const int lv = (b > a) ? (int)std::sqrt(s / (b - a)) : 0;
+                spark[ch] += ramp[std::clamp(lv * 9 / 12000, 0, 9)];
             }
-        } else {
-            int words = (len + 1) / 2;
-            for (int i = 0; i < words; i += 8) {
-                QString line = oct6((uint16_t)(a + i * 2)) + ":";
-                for (int j = 0; j < 8 && i + j < words; ++j)
-                    line += " " + oct6(board_.memory().peekWord((uint16_t)(a + (i + j) * 2)));
-                out += line + "\n";
-            }
-        }
-        return textContent(out);
-    }
-    if (name == "bk_write_mem") {
-        uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
-        // Страницу В-В пишем ЧЕРЕЗ ШИНУ, чтобы устройство увидело запись (иначе
-        // правка 0177712 не перезапустила бы таймер, а 0177664 — не сдвинула экран).
-        // Обычную память — poke, минуя защиту ПЗУ: отладчику нужно уметь пропатчить
-        // и постоянную память. Явный флаг bus перекрывает это правило.
-        const bool viaBus = args.contains("bus") ? args.value("bus").toBool()
-                                                 : (a >= bk::ADDR_IO_PAGE);
-        // Сначала разобрать все значения: при ошибке память не трогаем вовсе.
-        const bool asWords = args.contains("words");
-        std::vector<long> vals;
-        for (const auto& v : args.value(asWords ? "words" : "bytes").toArray()) {
-            long x;
-            if (!parseNumber(v, x)) return fail(QString("bad value #%1 '%2' — nothing written")
-                                                    .arg(vals.size()).arg(v.toVariant().toString()));
-            vals.push_back(x);
-        }
-        int n = 0;
-        if (asWords) {
-            for (long x : vals) {
-                const uint16_t ad = (uint16_t)(a + n * 2), val = (uint16_t)(x & 0xFFFF);
-                if (viaBus) board_.memory().writeWord(ad, val); else board_.memory().pokeWord(ad, val);
-                ++n;
-            }
-            return textContent(QString("Wrote %1 words at %2 (%3).").arg(n).arg(oct6(a))
-                                   .arg(viaBus ? "через шину" : "напрямую в память"));
-        }
-        if (args.contains("bytes")) {
-            for (long x : vals) {
-                const uint16_t ad = (uint16_t)(a + n);
-                if (viaBus) board_.memory().writeByte(ad, (uint8_t)(x & 0xFF));
-                else        board_.memory().pokeByte(ad, (uint8_t)(x & 0xFF));
-                ++n;
-            }
-            return textContent(QString("Wrote %1 bytes at %2 (%3).").arg(n).arg(oct6(a))
-                                   .arg(viaBus ? "через шину" : "напрямую в память"));
-        }
-        return fail("provide 'words' or 'bytes'");
-    }
-    if (name == "bk_disasm") {
-        uint16_t a = board_.cpu().pc(); QString err;
-        if (args.contains("addr")) { if (!resolveAddr(args, "addr", a, err)) return fail(err); }
-        return textContent(disasmText(a, args.value("count").toInt(16)));
-    }
-    if (name == "bk_break") {
-        uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
-        board_.addBreakpoint(a);
-        QString when = args.value("when").toString().trimmed();
-        if (!when.isEmpty()) {
-            bk::Board::BreakCond c{};
-            static const char* ops[] = {">=", "<=", "==", "!=", ">", "<"};
-            static const uint8_t opc[] = {4, 5, 0, 1, 3, 2};
-            int oi = -1, pos = -1;
-            for (int k = 0; k < 6; ++k) { int p = when.indexOf(ops[k]); if (p >= 0) { oi = k; pos = p; break; } }
-            if (oi < 0) return fail("condition needs one of == != < > >= <=");
-            c.op = opc[oi];
-            QString lhs = when.left(pos).trimmed();
-            QString rhs = when.mid(pos + (int)QString(ops[oi]).size()).trimmed();
-            long val; if (!parseNumber(QJsonValue(rhs), val)) return fail("bad value in condition");
-            c.val = (uint16_t)(val & 0xFFFF);
-            if (lhs.size() == 2 && (lhs[0] == 'R' || lhs[0] == 'r') && lhs[1] >= '0' && lhs[1] <= '7') {
-                c.kind = 0; c.a = lhs[1].digitValue();
-            } else if (lhs.startsWith('@')) {
-                bool byte = lhs.endsWith(".b");
-                QString as = lhs.mid(1, lhs.size() - 1 - (byte ? 2 : 0)).trimmed();
-                c.kind = byte ? 2 : 1;
-                long n;
-                if (parseNumber(QJsonValue(as), n)) c.a = (uint16_t)(n & 0xFFFF);
-                else { uint16_t sa; if (!symAddrOf(as.toStdString(), sa)) return fail("bad address in condition"); c.a = sa; }
-            } else return fail("condition LHS must be Rn or @addr");
-            board_.setBreakCond(a, c);
-        }
-        return textContent(QString("Breakpoint set at %1%2.").arg(oct6(a))
-            .arg(when.isEmpty() ? QString() : QString(" when %1").arg(when)));
-    }
-    if (name == "bk_unbreak") {
-        if (args.value("all").toBool(false)) {
-            for (uint16_t bp : std::vector<uint16_t>(board_.breakpoints().begin(), board_.breakpoints().end()))
-                board_.removeBreakpoint(bp);
-            return textContent("All breakpoints removed.");
-        }
-        uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
-        board_.removeBreakpoint(a);
-        return textContent(QString("Breakpoint at %1 removed.").arg(oct6(a)));
-    }
-    if (name == "bk_breakpoints") {
-        QString out = "Breakpoints:";
-        if (board_.breakpoints().empty()) out += " (none)";
-        for (uint16_t bp : board_.breakpoints()) {
-            out += " " + oct6(bp);
-            const std::string* it = symAt(bp); if (it) out += QString("<%1>").arg(QString::fromStdString(*it));
-        }
-        return textContent(out);
-    }
-    if (name == "bk_key") {
-        // Защёлкнуть код в 0177662 и выставить «клавиша физически нажата»
-        // (0177716, бит 6, активный низкий). Игры, опрашивающие этот бит (Digger,
-        // PITON), реагируют только пока клавиша удерживается — поэтому frames>0
-        // (нажать / прогнать / отпустить) или hold=true + отдельный bk_run.
-        // «СТОП» — не код КОИ-7: клавиша вынесена из матрицы и вызывает
-        // внеприоритетное прерывание по вектору 4. Обрабатываем отдельно.
-        {
-            const std::string kn = bk::normName(args.value("key").toString().toStdString());
-            if (kn == "stop" || kn == "стоп") {
-                board_.pressStop();
-                const int fr = args.value("frames").toInt(0);
-                QString tail;
-                if (fr > 0) tail = "\n" + runText(runFrames(fr)) + "\n" + regsText();
-                return textContent("Клавиша СТОП: внеприоритетное прерывание по вектору 4." + tail);
-            }
-        }
-        std::vector<uint16_t> codes;
-        bool present = false;
-        QString warn, err;
-        if (!resolveKey(args, codes, present, warn, err)) return fail(err);
-        const bool hold = args.value("hold").toBool(false);
-        const int frames = args.value("frames").toInt(0);
-        const int relFrames = args.value("release_frames").toInt(0);
-
-        QString pre;
-        if (present && codes.size() > 1) {
-            // Префикс РУС/ЛАТ: регистр кода хранит один код, между ними нужен кадр.
-            for (size_t i = 0; i + 1 < codes.size(); ++i) {
-                board_.pressKey(codes[i]);
-                board_.setKeyHeld(true);
-                runFrames(1);
-                board_.setKeyHeld(false);
-            }
-            pre = QString(" (с префиксом %1)").arg(oct6(codes.front()));
-        }
-        const uint16_t code = present ? codes.back() : 0;
-        if (present) board_.pressKey(code);
-
-        QString msg, tail;
-        if (frames > 0) {
-            board_.setKeyHeld(true);
-            const RunOutcome r = runFrames(frames);
-            tail = "\n" + runText(r);
-            if (!hold) {
-                board_.setKeyHeld(false);
-                if (relFrames > 0) tail += "\n" + runText(runFrames(relFrames));
-            }
-            msg = present
-                ? QString("Клавиша %1%2%3 удержана %4 кадр(ов)%5.")
-                      .arg(oct6(code)).arg(keyLabel(code)).arg(pre).arg(frames)
-                      .arg(hold ? ", осталась нажатой" : " и отпущена")
-                : QString("Прогнано %1 кадр(ов) без нажатия.").arg(frames);
-            tail += "\n" + regsText();
-        } else {
-            board_.setKeyHeld(hold);
-            msg = present
-                ? QString("Клавиша %1%2%3 %4.").arg(oct6(code)).arg(keyLabel(code)).arg(pre)
-                      .arg(hold ? "нажата и удерживается" : "нажата (тап)")
-                : (hold ? QString("Клавиша удерживается.") : QString("Клавиша отпущена."));
-        }
-        return textContent(msg + warn + tail);
-    }
-    if (name == "bk_joystick") {
-        // Джойстик на параллельном порту 0177714 (нажато = 1). Раскладка липкая:
-        // задал один раз — действует на все последующие вызовы и на bk_io_state.
-        if (args.contains("layout")) {
-            bk::JoyStandard s;
-            if (!bk::joyParseStandard(args.value("layout").toString().toStdString(), s))
-                return fail("неизвестная раскладка '" + args.value("layout").toString() +
-                            "' (standard | breakhouse | swcorp | klad2)");
-            joyStd_ = s;
-        }
-        uint16_t v = 0;
-        bool present = false;
-        QString err;
-        if (!resolveJoy(args, v, present, err)) return fail(err);
-        if (present) board_.setJoystick(v);
-        else v = board_.joystick();
-
-        const int frames = args.value("frames").toInt(0);
-        const bool hold = args.value("hold").toBool(false);
-        QString tail;
-        if (frames > 0) {
-            const RunOutcome r = runFrames(frames);
-            tail = "\n" + runText(r);
-            if (!hold) { board_.setJoystick(0); tail += "\n0177714 сброшен в 000000."; }
-            tail += "\n" + regsText();
-        }
-        return textContent(QString("0177714 = %1 [%2]  раскладка=%3 (%4)%5")
-            .arg(oct6(v)).arg(QString::fromStdString(bk::joyDecode(joyStd_, v)))
-            .arg(bk::joyStandardName(joyStd_)).arg(QString::fromUtf8(bk::joyStandardTitle(joyStd_)))
-            .arg(tail));
-    }
-    if (name == "bk_screenshot") {
-        if (args.value("frames").toInt(0) > 0) runFrames(args.value("frames").toInt(0));
-        // В построчном режиме кадр уже нарисован лучом (с палитрами по ходу кадра);
-        // перерисовка целиком стёрла бы эти эффекты — только для смены цвет/моно.
-        const bool mono = args.value("mono").toBool(false);
-        if (!board_.scanlineRender() || mono == board_.screen().colorMode()) {
-            board_.screen().setColorMode(!mono);
-            board_.screen().render(board_.memory());
-        }
-        QImage img = QImage(reinterpret_cast<const uchar*>(board_.screen().pixels()),
-                            bk::Screen::TEX_W, bk::Screen::TEX_H, QImage::Format_ARGB32).copy();
-        QString path = args.value("path").toString(), note = "BK screen";
-        if (!path.isEmpty()) { if (!img.save(path)) return fail("cannot write " + path); note += " (also written to " + path + ")"; }
-        QByteArray png; QBuffer buf(&png); buf.open(QIODevice::WriteOnly); img.save(&buf, "PNG"); buf.close();
-        QJsonObject txt{{"type", "text"}, {"text", note}};
-        QJsonObject im{{"type", "image"}, {"data", QString::fromLatin1(png.toBase64())}, {"mimeType", "image/png"}};
-        return QJsonObject{{"content", QJsonArray{txt, im}}, {"isError", false}};
-    }
-    if (name == "bk_step_out") {
-        size_t d = board_.trace().stackDepth();
-        if (d <= 1) { board_.stepInstruction(); return textContent("At top level; stepped one instruction.\n" + regsText() + "\n" + disasmText(board_.cpu().pc(), 3)); }
-        bool ret = board_.runUntilReturn(d, args.value("max_ticks").toInt(20000000));
-        QString extra;
-        if (board_.breakHit()) { extra = board_.watchHit() ? "\n(stopped on a watchpoint)" : "\n(stopped on a breakpoint)"; board_.clearBreakHit(); }
-        return textContent(QString("%1%2\n%3\n%4")
-            .arg(ret ? "Returned to caller." : "Did not return within the tick limit.").arg(extra)
-            .arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
-    }
-    if (name == "bk_audio") {
-        // Прогнать кадры, захватывая выход пьезодинамика (0177716, бит 6) как PCM.
-        // Отдаём: разбор (пик/RMS/огибающая/тоны), опционально WAV-файл и — если
-        // клиент говорит на протоколе 2025-03-26 и новее — inline-блок type:"audio".
-        const QString path = args.value("path").toString();
-        const bool doRun = args.value("run").toBool(true);
-        long frames = 100;
-        if (args.contains("frames")) parseNumber(args.value("frames"), frames);
-        if (frames < 1) frames = 1;
-        const int rate = 44100;
-        uint64_t tick0 = board_.totalTicks();
-
-        board_.sound().setEnabled(true);
-        std::vector<int16_t> samples;           // стерео: L, R чередуются
-        int16_t tmp[2 * 4096];
-        auto drain = [&]() {
-            size_t got;
-            while ((got = board_.sound().read(tmp, 4096)) > 0)
-                samples.insert(samples.end(), tmp, tmp + 2 * got);
-        };
-        RunOutcome r;
-        if (doRun) {
-            board_.sound().clear();            // отбросить накопленное до захвата
-            board_.setSpeakerLog(true);
-            board_.clearSpeakerLog();
-            std::vector<InputStep> script;
-            QString err;
-            if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
-                return fail(err);
-            // FIFO динамика сливаем после каждого кадра: он ограничен четвертью
-            // секунды и иначе терял бы начало записи.
-            r = runFrames((int)frames, script, drain);
-        } else {
-            drain();                            // просто забрать то, что уже в FIFO
-            r.reason = "no-run";
-            // Буфер — это ПРОШЛОЕ: отматываем начало окна назад на его длительность,
-            // иначе разбор на тоны искал бы фронты в ещё не наступивших тактах.
-            const uint64_t span = (uint64_t)(samples.size() / 2 * double(board_.cpuFreqHz()) / rate);
-            tick0 = (tick0 > span) ? tick0 - span : 0;
-        }
-
-        if (!path.isEmpty() && !writeWav(path, samples, rate))
-            return fail("cannot write " + path);
-
-        // --- анализ: пик, RMS (всего и по каналам), доля «не тишины», длительность
-        const size_t nfr = samples.size() / 2;
-        int peak = 0;
-        long active = 0;
-        double sumsq = 0, sumL = 0, sumR = 0;
-        for (size_t i = 0; i < nfr; ++i) {
-            const int16_t l = samples[2 * i], rr = samples[2 * i + 1];
-            peak = std::max({peak, std::abs(int(l)), std::abs(int(rr))});
-            if (std::abs(int(l)) > 400 || std::abs(int(rr)) > 400) ++active;
-            sumL += double(l) * l;
-            sumR += double(rr) * rr;
-        }
-        sumsq = sumL + sumR;
-        const double ms = nfr * 1000.0 / rate;
-        const int rms = nfr ? (int)std::sqrt(sumsq / (2.0 * nfr)) : 0;
-        const int rmsL = nfr ? (int)std::sqrt(sumL / nfr) : 0, rmsR = nfr ? (int)std::sqrt(sumR / nfr) : 0;
-
-        QString out = QString("Захвачено %1 стерео-сэмплов (%2 мс, 44100 Гц стерео)%3\n"
-                              "пик=%4/32767  RMS=%5 (левый %8, правый %9)  не тишина=%6%7")
-            .arg(nfr).arg(ms, 0, 'f', 0)
-            .arg(path.isEmpty() ? QString() : QString(", записано в " + path))
-            .arg(peak).arg(rms)
-            .arg(QString::number(nfr ? active * 100 / (long)nfr : 0) + "%")
-            .arg(doRun ? "\n" + runText(r) : QString())
-            .arg(rmsL).arg(rmsR);
-
-        // --- огибающая: RMS по окнам, ASCII-«спарклайн»
-        if (nfr) {
-            const int cols = std::min<int>(72, std::max<int>(1, (int)nfr / 64));
-            const char* ramp = " .:-=+*#%@";
-            QString spark[2];
-            for (int ch = 0; ch < 2; ++ch)
-                for (int c = 0; c < cols; ++c) {
-                    const size_t a = nfr * c / cols, b = nfr * (c + 1) / cols;
-                    double s = 0;
-                    for (size_t i = a; i < b; ++i) s += double(samples[2 * i + ch]) * samples[2 * i + ch];
-                    const int lv = (b > a) ? (int)std::sqrt(s / (b - a)) : 0;
-                    spark[ch] += ramp[std::clamp(lv * 9 / 12000, 0, 9)];
-                }
-            out += QString("\nогибающая (RMS, 0..%1 мс):\nL %2\nR %3\n").arg(ms, 0, 'f', 0).arg(spark[0], spark[1]);
-        }
-
-        // --- тоны: по фронтам динамика (точнее, чем нулевые пересечения PCM)
-        out += "\n" + toneReport(tick0);
-
-        // --- сырые сэмплы окном (по запросу)
-        if (args.contains("raw_ms") || args.contains("raw_start_ms")) {
-            const int startMs = args.value("raw_start_ms").toInt(0);
-            const int lenMs = std::clamp(args.value("raw_ms").toInt(5), 1, 200);
-            const size_t a = std::min(nfr, (size_t)(startMs * rate / 1000));
-            const size_t b = std::min(nfr, a + (size_t)(lenMs * rate / 1000));
-            out += QString("\nсырые сэмплы int16 L/R [%1..%2 мс], %3 шт:\n").arg(startMs).arg(startMs + lenMs).arg(b - a);
-            for (size_t i = a; i < b; ++i)
-                out += QString("%1/%2").arg(samples[2 * i]).arg(samples[2 * i + 1]) + ((i + 1 - a) % 10 == 0 ? "\n" : " ");
-            out += "\n";
-        }
-
-        // --- inline-аудио (MCP AudioContent появился в протоколе 2025-03-26)
-        const bool wantInline = args.contains("inline") ? args.value("inline").toBool()
-                                                        : (protoVer_ >= QString("2025-03-26"));
-        if (wantInline && !samples.empty()) {
-            QByteArray wav;
-            writeWavBytes(wav, samples, rate);
-            QJsonObject txt{{"type", "text"}, {"text", out}};
-            QJsonObject au{{"type", "audio"},
-                           {"data", QString::fromLatin1(wav.toBase64())},
-                           {"mimeType", "audio/wav"}};
-            return QJsonObject{{"content", QJsonArray{txt, au}}, {"isError", false}};
-        }
-        return textContent(out);
-    }
-    if (name == "bk_state_save") {
-        const QString slot = args.value("slot").toString();
-        if (!slot.isEmpty()) {
-            board_.saveStateMem(stateSlots_[slot]);
-            return textContent(QString("Состояние сохранено в слот '%1' (%2 байт, в памяти).")
-                                   .arg(slot).arg(stateSlots_[slot].size()));
-        }
-        if (!board_.saveState(args.value("path").toString().toStdString())) return fail("save failed");
-        return textContent("State saved to " + args.value("path").toString());
-    }
-    if (name == "bk_state_load") {
-        const QString slot = args.value("slot").toString();
-        if (!slot.isEmpty()) {
-            auto it = stateSlots_.find(slot);
-            if (it == stateSlots_.end()) return fail("нет слота '" + slot + "'");
-            if (!board_.loadStateMem(it->second)) return fail("слот повреждён");
-            board_.setScanlineRender(board_.bk11());   // снимок мог сменить машину
-            return textContent(QString("Состояние восстановлено из слота '%1'.\n%2").arg(slot).arg(regsText()));
-        }
-        if (!board_.loadState(args.value("path").toString().toStdString())) return fail("load failed");
-        board_.setScanlineRender(board_.bk11());
-        return textContent(QString("State restored (%1).\n").arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
-                           + regsText());
-    }
-    if (name == "bk_symbols") {
-        int n = board_.loadSymbols(args.value("path").toString().toStdString());
-        if (n < 0) return fail("cannot open " + args.value("path").toString());
-        return textContent(QString("Loaded %1 symbols from %2.").arg(n).arg(args.value("path").toString()));
-    }
-    if (name == "bk_hotspots") {
-        int count = args.value("count").toInt(20);
-        std::vector<std::pair<uint32_t, uint16_t>> hot;
-        for (int a = 0; a < 0x10000; a += 2) {
-            uint32_t c = board_.trace().execCount((uint16_t)a);
-            if (c) hot.push_back({c, (uint16_t)a});
-        }
-        std::sort(hot.rbegin(), hot.rend());
-        QString out = QString("Hot instructions (%1 unique executed):\n").arg(hot.size());
-        for (int i = 0; i < count && i < (int)hot.size(); ++i) {
-            uint16_t a = hot[i].second;
-            bk::DisasmLine d = bk::disasm(board_.memory(), a, &board_.symbols());
-            QString sym; const std::string* it = symAt(a);
-            if (it) sym = QString(" <%1>").arg(QString::fromStdString(*it));
-            out += QString("%1%2  %3  x%4\n").arg(oct6(a)).arg(sym).arg(QString::fromStdString(d.text)).arg(hot[i].first);
-        }
-        return textContent(out);
+        out += QString("\nогибающая (RMS, 0..%1 мс):\nL %2\nR %3\n").arg(ms, 0, 'f', 0).arg(spark[0], spark[1]);
     }
 
-    if (name == "bk_watch") {
-        uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
-        QString mode = args.value("mode").toString("write").toLower();
-        bool r = (mode == "read" || mode == "rw"), w = (mode == "write" || mode == "rw");
-        if (!r && !w) w = true;
-        board_.addWatch(a, r, w);
-        return textContent(QString("Watch set at %1 (%2%3). Run bk_run / bk_run_until to trigger.")
-            .arg(oct6(a)).arg(r ? "R" : "").arg(w ? "W" : ""));
-    }
-    if (name == "bk_unwatch") {
-        if (args.value("all").toBool()) { board_.clearWatches(); return textContent("All watchpoints removed."); }
-        uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
-        board_.removeWatch(a);
-        return textContent("Watch removed at " + oct6(a));
-    }
-    if (name == "bk_watchpoints") {
-        QString out = "Watchpoints:\n";
-        for (auto& kv : board_.watchpoints())
-            out += QString("  %1  %2%3\n").arg(oct6(kv.first))
-                       .arg(kv.second & 1 ? "R" : "").arg(kv.second & 2 ? "W" : "");
-        if (board_.watchpoints().empty()) out += "  (none)\n";
-        return textContent(out);
-    }
-    if (name == "bk_backtrace") {
-        int depth = args.value("depth").toInt(24);
-        const bk::Memory& mem = board_.memory();
-        auto sym = [&](uint16_t x) {
-            const std::string* it = symAt(x);
-            return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString();
-        };
-        auto isJsr = [](uint16_t ir) { return ir >= 0004000 && ir <= 0004777; };
-        uint16_t pc = board_.cpu().pc();
+    // --- тоны: по фронтам динамика (точнее, чем нулевые пересечения PCM)
+    out += "\n" + toneReport(tick0);
 
-        // Preferred: the exact shadow call stack from the call tracker (JSR/return
-        // + SP resync). Falls back to a heuristic stack scan if it's empty.
-        std::vector<bk::Trace::Span> open;
-        board_.trace().openFrames(open);
-        if (!open.empty()) {
-            QString out = "Call stack (from the call tracker, innermost first):\n";
-            out += QString("  #0  PC=%1%2  %3\n").arg(oct6(pc)).arg(sym(pc))
-                       .arg(QString::fromStdString(bk::disasm(mem, pc).text));
-            int frame = 1;
-            for (auto it = open.rbegin(); it != open.rend() && frame <= depth; ++it, ++frame)
-                out += QString("  #%1  %2%3  (depth %4)\n").arg(frame).arg(oct6(it->func)).arg(sym(it->func)).arg(it->depth);
-            return textContent(out);
-        }
+    // --- сырые сэмплы окном (по запросу)
+    if (args.contains("raw_ms") || args.contains("raw_start_ms")) {
+        const int startMs = args.value("raw_start_ms").toInt(0);
+        const int lenMs = std::clamp(args.value("raw_ms").toInt(5), 1, 200);
+        const size_t a = std::min(nfr, (size_t)(startMs * rate / 1000));
+        const size_t b = std::min(nfr, a + (size_t)(lenMs * rate / 1000));
+        out += QString("\nсырые сэмплы int16 L/R [%1..%2 мс], %3 шт:\n").arg(startMs).arg(startMs + lenMs).arg(b - a);
+        for (size_t i = a; i < b; ++i)
+            out += QString("%1/%2").arg(samples[2 * i]).arg(samples[2 * i + 1]) + ((i + 1 - a) % 10 == 0 ? "\n" : " ");
+        out += "\n";
+    }
 
-        QString out = "Call stack (heuristic, scanning the stack for JSR return addresses):\n";
-        out += QString("  #0  %1%2  %3   ; PC\n").arg(oct6(pc)).arg(sym(pc))
+    // --- inline-аудио (MCP AudioContent появился в протоколе 2025-03-26)
+    const bool wantInline = args.contains("inline") ? args.value("inline").toBool()
+                                                    : (protoVer_ >= QString("2025-03-26"));
+    if (wantInline && !samples.empty()) {
+        QByteArray wav;
+        writeWavBytes(wav, samples, rate);
+        QJsonObject txt{{"type", "text"}, {"text", out}};
+        QJsonObject au{{"type", "audio"},
+                       {"data", QString::fromLatin1(wav.toBase64())},
+                       {"mimeType", "audio/wav"}};
+        return QJsonObject{{"content", QJsonArray{txt, au}}, {"isError", false}};
+    }
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_state_save(const QJsonObject& args) {
+    const QString slot = args.value("slot").toString();
+    if (!slot.isEmpty()) {
+        board_.saveStateMem(stateSlots_[slot]);
+        return textContent(QString("Состояние сохранено в слот '%1' (%2 байт, в памяти).")
+                               .arg(slot).arg(stateSlots_[slot].size()));
+    }
+    if (!board_.saveState(args.value("path").toString().toStdString())) return fail("save failed");
+    return textContent("State saved to " + args.value("path").toString());
+}
+
+QJsonObject McpServer::tool_bk_state_load(const QJsonObject& args) {
+    const QString slot = args.value("slot").toString();
+    if (!slot.isEmpty()) {
+        auto it = stateSlots_.find(slot);
+        if (it == stateSlots_.end()) return fail("нет слота '" + slot + "'");
+        if (!board_.loadStateMem(it->second)) return fail("слот повреждён");
+        board_.setScanlineRender(board_.bk11());   // снимок мог сменить машину
+        return textContent(QString("Состояние восстановлено из слота '%1'.\n%2").arg(slot).arg(regsText()));
+    }
+    if (!board_.loadState(args.value("path").toString().toStdString())) return fail("load failed");
+    board_.setScanlineRender(board_.bk11());
+    return textContent(QString("State restored (%1).\n").arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
+                       + regsText());
+}
+
+QJsonObject McpServer::tool_bk_symbols(const QJsonObject& args) {
+    int n = board_.loadSymbols(args.value("path").toString().toStdString());
+    if (n < 0) return fail("cannot open " + args.value("path").toString());
+    return textContent(QString("Loaded %1 symbols from %2.").arg(n).arg(args.value("path").toString()));
+}
+
+QJsonObject McpServer::tool_bk_hotspots(const QJsonObject& args) {
+    int count = args.value("count").toInt(20);
+    std::vector<std::pair<uint32_t, uint16_t>> hot;
+    for (int a = 0; a < 0x10000; a += 2) {
+        uint32_t c = board_.trace().execCount((uint16_t)a);
+        if (c) hot.push_back({c, (uint16_t)a});
+    }
+    std::sort(hot.rbegin(), hot.rend());
+    QString out = QString("Hot instructions (%1 unique executed):\n").arg(hot.size());
+    for (int i = 0; i < count && i < (int)hot.size(); ++i) {
+        uint16_t a = hot[i].second;
+        bk::DisasmLine d = bk::disasm(board_.memory(), a, &board_.symbols());
+        QString sym; const std::string* it = symAt(a);
+        if (it) sym = QString(" <%1>").arg(QString::fromStdString(*it));
+        out += QString("%1%2  %3  x%4\n").arg(oct6(a)).arg(sym).arg(QString::fromStdString(d.text)).arg(hot[i].first);
+    }
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_watch(const QJsonObject& args) {
+    uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+    QString mode = args.value("mode").toString("write").toLower();
+    bool r = (mode == "read" || mode == "rw"), w = (mode == "write" || mode == "rw");
+    if (!r && !w) w = true;
+    board_.addWatch(a, r, w);
+    return textContent(QString("Watch set at %1 (%2%3). Run bk_run / bk_run_until to trigger.")
+        .arg(oct6(a)).arg(r ? "R" : "").arg(w ? "W" : ""));
+}
+
+QJsonObject McpServer::tool_bk_unwatch(const QJsonObject& args) {
+    if (args.value("all").toBool()) { board_.clearWatches(); return textContent("All watchpoints removed."); }
+    uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
+    board_.removeWatch(a);
+    return textContent("Watch removed at " + oct6(a));
+}
+
+QJsonObject McpServer::tool_bk_watchpoints(const QJsonObject&) {
+    QString out = "Watchpoints:\n";
+    for (auto& kv : board_.watchpoints())
+        out += QString("  %1  %2%3\n").arg(oct6(kv.first))
+                   .arg(kv.second & 1 ? "R" : "").arg(kv.second & 2 ? "W" : "");
+    if (board_.watchpoints().empty()) out += "  (none)\n";
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_backtrace(const QJsonObject& args) {
+    int depth = args.value("depth").toInt(24);
+    const bk::Memory& mem = board_.memory();
+    auto sym = [&](uint16_t x) {
+        const std::string* it = symAt(x);
+        return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString();
+    };
+    uint16_t pc = board_.cpu().pc();
+
+    // Preferred: the exact shadow call stack from the call tracker (JSR/return
+    // + SP resync). Falls back to a heuristic stack scan if it's empty.
+    std::vector<bk::Trace::Span> open;
+    board_.trace().openFrames(open);
+    if (!open.empty()) {
+        QString out = "Call stack (from the call tracker, innermost first):\n";
+        out += QString("  #0  PC=%1%2  %3\n").arg(oct6(pc)).arg(sym(pc))
                    .arg(QString::fromStdString(bk::disasm(mem, pc).text));
         int frame = 1;
-        uint16_t sp = board_.cpu().sp();
-        for (int i = 0; i < 1024 && frame < depth; i += 2) {
-            uint16_t addr = (uint16_t)(sp + i);
-            if (addr < sp) break;                       // wrapped past the top of memory
-            uint16_t w = mem.peekWord(addr);
-            if (w & 1) continue;                        // return addresses are even
-            uint16_t jsrAt = 0; bool ok = false;        // JSR whose length lands exactly at w
-            for (int back = 2; back <= 4; back += 2) {
-                uint16_t j = (uint16_t)(w - back);
-                if (isJsr(mem.peekWord(j)) && (uint16_t)(j + bk::disasm(mem, j).words * 2) == w) { jsrAt = j; ok = true; break; }
-            }
-            if (!ok) continue;
-            out += QString("  #%1  %2%3  (call at %4)\n").arg(frame).arg(oct6(w)).arg(sym(w)).arg(oct6(jsrAt));
-            ++frame;
-        }
-        if (frame == 1) out += "  (no return addresses found — leaf routine or non-JSR flow)\n";
+        for (auto it = open.rbegin(); it != open.rend() && frame <= depth; ++it, ++frame)
+            out += QString("  #%1  %2%3  (depth %4)\n").arg(frame).arg(oct6(it->func)).arg(sym(it->func)).arg(it->depth);
         return textContent(out);
-    }
-    if (name == "bk_search_mem") {
-        const bk::Memory& mem = board_.memory();
-        uint16_t start = 0, end = 0177777; QString err;
-        if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
-        if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
-        int maxHits = args.value("max").toInt(64);
-        std::vector<uint8_t> pat;
-        if (args.contains("text")) { QByteArray b = args.value("text").toString().toLatin1(); for (char c : b) pat.push_back((uint8_t)c); }
-        else if (args.contains("bytes")) { for (auto v : args.value("bytes").toArray()) pat.push_back((uint8_t)(v.toInt() & 0xFF)); }
-        else if (args.contains("byte")) { long n; if (!parseNumber(args.value("byte"), n)) return fail("bad byte"); pat.push_back((uint8_t)(n & 0xFF)); }
-        else if (args.contains("word")) { long n; if (!parseNumber(args.value("word"), n)) return fail("bad word"); pat.push_back((uint8_t)(n & 0xFF)); pat.push_back((uint8_t)((n >> 8) & 0xFF)); }
-        else return fail("give one of: word, byte, bytes, text");
-        QString out = QString("Search (%1 bytes) in [%2..%3]:\n").arg(pat.size()).arg(oct6(start)).arg(oct6(end));
-        int hits = 0;
-        for (uint32_t a = start; pat.size() && a + pat.size() - 1 <= end && hits < maxHits; ++a) {
-            bool m = true;
-            for (size_t k = 0; k < pat.size(); ++k) if (mem.peekByte((uint16_t)(a + k)) != pat[k]) { m = false; break; }
-            if (m) { out += "  " + oct6((uint16_t)a) + "\n"; ++hits; }
-        }
-        out += hits ? (hits >= maxHits ? QString("  ... (stopped at %1)\n").arg(maxHits) : QString())
-                    : QString("  (no matches)\n");
-        return textContent(out);
-    }
-    if (name == "bk_diff_mem") {
-        const bk::Memory& mem = board_.memory();
-        QString action = args.value("action").toString("diff").toLower();
-        if (action == "save") {
-            memSnap_.assign(0x10000, 0);
-            for (int a = 0; a < 0x10000; ++a) memSnap_[a] = mem.peekByte((uint16_t)a);
-            return textContent("Snapshot saved (64 KB). Do an action, then bk_diff_mem action=diff.");
-        }
-        if (memSnap_.size() != 0x10000) return fail("no snapshot — call bk_diff_mem action=save first");
-        uint16_t start = 0, end = 0177777; QString err;
-        if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
-        if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
-        int maxCells = args.value("max").toInt(64);
-        QString out = QString("Changed bytes in [%1..%2]:\n").arg(oct6(start)).arg(oct6(end));
-        int n = 0;
-        for (uint32_t a = start; a <= end && n < maxCells; ++a) {
-            uint8_t cur = mem.peekByte((uint16_t)a);
-            if (cur != memSnap_[a]) {
-                out += QString("  %1: %2 -> %3\n").arg(oct6((uint16_t)a))
-                           .arg(QString::asprintf("%03o", memSnap_[a])).arg(QString::asprintf("%03o", cur));
-                ++n;
-            }
-        }
-        out += n ? (n >= maxCells ? QString("  ... (stopped at %1; narrow with start/end)\n").arg(maxCells) : QString())
-                 : QString("  (no changes)\n");
-        return textContent(out);
-    }
-    if (name == "bk_type") {
-        // Текст в КОИ-7 (кириллица тоже — с автоматической вставкой РУС/ЛАТ).
-        // Клавиша на время символа считается физически нажатой: игры, опрашивающие
-        // бит 6 регистра 0177716 (Digger, PITON), иначе ввода не увидят.
-        const std::vector<uint16_t> codes =
-            bk::bkEncodeText(args.value("text").toString().toStdString(), cyrState_);
-        const int budget = args.value("max_frames").toInt(600);
-        const int holdFrames = std::max(1, args.value("hold_frames").toInt(2));
-        size_t idx = 0;
-        int frames = 0;
-        while (idx < codes.size() && frames < budget) {
-            if (!board_.keyReady()) {
-                board_.pressKey(codes[idx++]);
-                board_.setKeyHeld(true);
-                for (int k = 0; k < holdFrames && frames < budget; ++k) { board_.runFrame(); ++frames; }
-                board_.setKeyHeld(false);
-            }
-            board_.runFrame(); ++frames;
-        }
-        for (int k = 0; k < 12 && board_.keyReady() && frames < budget; ++k) { board_.runFrame(); ++frames; }
-        board_.setKeyHeld(false);
-        return textContent(QString("Набрано %1/%2 кодов за %3 кадров (регистр: %4).\n%5")
-            .arg(idx).arg(codes.size()).arg(frames).arg(cyrState_ ? "РУС" : "ЛАТ").arg(regsText()));
     }
 
-    if (name == "bk_callers" || name == "bk_callees") {
-        uint16_t target; QString err; if (!resolveAddr(args, "addr", target, err)) return fail(err);
-        const bk::Memory& mem = board_.memory();
-        auto isJsr = [](uint16_t ir) { return ir >= 0004000 && ir <= 0004777; };
-        std::set<uint16_t> subs;                         // subroutine entries = JSR targets
-        for (auto& e : board_.trace().edges())
-            if (isJsr(mem.peekWord(e.first >> 16))) subs.insert(e.first & 0xFFFF);
-        auto funcOf = [&](uint16_t x) -> uint16_t { auto it = subs.upper_bound(x); if (it == subs.begin()) return 0; --it; return *it; };
-        auto sym = [&](uint16_t x) { const std::string* it = symAt(x); return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString(); };
-        std::map<uint16_t, uint32_t> agg;
-        for (auto& e : board_.trace().edges()) {
-            uint16_t from = e.first >> 16, to = e.first & 0xFFFF;
-            if (!isJsr(mem.peekWord(from))) continue;
-            if (name == "bk_callers") { if (to == target) agg[funcOf(from)] += e.second; }
-            else                      { if (funcOf(from) == target) agg[to] += e.second; }
+    QString out = "Call stack (heuristic, scanning the stack for JSR return addresses):\n";
+    out += QString("  #0  %1%2  %3   ; PC\n").arg(oct6(pc)).arg(sym(pc))
+               .arg(QString::fromStdString(bk::disasm(mem, pc).text));
+    int frame = 1;
+    uint16_t sp = board_.cpu().sp();
+    for (int i = 0; i < 1024 && frame < depth; i += 2) {
+        uint16_t addr = (uint16_t)(sp + i);
+        if (addr < sp) break;                       // wrapped past the top of memory
+        uint16_t w = mem.peekWord(addr);
+        if (w & 1) continue;                        // return addresses are even
+        uint16_t jsrAt = 0; bool ok = false;        // JSR whose length lands exactly at w
+        for (int back = 2; back <= 4; back += 2) {
+            uint16_t j = (uint16_t)(w - back);
+            const bk::InstrInfo in = bk::instrInfo(mem, j);
+            if (in.flow == bk::Flow::Call && (uint16_t)(j + in.words * 2) == w) { jsrAt = j; ok = true; break; }
         }
-        std::vector<std::pair<uint32_t, uint16_t>> v;
-        for (auto& kv : agg) v.push_back({kv.second, kv.first});
-        std::sort(v.rbegin(), v.rend());
-        QString out = QString(name == "bk_callers" ? "Callers of %1%2:\n" : "Callees of %1%2:\n").arg(oct6(target)).arg(sym(target));
-        for (auto& p : v) out += QString("  %1%2  x%3\n").arg(oct6(p.second)).arg(sym(p.second)).arg(p.first);
-        if (v.empty()) out += "  (none recorded — run the game so calls are traced)\n";
-        return textContent(out);
+        if (!ok) continue;
+        out += QString("  #%1  %2%3  (call at %4)\n").arg(frame).arg(oct6(w)).arg(sym(w)).arg(oct6(jsrAt));
+        ++frame;
     }
-    if (name == "bk_frames") {
-        const auto& fb = board_.frameBoundaries();
-        if (fb.size() < 2) return textContent("Not enough frame boundaries recorded "
-            "(the game may pace in free-running mode, or hasn't run yet).");
-        uint64_t avg = (fb.back() - fb.front()) / (fb.size() - 1), mn = ~0ull, mx = 0;
-        for (size_t i = 1; i < fb.size(); ++i) { uint64_t d = fb[i] - fb[i - 1]; mn = std::min(mn, d); mx = std::max(mx, d); }
-        const double tpm = board_.cpuFreqHz() / 1000.0;   // тактов в миллисекунде
-        auto ms = [tpm](uint64_t t) { return t / tpm; };
-        return textContent(QString("Frames: %1  avg %2 ms (%3 fps)  min %4 ms  max %5 ms  jitter %6 ms")
-            .arg(fb.size()).arg(ms(avg), 0, 'f', 2).arg(avg ? double(board_.cpuFreqHz()) / avg : 0, 0, 'f', 1)
-            .arg(ms(mn), 0, 'f', 2).arg(ms(mx), 0, 'f', 2).arg(ms(mx - mn), 0, 'f', 2));
+    if (frame == 1) out += "  (no return addresses found — leaf routine or non-JSR flow)\n";
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_search_mem(const QJsonObject& args) {
+    const bk::Memory& mem = board_.memory();
+    uint16_t start = 0, end = 0177777; QString err;
+    if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
+    if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
+    int maxHits = args.value("max").toInt(64);
+    std::vector<uint8_t> pat;
+    if (args.contains("text")) { QByteArray b = args.value("text").toString().toLatin1(); for (char c : b) pat.push_back((uint8_t)c); }
+    else if (args.contains("bytes")) { for (auto v : args.value("bytes").toArray()) pat.push_back((uint8_t)(v.toInt() & 0xFF)); }
+    else if (args.contains("byte")) { long n; if (!parseNumber(args.value("byte"), n)) return fail("bad byte"); pat.push_back((uint8_t)(n & 0xFF)); }
+    else if (args.contains("word")) { long n; if (!parseNumber(args.value("word"), n)) return fail("bad word"); pat.push_back((uint8_t)(n & 0xFF)); pat.push_back((uint8_t)((n >> 8) & 0xFF)); }
+    else return fail("give one of: word, byte, bytes, text");
+    QString out = QString("Search (%1 bytes) in [%2..%3]:\n").arg(pat.size()).arg(oct6(start)).arg(oct6(end));
+    int hits = 0;
+    for (uint32_t a = start; pat.size() && a + pat.size() - 1 <= end && hits < maxHits; ++a) {
+        bool m = true;
+        for (size_t k = 0; k < pat.size(); ++k) if (mem.peekByte((uint16_t)(a + k)) != pat[k]) { m = false; break; }
+        if (m) { out += "  " + oct6((uint16_t)a) + "\n"; ++hits; }
     }
-    if (name == "bk_coverage") {
-        uint16_t start = 0, end = 0177777; QString err;
-        if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
-        if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
-        int nGaps = args.value("gaps").toInt(12);
-        auto& tr = board_.trace();
-        int nWords = (end - start) / 2 + 1;
-        std::vector<char> covered(nWords, 0);
-        uint64_t execInstrs = 0;
-        for (uint32_t a = start; a <= end; a += 2) {
-            uint32_t c = tr.execCount((uint16_t)a);
-            if (!c) continue;
-            execInstrs += c;
-            int len = bk::disasm(board_.memory(), (uint16_t)a).words;   // cover all instruction words
-            for (int w = 0; w < len; ++w) { uint32_t wa = a + w * 2; if (wa >= start && wa <= end) covered[(wa - start) / 2] = 1; }
+    out += hits ? (hits >= maxHits ? QString("  ... (stopped at %1)\n").arg(maxHits) : QString())
+                : QString("  (no matches)\n");
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_diff_mem(const QJsonObject& args) {
+    const bk::Memory& mem = board_.memory();
+    QString action = args.value("action").toString("diff").toLower();
+    if (action == "save") {
+        memSnap_.assign(0x10000, 0);
+        for (int a = 0; a < 0x10000; ++a) memSnap_[a] = mem.peekByte((uint16_t)a);
+        return textContent("Snapshot saved (64 KB). Do an action, then bk_diff_mem action=diff.");
+    }
+    if (memSnap_.size() != 0x10000) return fail("no snapshot — call bk_diff_mem action=save first");
+    uint16_t start = 0, end = 0177777; QString err;
+    if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
+    if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
+    int maxCells = args.value("max").toInt(64);
+    QString out = QString("Changed bytes in [%1..%2]:\n").arg(oct6(start)).arg(oct6(end));
+    int n = 0;
+    for (uint32_t a = start; a <= end && n < maxCells; ++a) {
+        uint8_t cur = mem.peekByte((uint16_t)a);
+        if (cur != memSnap_[a]) {
+            out += QString("  %1: %2 -> %3\n").arg(oct6((uint16_t)a))
+                       .arg(QString::asprintf("%03o", memSnap_[a])).arg(QString::asprintf("%03o", cur));
+            ++n;
         }
-        int cov = 0; for (char x : covered) cov += x;
-        std::vector<std::pair<uint16_t, int>> gaps;
-        int gs = -1;
-        for (int i = 0; i < nWords; ++i) {
-            if (!covered[i]) { if (gs < 0) gs = i; }
-            else if (gs >= 0) { gaps.push_back({(uint16_t)(start + gs * 2), i - gs}); gs = -1; }
-        }
-        if (gs >= 0) gaps.push_back({(uint16_t)(start + gs * 2), nWords - gs});
-        std::sort(gaps.begin(), gaps.end(), [](auto& x, auto& y) { return x.second > y.second; });
-        QString out = QString("Coverage [%1..%2]: %3/%4 words are code (%5%), %6 instructions executed.\n"
-                              "Largest un-executed gaps (data or dead code):\n")
-            .arg(oct6(start)).arg(oct6(end)).arg(cov).arg(nWords)
-            .arg(nWords ? 100.0 * cov / nWords : 0, 0, 'f', 1).arg(execInstrs);
-        for (int i = 0; i < nGaps && i < (int)gaps.size(); ++i)
-            out += QString("  %1..%2  (%3 words)\n").arg(oct6(gaps[i].first))
-                       .arg(oct6((uint16_t)(gaps[i].first + gaps[i].second * 2 - 2))).arg(gaps[i].second);
-        if (gaps.empty()) out += "  (none)\n";
-        return textContent(out);
     }
-    // frames > 0: профиль только за отрезок — обнулить, прогнать N кадров (с input).
-    auto profileWindow = [&](QString& note, QString& err) -> bool {
-        const int frames = args.value("frames").toInt(0);
-        if (frames <= 0) return true;
-        std::vector<InputStep> script;
-        if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
-            return false;
-        board_.trace().flameZero();
-        board_.trace().execClear();
-        note = runText(runFrames(frames, script)) + "\n";
-        return true;
+    out += n ? (n >= maxCells ? QString("  ... (stopped at %1; narrow with start/end)\n").arg(maxCells) : QString())
+             : QString("  (no changes)\n");
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_type(const QJsonObject& args) {
+    // Текст в КОИ-7 (кириллица тоже — с автоматической вставкой РУС/ЛАТ).
+    // Клавиша на время символа считается физически нажатой: игры, опрашивающие
+    // бит 6 регистра 0177716 (Digger, PITON), иначе ввода не увидят.
+    const std::vector<uint16_t> codes =
+        bk::bkEncodeText(args.value("text").toString().toStdString(), cyrState_);
+    const int budget = args.value("max_frames").toInt(600);
+    const int holdFrames = std::max(1, args.value("hold_frames").toInt(2));
+    size_t idx = 0;
+    int frames = 0;
+    while (idx < codes.size() && frames < budget) {
+        if (!board_.keyReady()) {
+            board_.pressKey(codes[idx++]);
+            board_.setKeyHeld(true);
+            for (int k = 0; k < holdFrames && frames < budget; ++k) { board_.runFrame(); ++frames; }
+            board_.setKeyHeld(false);
+        }
+        board_.runFrame(); ++frames;
+    }
+    for (int k = 0; k < 12 && board_.keyReady() && frames < budget; ++k) { board_.runFrame(); ++frames; }
+    board_.setKeyHeld(false);
+    return textContent(QString("Набрано %1/%2 кодов за %3 кадров (регистр: %4).\n%5")
+        .arg(idx).arg(codes.size()).arg(frames).arg(cyrState_ ? "РУС" : "ЛАТ").arg(regsText()));
+}
+
+QJsonObject McpServer::callersOrCallees(const QJsonObject& args, const QString& name) {
+    uint16_t target; QString err; if (!resolveAddr(args, "addr", target, err)) return fail(err);
+    const bk::Memory& mem = board_.memory();
+    const std::set<uint16_t> subs = board_.trace().callTargets(mem);   // точки входа = цели JSR
+    auto funcOf = [&](uint16_t x) { return bk::Trace::funcOf(subs, x); };
+    auto sym = [&](uint16_t x) { const std::string* it = symAt(x); return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString(); };
+    std::map<uint16_t, uint32_t> agg;
+    for (auto& e : board_.trace().edges()) {
+        const uint16_t from = bk::Trace::edgeFrom(e.first), to = bk::Trace::edgeTo(e.first);
+        if (!bk::isJsr(mem.peekWord(from))) continue;
+        if (name == "bk_callers") { if (to == target) agg[funcOf(from)] += e.second; }
+        else                      { if (funcOf(from) == target) agg[to] += e.second; }
+    }
+    std::vector<std::pair<uint32_t, uint16_t>> v;
+    for (auto& kv : agg) v.push_back({kv.second, kv.first});
+    std::sort(v.rbegin(), v.rend());
+    QString out = QString(name == "bk_callers" ? "Callers of %1%2:\n" : "Callees of %1%2:\n").arg(oct6(target)).arg(sym(target));
+    for (auto& p : v) out += QString("  %1%2  x%3\n").arg(oct6(p.second)).arg(sym(p.second)).arg(p.first);
+    if (v.empty()) out += "  (none recorded — run the game so calls are traced)\n";
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_callers(const QJsonObject& args) { return callersOrCallees(args, "bk_callers"); }
+
+QJsonObject McpServer::tool_bk_callees(const QJsonObject& args) { return callersOrCallees(args, "bk_callees"); }
+
+QJsonObject McpServer::tool_bk_frames(const QJsonObject&) {
+    const auto& fb = board_.frameBoundaries();
+    if (fb.size() < 2) return textContent("Not enough frame boundaries recorded "
+        "(the game may pace in free-running mode, or hasn't run yet).");
+    uint64_t avg = (fb.back() - fb.front()) / (fb.size() - 1), mn = ~0ull, mx = 0;
+    for (size_t i = 1; i < fb.size(); ++i) { uint64_t d = fb[i] - fb[i - 1]; mn = std::min(mn, d); mx = std::max(mx, d); }
+    const double tpm = board_.cpuFreqHz() / 1000.0;   // тактов в миллисекунде
+    auto ms = [tpm](uint64_t t) { return t / tpm; };
+    return textContent(QString("Frames: %1  avg %2 ms (%3 fps)  min %4 ms  max %5 ms  jitter %6 ms")
+        .arg(fb.size()).arg(ms(avg), 0, 'f', 2).arg(avg ? double(board_.cpuFreqHz()) / avg : 0, 0, 'f', 1)
+        .arg(ms(mn), 0, 'f', 2).arg(ms(mx), 0, 'f', 2).arg(ms(mx - mn), 0, 'f', 2));
+}
+
+QJsonObject McpServer::tool_bk_coverage(const QJsonObject& args) {
+    uint16_t start = 0, end = 0177777; QString err;
+    if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
+    if (args.contains("end")   && !resolveAddr(args, "end",   end,   err)) return fail(err);
+    int nGaps = args.value("gaps").toInt(12);
+    auto& tr = board_.trace();
+    int nWords = (end - start) / 2 + 1;
+    std::vector<char> covered(nWords, 0);
+    uint64_t execInstrs = 0;
+    for (uint32_t a = start; a <= end; a += 2) {
+        uint32_t c = tr.execCount((uint16_t)a);
+        if (!c) continue;
+        execInstrs += c;
+        int len = bk::disasm(board_.memory(), (uint16_t)a).words;   // cover all instruction words
+        for (int w = 0; w < len; ++w) { uint32_t wa = a + w * 2; if (wa >= start && wa <= end) covered[(wa - start) / 2] = 1; }
+    }
+    int cov = 0; for (char x : covered) cov += x;
+    std::vector<std::pair<uint16_t, int>> gaps;
+    int gs = -1;
+    for (int i = 0; i < nWords; ++i) {
+        if (!covered[i]) { if (gs < 0) gs = i; }
+        else if (gs >= 0) { gaps.push_back({(uint16_t)(start + gs * 2), i - gs}); gs = -1; }
+    }
+    if (gs >= 0) gaps.push_back({(uint16_t)(start + gs * 2), nWords - gs});
+    std::sort(gaps.begin(), gaps.end(), [](auto& x, auto& y) { return x.second > y.second; });
+    QString out = QString("Coverage [%1..%2]: %3/%4 words are code (%5%), %6 instructions executed.\n"
+                          "Largest un-executed gaps (data or dead code):\n")
+        .arg(oct6(start)).arg(oct6(end)).arg(cov).arg(nWords)
+        .arg(nWords ? 100.0 * cov / nWords : 0, 0, 'f', 1).arg(execInstrs);
+    for (int i = 0; i < nGaps && i < (int)gaps.size(); ++i)
+        out += QString("  %1..%2  (%3 words)\n").arg(oct6(gaps[i].first))
+                   .arg(oct6((uint16_t)(gaps[i].first + gaps[i].second * 2 - 2))).arg(gaps[i].second);
+    if (gaps.empty()) out += "  (none)\n";
+    return textContent(out);
+}
+
+// frames > 0: профиль только за отрезок — обнулить, прогнать N кадров (с input).
+bool McpServer::profileWindow(const QJsonObject& args, QString& note, QString& err) {
+    const int frames = args.value("frames").toInt(0);
+    if (frames <= 0) return true;
+    std::vector<InputStep> script;
+    if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
+        return false;
+    board_.trace().flameZero();
+    board_.trace().execClear();
+    note = runText(runFrames(frames, script)) + "\n";
+    return true;
+}
+
+QJsonObject McpServer::tool_bk_profile_reset(const QJsonObject&) {
+    board_.trace().flameZero();
+    board_.trace().execClear();
+    return textContent("Profile cleared: call-tree ticks and instruction counters (bk_hotspots) "
+                       "are zero; the current call stack is kept.");
+}
+
+QJsonObject McpServer::tool_bk_calltree(const QJsonObject& args) {
+    QString note, err;
+    if (!profileWindow(args, note, err)) return fail(err);
+    const auto& flame = board_.trace().flame();
+    const int maxDepth = std::max(1, args.value("depth").toInt(8));
+    const double minPct = args.value("min_pct").toDouble(1.0);
+    const int flatN = std::max(0, args.value("flat").toInt(10));
+    // Узлы добавляются после родителя, поэтому обратный проход копит inclusive.
+    std::vector<uint64_t> incl(flame.size());
+    for (size_t i = flame.size(); i-- > 0;) {
+        incl[i] += flame[i].self;
+        if (flame[i].parent >= 0) incl[flame[i].parent] += incl[i];
+    }
+    const uint64_t total = incl.empty() ? 0 : incl[0];
+    if (total == 0) return fail("no profile data — run the program first (or pass frames)");
+    auto pct = [&](uint64_t v) { return 100.0 * double(v) / double(total); };
+    auto label = [&](uint16_t fn) {
+        const std::string* it = symAt(fn);
+        return it ? QString("%1 <%2>").arg(oct6(fn)).arg(QString::fromStdString(*it)) : oct6(fn);
     };
-    if (name == "bk_profile_reset") {
-        board_.trace().flameZero();
-        board_.trace().execClear();
-        return textContent("Profile cleared: call-tree ticks and instruction counters (bk_hotspots) "
-                           "are zero; the current call stack is kept.");
-    }
-    if (name == "bk_calltree") {
-        QString note, err;
-        if (!profileWindow(note, err)) return fail(err);
-        const auto& flame = board_.trace().flame();
-        const int maxDepth = std::max(1, args.value("depth").toInt(8));
-        const double minPct = args.value("min_pct").toDouble(1.0);
-        const int flatN = std::max(0, args.value("flat").toInt(10));
-        // Узлы добавляются после родителя, поэтому обратный проход копит inclusive.
-        std::vector<uint64_t> incl(flame.size());
-        for (size_t i = flame.size(); i-- > 0;) {
-            incl[i] += flame[i].self;
-            if (flame[i].parent >= 0) incl[flame[i].parent] += incl[i];
-        }
-        const uint64_t total = incl.empty() ? 0 : incl[0];
-        if (total == 0) return fail("no profile data — run the program first (or pass frames)");
-        auto pct = [&](uint64_t v) { return 100.0 * double(v) / double(total); };
-        auto label = [&](uint16_t fn) {
-            const std::string* it = symAt(fn);
-            return it ? QString("%1 <%2>").arg(oct6(fn)).arg(QString::fromStdString(*it)) : oct6(fn);
-        };
-        std::vector<int> roots;
-        uint16_t focus = 0;
-        if (args.contains("addr")) {
-            QString e; if (!resolveAddr(args, "addr", focus, e)) return fail(e);
-            for (size_t i = 1; i < flame.size(); ++i) {
-                if (flame[i].func != focus || !incl[i]) continue;
-                bool nested = false;                      // только внешние вхождения — без двойного счёта
-                for (int p = flame[i].parent; p > 0 && !nested; p = flame[p].parent) nested = flame[p].func == focus;
-                if (!nested) roots.push_back((int)i);
-            }
-            if (roots.empty()) return fail("function " + oct6(focus) + " has no ticks in the profile");
-            std::sort(roots.begin(), roots.end(), [&](int a, int b) { return incl[a] > incl[b]; });
-        } else roots.push_back(0);
-
-        QString out = note + QString("Call tree: %1 ticks (%2 frames of %4)%3. incl% / self% / incl ticks:\n")
-            .arg(total).arg(double(total) / board_.ticksPerFrame(), 0, 'f', 1)
-            .arg(args.contains("addr") ? " — subtrees of " + label(focus) : QString())
-            .arg(board_.ticksPerFrame());
-        int hidden = 0;
-        std::function<void(int, int)> walk = [&](int n, int d) {
-            QString fn = n == 0 ? QString("(top level)") : label(flame[n].func);
-            out += QString("%1%2%  %3%  %4  %5\n").arg(QString(d * 2, ' '))
-                .arg(pct(incl[n]), 5, 'f', 1).arg(pct(flame[n].self), 5, 'f', 1).arg(incl[n], 9).arg(fn);
-            if (d + 1 >= maxDepth) { if (!flame[n].kids.empty()) ++hidden; return; }
-            std::vector<int> kids;
-            for (auto& k : flame[n].kids) if (incl[k.second]) kids.push_back(k.second);
-            std::sort(kids.begin(), kids.end(), [&](int a, int b) { return incl[a] > incl[b]; });
-            for (int k : kids) { if (pct(incl[k]) < minPct) { ++hidden; continue; } walk(k, d + 1); }
-        };
-        for (int r : roots) walk(r, 0);
-        if (hidden) out += QString("  (%1 branches hidden by depth=%2 / min_pct=%3)\n").arg(hidden).arg(maxDepth).arg(minPct);
-
-        if (flatN > 0) {                                  // плоский топ по собственному времени
-            std::unordered_map<uint16_t, uint64_t> self;
-            for (size_t i = 1; i < flame.size(); ++i) self[flame[i].func] += flame[i].self;
-            std::vector<std::pair<uint64_t, uint16_t>> v;
-            for (auto& kv : self) if (kv.second) v.push_back({kv.second, kv.first});
-            std::sort(v.rbegin(), v.rend());
-            out += "Top functions by self time:\n";
-            for (int i = 0; i < flatN && i < (int)v.size(); ++i)
-                out += QString("  %1%  %2  %3\n").arg(pct(v[i].first), 5, 'f', 1).arg(v[i].first, 9).arg(label(v[i].second));
-        }
-        return textContent(out);
-    }
-    if (name == "bk_profile") {
-        QString note, err;
-        if (!profileWindow(note, err)) return fail(err);
-        QString path = args.value("path").toString();
-        const auto& flame = board_.trace().flame();
-        if (flame.size() < 2) return fail("no profile data — the call tree is empty (run the game first)");
-        FILE* f = std::fopen(path.toStdString().c_str(), "wb");
-        if (!f) return fail("cannot open " + path);
-        auto label = [&](uint16_t fn) -> std::string {
-            const std::string* it = symAt(fn); if (it) return *it;
-            char b[8]; std::snprintf(b, sizeof(b), "%06o", fn); return b;
-        };
-        int lines = 0;
+    std::vector<int> roots;
+    uint16_t focus = 0;
+    if (args.contains("addr")) {
+        QString e; if (!resolveAddr(args, "addr", focus, e)) return fail(e);
         for (size_t i = 1; i < flame.size(); ++i) {
-            if (flame[i].self == 0) continue;
-            std::vector<uint16_t> path;                  // node -> root
-            for (int cur = (int)i; cur > 0; cur = flame[cur].parent) path.push_back(flame[cur].func);
-            std::string stack = "root";
-            for (auto it = path.rbegin(); it != path.rend(); ++it) { stack += ";"; stack += label(*it); }
-            std::fprintf(f, "%s %llu\n", stack.c_str(), (unsigned long long)flame[i].self);
-            ++lines;
+            if (flame[i].func != focus || !incl[i]) continue;
+            bool nested = false;                      // только внешние вхождения — без двойного счёта
+            for (int p = flame[i].parent; p > 0 && !nested; p = flame[p].parent) nested = flame[p].func == focus;
+            if (!nested) roots.push_back((int)i);
         }
-        std::fclose(f);
-        return textContent(note + QString("Wrote %1 folded-stack lines to %2 (open in speedscope or flamegraph.pl).").arg(lines).arg(path));
+        if (roots.empty()) return fail("function " + oct6(focus) + " has no ticks in the profile");
+        std::sort(roots.begin(), roots.end(), [&](int a, int b) { return incl[a] > incl[b]; });
+    } else roots.push_back(0);
+
+    QString out = note + QString("Call tree: %1 ticks (%2 frames of %4)%3. incl% / self% / incl ticks:\n")
+        .arg(total).arg(double(total) / board_.ticksPerFrame(), 0, 'f', 1)
+        .arg(args.contains("addr") ? " — subtrees of " + label(focus) : QString())
+        .arg(board_.ticksPerFrame());
+    int hidden = 0;
+    std::function<void(int, int)> walk = [&](int n, int d) {
+        QString fn = n == 0 ? QString("(top level)") : label(flame[n].func);
+        out += QString("%1%2%  %3%  %4  %5\n").arg(QString(d * 2, ' '))
+            .arg(pct(incl[n]), 5, 'f', 1).arg(pct(flame[n].self), 5, 'f', 1).arg(incl[n], 9).arg(fn);
+        if (d + 1 >= maxDepth) { if (!flame[n].kids.empty()) ++hidden; return; }
+        std::vector<int> kids;
+        for (auto& k : flame[n].kids) if (incl[k.second]) kids.push_back(k.second);
+        std::sort(kids.begin(), kids.end(), [&](int a, int b) { return incl[a] > incl[b]; });
+        for (int k : kids) { if (pct(incl[k]) < minPct) { ++hidden; continue; } walk(k, d + 1); }
+    };
+    for (int r : roots) walk(r, 0);
+    if (hidden) out += QString("  (%1 branches hidden by depth=%2 / min_pct=%3)\n").arg(hidden).arg(maxDepth).arg(minPct);
+
+    if (flatN > 0) {                                  // плоский топ по собственному времени
+        std::unordered_map<uint16_t, uint64_t> self;
+        for (size_t i = 1; i < flame.size(); ++i) self[flame[i].func] += flame[i].self;
+        std::vector<std::pair<uint64_t, uint16_t>> v;
+        for (auto& kv : self) if (kv.second) v.push_back({kv.second, kv.first});
+        std::sort(v.rbegin(), v.rend());
+        out += "Top functions by self time:\n";
+        for (int i = 0; i < flatN && i < (int)v.size(); ++i)
+            out += QString("  %1%  %2  %3\n").arg(pct(v[i].first), 5, 'f', 1).arg(v[i].first, 9).arg(label(v[i].second));
     }
-    if (name == "bk_vram") {
-        const bool mono = args.value("mono").toBool(false);
-        if (args.value("mode").toString() == "index") {
-            // Точная форма спрайта: читаем ВОЗУ напрямую (0040000, 64 байта на
-            // строку) и печатаем индекс палитры 0-3 на пиксель БК. Мимо Screen —
-            // значит без скролла и без удвоения пикселей до 512.
-            const int maxX = mono ? 512 : 256;
-            int x0 = std::clamp(args.value("x").toInt(0), 0, maxX - 1);
-            int y0 = std::clamp(args.value("y").toInt(0), 0, 255);
-            int w  = std::clamp(args.value("w").toInt(64), 1, maxX - x0);
-            int h  = std::clamp(args.value("h").toInt(32), 1, 256 - y0);
-            if (w * h > 8192) { h = std::max(1, 8192 / w); }   // не топить ответ
-            const uint8_t* vram = board_.memory().videoRam();
-            QString grid;
-            for (int y = y0; y < y0 + h; ++y) {
-                const uint8_t* line = vram + y * 64;
-                for (int x = x0; x < x0 + w; ++x) {
-                    if (mono) grid += ((line[x >> 3] >> (x & 7)) & 1) ? '1' : '.';
-                    else {
-                        const int v = (line[x >> 2] >> ((x & 3) * 2)) & 3;
-                        grid += v ? QChar('0' + v) : QChar('.');
-                    }
-                }
-                grid += "\n";
-            }
-            return textContent(QString("ВОЗУ %1, окно x=%2 y=%3 w=%4 h=%5 "
-                                       "(индексы палитры 0-3, '.'=0=фон):\n%6")
-                .arg(mono ? "моно 512x256" : "цвет 256x256 (на экране пиксели удвоены до 512)")
-                .arg(x0).arg(y0).arg(w).arg(h).arg(grid));
-        }
-        int cols = std::clamp(args.value("width").toInt(64), 16, 160);
-        board_.screen().setColorMode(!mono);
-        board_.screen().render(board_.memory());
-        const uint32_t* px = board_.screen().pixels();
-        const int W = bk::Screen::TEX_W, H = bk::Screen::TEX_H;
-        int nonblack = 0, minx = W, miny = H, maxx = -1, maxy = -1;
-        for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x)
-            if (px[y * W + x] & 0xFFFFFF) { ++nonblack; minx = std::min(minx, x); maxx = std::max(maxx, x); miny = std::min(miny, y); maxy = std::max(maxy, y); }
-        int rows = std::max(1, cols * H / (W * 2));       // chars are ~2x taller than wide
-        const char* ramp = " .:-=+*#%@";
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_profile(const QJsonObject& args) {
+    QString note, err;
+    if (!profileWindow(args, note, err)) return fail(err);
+    QString path = args.value("path").toString();
+    const auto& flame = board_.trace().flame();
+    if (flame.size() < 2) return fail("no profile data — the call tree is empty (run the game first)");
+    FILE* f = std::fopen(path.toStdString().c_str(), "wb");
+    if (!f) return fail("cannot open " + path);
+    auto label = [&](uint16_t fn) -> std::string {
+        const std::string* it = symAt(fn); if (it) return *it;
+        char b[8]; std::snprintf(b, sizeof(b), "%06o", fn); return b;
+    };
+    int lines = 0;
+    for (size_t i = 1; i < flame.size(); ++i) {
+        if (flame[i].self == 0) continue;
+        std::vector<uint16_t> path;                  // node -> root
+        for (int cur = (int)i; cur > 0; cur = flame[cur].parent) path.push_back(flame[cur].func);
+        std::string stack = "root";
+        for (auto it = path.rbegin(); it != path.rend(); ++it) { stack += ";"; stack += label(*it); }
+        std::fprintf(f, "%s %llu\n", stack.c_str(), (unsigned long long)flame[i].self);
+        ++lines;
+    }
+    std::fclose(f);
+    return textContent(note + QString("Wrote %1 folded-stack lines to %2 (open in speedscope or flamegraph.pl).").arg(lines).arg(path));
+}
+
+QJsonObject McpServer::tool_bk_vram(const QJsonObject& args) {
+    const bool mono = args.value("mono").toBool(false);
+    if (args.value("mode").toString() == "index") {
+        // Точная форма спрайта: читаем ВОЗУ напрямую (0040000, 64 байта на
+        // строку) и печатаем индекс палитры 0-3 на пиксель БК. Мимо Screen —
+        // значит без скролла и без удвоения пикселей до 512.
+        const int maxX = mono ? 512 : 256;
+        int x0 = std::clamp(args.value("x").toInt(0), 0, maxX - 1);
+        int y0 = std::clamp(args.value("y").toInt(0), 0, 255);
+        int w  = std::clamp(args.value("w").toInt(64), 1, maxX - x0);
+        int h  = std::clamp(args.value("h").toInt(32), 1, 256 - y0);
+        if (w * h > 8192) { h = std::max(1, 8192 / w); }   // не топить ответ
+        const uint8_t* vram = board_.memory().videoRam();
         QString grid;
-        for (int cy = 0; cy < rows; ++cy) {
-            for (int cx = 0; cx < cols; ++cx) {
-                int x0 = cx * W / cols, x1 = (cx + 1) * W / cols, y0 = cy * H / rows, y1 = (cy + 1) * H / rows;
-                long sum = 0, cnt = 0;
-                for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
-                    uint32_t p = px[y * W + x];
-                    sum += (((p >> 16) & 255) * 30 + ((p >> 8) & 255) * 59 + (p & 255) * 11) / 100; ++cnt;
+        for (int y = y0; y < y0 + h; ++y) {
+            const uint8_t* line = vram + y * 64;
+            for (int x = x0; x < x0 + w; ++x) {
+                if (mono) grid += ((line[x >> 3] >> (x & 7)) & 1) ? '1' : '.';
+                else {
+                    const int v = (line[x >> 2] >> ((x & 3) * 2)) & 3;
+                    grid += v ? QChar('0' + v) : QChar('.');
                 }
-                grid += ramp[std::clamp(int(cnt ? sum / cnt : 0) * 9 / 255, 0, 9)];
             }
             grid += "\n";
         }
-        QString head = QString("Screen %1x%2, non-black %3 px").arg(W).arg(H).arg(nonblack);
-        if (maxx >= 0) head += QString(", bbox (%1,%2)-(%3,%4)").arg(minx).arg(miny).arg(maxx).arg(maxy);
-        return textContent(head + ":\n" + grid);
+        return textContent(QString("ВОЗУ %1, окно x=%2 y=%3 w=%4 h=%5 "
+                                   "(индексы палитры 0-3, '.'=0=фон):\n%6")
+            .arg(mono ? "моно 512x256" : "цвет 256x256 (на экране пиксели удвоены до 512)")
+            .arg(x0).arg(y0).arg(w).arg(h).arg(grid));
     }
-
-    if (name == "bk_ocr") {
-        // Распознать текст по знакоместам: сравнить каждое знакоместо с глифами
-        // знакогенератора (по умолчанию — таблица ПЗУ монитора по адресу 0112036).
-        if (args.value("frames").toInt(0) > 0) runFrames(args.value("frames").toInt(0));
-
-        std::vector<uint8_t> bits;
-        bk::screenBitmap(board_.memory(), board_.peekReg(0177664), bits);
-
-        bk::OcrOptions o;
-        QString err;
-        const QString mode = args.value("mode").toString("auto").toLower();
-        bool fixedMode = false;
-        if (mode == "narrow" || mode == "64") { o.wide = false; fixedMode = true; }
-        else if (mode == "wide" || mode == "32") { o.wide = true; fixedMode = true; }
-        else if (mode != "auto" && !mode.isEmpty()) return fail("mode: auto|narrow|wide");
-        if (!fixedMode) {
-            // Подсказка от самой машины: ячейка 0162 (DSIMB) — ширина знакоместа в
-            // байтах, 1 = 64 символа, 2 = 32. Задаёт стартовый режим, но перебор
-            // всё равно проверит оба — игры драйвером монитора не пользуются.
-            const uint16_t dsimb = board_.memory().peekWord(0162);
-            o.wide = (dsimb == 2);
-        }
-        const bool fixedY0 = args.contains("y");
-        o.x0 = args.value("x").toInt(0);
-        o.y0 = args.value("y").toInt(0);
-        o.cols = args.value("cols").toInt(0);
-        o.rows = args.value("rows").toInt(0);
-        o.cellW = args.value("cell_w").toInt(0);
-        o.glyphW = std::clamp(args.value("glyph_w").toInt(8), 1, 8);
-        o.fontHeight = std::clamp(args.value("cell_h").toInt(bk::BK_FONT_HEIGHT), 1, 16);
-        o.tolerance = std::clamp(args.value("tolerance").toInt(6), 0, 80);
-        o.allowInverse = args.value("inverse").toBool(true);
-        // БК-0011М: шрифт БОС из ПЗУ 325, без «дыры» 0200..0237.
-        if (board_.bk11() && !args.contains("font_addr")) bk::useBk11Font(o, board_.memory());
-        if (args.contains("font_addr")) {
-            o.fontBytes = nullptr;
-            if (!resolveAddr(args, "font_addr", o.fontAddr, err)) return fail(err);
-            o.bkLayout = false;            // своя таблица — без «дыры» 0200..0237
-            long fb = 020;
-            if (args.contains("font_base")) parseNumber(args.value("font_base"), fb);
-            o.fontBase = (uint16_t)(fb & 0377);
-            o.fontCount = args.value("font_count").toInt(0);
-        }
-
-        const bk::OcrResult r = ocrAuto(board_.memory(), bits, o, fixedMode, fixedY0);
-        if (r.rows <= 0 || r.cols <= 0) return fail("пустая сетка знакомест — проверьте x/y/cols/rows");
-
-        QString out = QString("Текст с экрана: режим %1 (%2 симв./строку, знакоместо %3x%4), "
-                              "сетка %5x%6 от точки (%7,%8).\n"
-                              "Знакомест непустых %9, распознано %10, не опознано %11%12.\n")
-            .arg(r.opt.wide ? "широкий" : "узкий")
-            .arg(512 / (r.opt.cellW > 0 ? r.opt.cellW : (r.opt.wide ? 16 : 8)))
-            .arg(r.opt.cellW > 0 ? r.opt.cellW : (r.opt.wide ? 16 : 8)).arg(r.opt.fontHeight)
-            .arg(r.cols).arg(r.rows).arg(r.opt.x0).arg(r.opt.y0)
-            .arg(r.nonBlank).arg(r.recognised).arg(r.unknown)
-            .arg(r.inverted ? QString(" (инверсных %1)").arg(r.inverted) : QString());
-        if (r.nonBlank && r.recognised == 0)
-            out += "Ни одно знакоместо не совпало со знакогенератором — вероятно, игра рисует\n"
-                   "своим шрифтом: укажите font_addr (и font_base/font_count) либо поднимите tolerance.\n";
-        out += "----\n";
-        out += QString::fromUtf8(r.text().c_str());
-        out += "----";
-
-        if (args.value("codes").toBool(false)) {
-            out += "\nВосьмеричные коды по знакоместам (?? — не опознано):\n";
-            for (int row = 0; row < r.rows; ++row) {
-                QString line = QString("%1:").arg(row, 2);
-                for (int col = 0; col < r.cols; ++col) {
-                    const bk::OcrCell& c = r.cells[(size_t)row * r.cols + col];
-                    line += c.ok ? QString(" %1").arg(oct6(c.code).right(3)) : QString(" ???");
-                }
-                out += line + "\n";
+    int cols = std::clamp(args.value("width").toInt(64), 16, 160);
+    board_.screen().setColorMode(!mono);
+    board_.screen().render(board_.memory());
+    const uint32_t* px = board_.screen().pixels();
+    const int W = bk::Screen::TEX_W, H = bk::Screen::TEX_H;
+    int nonblack = 0, minx = W, miny = H, maxx = -1, maxy = -1;
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x)
+        if (px[y * W + x] & 0xFFFFFF) { ++nonblack; minx = std::min(minx, x); maxx = std::max(maxx, x); miny = std::min(miny, y); maxy = std::max(maxy, y); }
+    int rows = std::max(1, cols * H / (W * 2));       // chars are ~2x taller than wide
+    const char* ramp = " .:-=+*#%@";
+    QString grid;
+    for (int cy = 0; cy < rows; ++cy) {
+        for (int cx = 0; cx < cols; ++cx) {
+            int x0 = cx * W / cols, x1 = (cx + 1) * W / cols, y0 = cy * H / rows, y1 = (cy + 1) * H / rows;
+            long sum = 0, cnt = 0;
+            for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
+                uint32_t p = px[y * W + x];
+                sum += (((p >> 16) & 255) * 30 + ((p >> 8) & 255) * 59 + (p & 255) * 11) / 100; ++cnt;
             }
+            grid += ramp[std::clamp(int(cnt ? sum / cnt : 0) * 9 / 255, 0, 9)];
         }
-        return textContent(out);
+        grid += "\n";
+    }
+    QString head = QString("Screen %1x%2, non-black %3 px").arg(W).arg(H).arg(nonblack);
+    if (maxx >= 0) head += QString(", bbox (%1,%2)-(%3,%4)").arg(minx).arg(miny).arg(maxx).arg(maxy);
+    return textContent(head + ":\n" + grid);
+}
+
+QJsonObject McpServer::tool_bk_ocr(const QJsonObject& args) {
+    // Распознать текст по знакоместам: сравнить каждое знакоместо с глифами
+    // знакогенератора (по умолчанию — таблица ПЗУ монитора по адресу 0112036).
+    if (args.value("frames").toInt(0) > 0) runFrames(args.value("frames").toInt(0));
+
+    std::vector<uint8_t> bits;
+    bk::screenBitmap(board_.memory(), board_.peekReg(0177664), bits);
+
+    bk::OcrOptions o;
+    QString err;
+    const QString mode = args.value("mode").toString("auto").toLower();
+    bool fixedMode = false;
+    if (mode == "narrow" || mode == "64") { o.wide = false; fixedMode = true; }
+    else if (mode == "wide" || mode == "32") { o.wide = true; fixedMode = true; }
+    else if (mode != "auto" && !mode.isEmpty()) return fail("mode: auto|narrow|wide");
+    if (!fixedMode) {
+        // Подсказка от самой машины: ячейка 0162 (DSIMB) — ширина знакоместа в
+        // байтах, 1 = 64 символа, 2 = 32. Задаёт стартовый режим, но перебор
+        // всё равно проверит оба — игры драйвером монитора не пользуются.
+        const uint16_t dsimb = board_.memory().peekWord(0162);
+        o.wide = (dsimb == 2);
+    }
+    const bool fixedY0 = args.contains("y");
+    o.x0 = args.value("x").toInt(0);
+    o.y0 = args.value("y").toInt(0);
+    o.cols = args.value("cols").toInt(0);
+    o.rows = args.value("rows").toInt(0);
+    o.cellW = args.value("cell_w").toInt(0);
+    o.glyphW = std::clamp(args.value("glyph_w").toInt(8), 1, 8);
+    o.fontHeight = std::clamp(args.value("cell_h").toInt(bk::BK_FONT_HEIGHT), 1, 16);
+    o.tolerance = std::clamp(args.value("tolerance").toInt(6), 0, 80);
+    o.allowInverse = args.value("inverse").toBool(true);
+    // БК-0011М: шрифт БОС из ПЗУ 325, без «дыры» 0200..0237.
+    if (board_.bk11() && !args.contains("font_addr")) bk::useBk11Font(o, board_.memory());
+    if (args.contains("font_addr")) {
+        o.fontBytes = nullptr;
+        if (!resolveAddr(args, "font_addr", o.fontAddr, err)) return fail(err);
+        o.bkLayout = false;            // своя таблица — без «дыры» 0200..0237
+        long fb = 020;
+        if (args.contains("font_base")) parseNumber(args.value("font_base"), fb);
+        o.fontBase = (uint16_t)(fb & 0377);
+        o.fontCount = args.value("font_count").toInt(0);
     }
 
-    if (name == "bk_emt_log") {
-        int count = args.value("count").toInt(40);
-        const auto& log = board_.emtLog();
-        static const char* cmds[] = {"STOP", "START", "WRITE", "READ", "FICT_READ"};
-        static const char* resp[] = {"OK", "INCORRECT_NAME", "CRC_ERROR", "STOP"};
-        QString out = QString("EMT 36 file operations (%1 recorded):\n").arg(log.size());
-        int shown = 0, startIdx = std::max(0, (int)log.size() - count);
-        for (int i = startIdx; i < (int)log.size(); ++i, ++shown) {
-            const auto& e = log[i];
-            out += QString("  %1 '%2'  addr=%3 len=%4  -> %5\n")
-                       .arg(e.cmd < 5 ? cmds[e.cmd] : "?", -9)
-                       .arg(QString::fromStdString(e.name), -16)
-                       .arg(oct6(e.addr)).arg(oct6(e.len))
-                       .arg(e.response < 4 ? resp[e.response] : "?");
-        }
-        if (log.empty()) out += "  (none — no EMT 36 file I/O yet)\n";
-        return textContent(out);
-    }
+    const bk::OcrResult r = ocrAuto(board_.memory(), bits, o, fixedMode, fixedY0);
+    if (r.rows <= 0 || r.cols <= 0) return fail("пустая сетка знакомест — проверьте x/y/cols/rows");
 
-    if (name == "bk_xrefs") {
-        uint16_t target; QString err; if (!resolveAddr(args, "addr", target, err)) return fail(err);
-        const bk::Memory& mem = board_.memory();
-        auto sym = [&](uint16_t x) { const std::string* it = symAt(x); return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString(); };
-        auto kind = [&](uint16_t ir) -> const char* {
-            if (ir >= 0004000 && ir <= 0004777) return "call";
-            if (ir >= 0000100 && ir <= 0000177) return "jmp";
-            if ((ir >= 0000400 && ir <= 0003477) || (ir >= 0100000 && ir <= 0103777)) return "branch";
-            if ((ir >= 0000200 && ir <= 0000207) || ir == 02 || ir == 06) return "return";
-            return "flow";
-        };
-        std::vector<std::tuple<uint32_t, uint16_t, const char*>> to, from;
-        for (auto& e : board_.trace().edges()) {
-            uint16_t f = e.first >> 16, t2 = e.first & 0xFFFF;
-            if (t2 == target) to.push_back({e.second, f, kind(mem.peekWord(f))});
-            if (f == target)  from.push_back({e.second, t2, kind(mem.peekWord(f))});
-        }
-        std::sort(to.rbegin(), to.rend()); std::sort(from.rbegin(), from.rend());
-        QString out = QString("Cross-references for %1%2:\n  TO here (callers/jumps):\n").arg(oct6(target)).arg(sym(target));
-        for (auto& x : to)   out += QString("    %1%2  %3  x%4\n").arg(oct6(std::get<1>(x))).arg(sym(std::get<1>(x))).arg(std::get<2>(x)).arg(std::get<0>(x));
-        if (to.empty()) out += "    (none recorded)\n";
-        out += "  FROM here (targets):\n";
-        for (auto& x : from) out += QString("    %1%2  %3  x%4\n").arg(oct6(std::get<1>(x))).arg(sym(std::get<1>(x))).arg(std::get<2>(x)).arg(std::get<0>(x));
-        if (from.empty()) out += "    (none recorded)\n";
-        return textContent(out);
-    }
-    if (name == "bk_io_state") {
-        auto r = [&](uint16_t a) { return board_.peekReg(a); };
-        uint16_t csr = r(0177712);
-        QString timerBits;
-        if (csr & 0020) timerBits += "RUN ";
-        if (csr & 0002) timerBits += "CAP(free) ";
-        if (csr & 0010) timerBits += "OS(oneshot) ";
-        if (csr & 0004) timerBits += "MON ";
-        if (csr & 0200) timerBits += "FL(underflow) ";
-        uint16_t sys = r(0177716);
-        const uint16_t port = r(0177714);
-        return textContent(QString(
-            "I/O state:\n"
-            "  Keyboard  status 0177660=%1  data 0177662=%2  (%3)%4\n"
-            "  Scroll    0177664=%5\n"
-            "  Timer     limit 0177706=%6  count 0177710=%7  csr 0177712=%8 [%9]\n"
-            "  Port      0177714=%10  [%11]  раскладка=%12\n"
-            "  System    0177716=%13  (key-held bit6=%14)\n"
-            "  Развёртка строка %15/320 %16%17%18")
-            .arg(oct6(r(0177660))).arg(oct6(r(0177662))).arg(board_.keyReady() ? "code ready" : "empty")
-            .arg(keyLabel(r(0177662)))
-            .arg(oct6(r(0177664)))
-            .arg(oct6(r(0177706))).arg(oct6(r(0177710))).arg(oct6(csr)).arg(timerBits.trimmed().isEmpty() ? "stopped" : timerBits.trimmed())
-            .arg(oct6(port)).arg(QString::fromStdString(bk::joyDecode(joyStd_, port)))
-            .arg(bk::joyStandardName(joyStd_))
-            .arg(oct6(sys)).arg((sys & 0100) ? "1(up) — отпущена" : "0(down) — УДЕРЖИВАЕТСЯ")
-            .arg(board_.vp037().scanline())
-            .arg(board_.vp037().vgate() ? "кадровое гашение"
-                 : board_.vp037().hgate() ? "строчное гашение" : "видимая часть")
-            .arg(board_.vp037().inActiveDisplay() ? " (037 занимает шину видеовыборкой)"
-                                                  : "")
-            .arg(board_.smk512()
-                 ? QString("\n  СМК-512   режим %1 (код %2), страница %3 (код %4)%5")
-                       .arg(QString::fromUtf8(bk::Smk512::modeName(board_.smk().mode())))
-                       .arg(oct6(bk::Smk512::modeCode(board_.smk().mode())))
-                       .arg(board_.smk().page())
-                       .arg(oct6(bk::Smk512::pageCode(board_.smk().page())))
-                       .arg(board_.smk().armed() ? ", строб взведён" : "")
-                 : QString())
-        + (board_.bk11() ? QString("\n  БК-0011М  %1  (0177716 память=%2 лента=%3, 0177662=%4)")
-                               .arg(QString::fromStdString(board_.bk11Summary()))
-                               .arg(oct6(board_.memory().pageMap())).arg(oct6(board_.reg716tap()))
-                               .arg(oct6(board_.reg662()))
-                         : QString())
-        + (board_.ay() ? QString("\n  AY-3-8910 %1").arg(QString::fromStdString(board_.aySummary())) : QString())
-        + (board_.ay2Active() ? QString("\n  AY №2     %1").arg(QString::fromStdString(board_.aySummary(1))) : QString())
-        + (board_.ay() && board_.ay2() ? QString("\n  2AY       выбор TurboSound: AY№%1").arg(board_.ayTurboChip() + 1) : QString())
-        + (board_.covox() ? QString("\n  Covox     %1, %2")
-                                .arg(covoxModeName(board_.covoxMode()))
-                                .arg(board_.covoxStereo()
-                                         ? QString("стерео: левый %1, правый %2").arg(oct6(board_.covoxSample()), oct6(board_.covoxSampleR()))
-                                         : QString("моно (в оба канала): отсчёт %1").arg(oct6(board_.covoxSample()))) : QString())
-        + (board_.diskControllerOn() ? fddState() : QString())
-        + (board_.ide().any() ? hddState() : QString())
-        + ((board_.diskControllerOn() && args.value("fdd_log").toBool())
-               ? fddLog(std::max(4, args.value("fdd_log_count").toInt(40))) : QString()));
-    }
-    if (name == "bk_io_log") {
-        if (args.contains("enable")) {
-            const bool on = args.value("enable").toBool();
-            uint16_t filt = 0;
-            QString err;
-            if (args.contains("addr") && !resolveAddr(args, "addr", filt, err)) return fail(err);
-            const size_t cap = (size_t)std::max(16, args.value("cap").toInt(2048));
-            if (on) board_.clearIoLog();
-            board_.setIoLog(on, args.value("reads").toBool(false), cap, filt);
-        }
-        const std::map<uint16_t, const char*> nm = {
-            {0177660, "kbd.status"}, {0177662, board_.bk11() ? "palette/screen" : "kbd.data"}, {0177664, "scroll"},
-            {0177706, "timer.limit"}, {0177710, "timer.count"}, {0177712, "timer.csr"},
-            {0177714, "port(джойстик)"}, {0177716, "system/speaker"}};
-        const int count = args.value("count").toInt(60);
-        const auto& log = board_.ioLog();
-        QString out = QString("Обращения к В-В (%1 в буфере; чтения: %2%3):\n")
-            .arg(log.size()).arg(board_.ioLogReads() ? "да" : "нет")
-            .arg(board_.ioLogFilter() ? QString(", фильтр %1").arg(oct6(board_.ioLogFilter())) : QString());
-        const int startIdx = std::max(0, (int)log.size() - count);
-        for (int i = startIdx; i < (int)log.size(); ++i) {
-            const auto& e = log[i];
-            auto it = nm.find(e.addr);
-            // Байтовая запись: настоящий адрес байта и сам байт («WB 177663 = 013»).
-            const uint16_t shownAddr = static_cast<uint16_t>(e.addr | (e.isByte && e.odd ? 1 : 0));
-            const QString shownVal = e.isByte ? QString("%1").arg(e.value & 0377, 3, 8, QChar('0')).rightJustified(6)
-                                              : oct6(e.value);
-            out += QString("  %1 %2 = %3   %4  стр %5:%6  PC=%7  %8\n")
-                       .arg(e.isRead ? "R " : e.isByte ? "WB" : "W ").arg(oct6(shownAddr)).arg(shownVal)
-                       .arg(it != nm.end() ? it->second : "", -16)
-                       .arg(e.line, 3).arg(e.word, 2, 10, QChar('0')).arg(oct6(e.pc))
-                       .arg(QString::fromStdString(bk::disasm(board_.memory(), e.pc).text));
-        }
-        if (log.empty())
-            out += "  (буфер пуст — включите захват: {\"enable\":true}, при нужде "
-                   "{\"reads\":true,\"addr\":\"0177714\"}, затем прогоните и снимите дамп)\n";
-        return textContent(out);
-    }
+    QString out = QString("Текст с экрана: режим %1 (%2 симв./строку, знакоместо %3x%4), "
+                          "сетка %5x%6 от точки (%7,%8).\n"
+                          "Знакомест непустых %9, распознано %10, не опознано %11%12.\n")
+        .arg(r.opt.wide ? "широкий" : "узкий")
+        .arg(512 / (r.opt.cellW > 0 ? r.opt.cellW : (r.opt.wide ? 16 : 8)))
+        .arg(r.opt.cellW > 0 ? r.opt.cellW : (r.opt.wide ? 16 : 8)).arg(r.opt.fontHeight)
+        .arg(r.cols).arg(r.rows).arg(r.opt.x0).arg(r.opt.y0)
+        .arg(r.nonBlank).arg(r.recognised).arg(r.unknown)
+        .arg(r.inverted ? QString(" (инверсных %1)").arg(r.inverted) : QString());
+    if (r.nonBlank && r.recognised == 0)
+        out += "Ни одно знакоместо не совпало со знакогенератором — вероятно, игра рисует\n"
+               "своим шрифтом: укажите font_addr (и font_base/font_count) либо поднимите tolerance.\n";
+    out += "----\n";
+    out += QString::fromUtf8(r.text().c_str());
+    out += "----";
 
-    if (name == "bk_joy_probe") {
-        // Определить раскладку джойстика неизвестной игры эмпирически: для каждого
-        // бита порта — чекпоинт, выставить бит, прогнать, снять ОЗУ, откатиться.
-        // Меняющиеся ячейки и знак дельты выдают координату игрока (см. docs/joystick.md).
-        const int nbits = std::clamp(args.value("bits").toInt(8), 1, 16);
-        const int frames = std::clamp(args.value("frames").toInt(10), 1, 200);
-        const int maxCells = std::clamp(args.value("max").toInt(8), 1, 64);
-        uint16_t start = 0, end = 0037777;
+    if (args.value("codes").toBool(false)) {
+        out += "\nВосьмеричные коды по знакоместам (?? — не опознано):\n";
+        for (int row = 0; row < r.rows; ++row) {
+            QString line = QString("%1:").arg(row, 2);
+            for (int col = 0; col < r.cols; ++col) {
+                const bk::OcrCell& c = r.cells[(size_t)row * r.cols + col];
+                line += c.ok ? QString(" %1").arg(oct6(c.code).right(3)) : QString(" ???");
+            }
+            out += line + "\n";
+        }
+    }
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_emt_log(const QJsonObject& args) {
+    int count = args.value("count").toInt(40);
+    const auto& log = board_.emtLog();
+    static const char* cmds[] = {"STOP", "START", "WRITE", "READ", "FICT_READ"};
+    static const char* resp[] = {"OK", "INCORRECT_NAME", "CRC_ERROR", "STOP"};
+    QString out = QString("EMT 36 file operations (%1 recorded):\n").arg(log.size());
+    int shown = 0, startIdx = std::max(0, (int)log.size() - count);
+    for (int i = startIdx; i < (int)log.size(); ++i, ++shown) {
+        const auto& e = log[i];
+        out += QString("  %1 '%2'  addr=%3 len=%4  -> %5\n")
+                   .arg(e.cmd < 5 ? cmds[e.cmd] : "?", -9)
+                   .arg(QString::fromStdString(e.name), -16)
+                   .arg(oct6(e.addr)).arg(oct6(e.len))
+                   .arg(e.response < 4 ? resp[e.response] : "?");
+    }
+    if (log.empty()) out += "  (none — no EMT 36 file I/O yet)\n";
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_xrefs(const QJsonObject& args) {
+    uint16_t target; QString err; if (!resolveAddr(args, "addr", target, err)) return fail(err);
+    const bk::Memory& mem = board_.memory();
+    auto sym = [&](uint16_t x) { const std::string* it = symAt(x); return it ? QString(" <%1>").arg(QString::fromStdString(*it)) : QString(); };
+    auto kind = [&](uint16_t ir) -> const char* {
+        switch (bk::instrFlow(ir)) {
+        case bk::Flow::Call:   return "call";
+        case bk::Flow::Jump:   return "jump";
+        case bk::Flow::Branch: return "branch";
+        case bk::Flow::Return: return "return";
+        case bk::Flow::Trap:   return "trap";
+        default:               return "flow";
+        }
+    };
+    std::vector<std::tuple<uint32_t, uint16_t, const char*>> to, from;
+    for (auto& e : board_.trace().edges()) {
+        const uint16_t f = bk::Trace::edgeFrom(e.first), t2 = bk::Trace::edgeTo(e.first);
+        if (t2 == target) to.push_back({e.second, f, kind(mem.peekWord(f))});
+        if (f == target)  from.push_back({e.second, t2, kind(mem.peekWord(f))});
+    }
+    std::sort(to.rbegin(), to.rend()); std::sort(from.rbegin(), from.rend());
+    QString out = QString("Cross-references for %1%2:\n  TO here (callers/jumps):\n").arg(oct6(target)).arg(sym(target));
+    for (auto& x : to)   out += QString("    %1%2  %3  x%4\n").arg(oct6(std::get<1>(x))).arg(sym(std::get<1>(x))).arg(std::get<2>(x)).arg(std::get<0>(x));
+    if (to.empty()) out += "    (none recorded)\n";
+    out += "  FROM here (targets):\n";
+    for (auto& x : from) out += QString("    %1%2  %3  x%4\n").arg(oct6(std::get<1>(x))).arg(sym(std::get<1>(x))).arg(std::get<2>(x)).arg(std::get<0>(x));
+    if (from.empty()) out += "    (none recorded)\n";
+    // Статически — как «X» отладчика GUI: и ветки, которые ещё не исполнялись.
+    const std::vector<uint16_t> st = bk::staticXrefs(mem, target, 33);
+    out += "  Static references (every word tried as an instruction):\n";
+    for (size_t k = 0; k < st.size() && k < 32; ++k)
+        out += QString("    %1%2  %3  %4\n").arg(oct6(st[k])).arg(sym(st[k]))
+                   .arg(kind(mem.peekWord(st[k])))
+                   .arg(QString::fromStdString(bk::disasm(mem, st[k], &board_.symbols()).text));
+    if (st.size() > 32) out += "    … (more)\n";
+    if (st.empty()) out += "    (none)\n";
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_io_state(const QJsonObject& args) {
+    auto r = [&](uint16_t a) { return board_.peekReg(a); };
+    uint16_t csr = r(0177712);
+    QString timerBits;
+    if (csr & 0020) timerBits += "RUN ";
+    if (csr & 0002) timerBits += "CAP(free) ";
+    if (csr & 0010) timerBits += "OS(oneshot) ";
+    if (csr & 0004) timerBits += "MON ";
+    if (csr & 0200) timerBits += "FL(underflow) ";
+    uint16_t sys = r(0177716);
+    const uint16_t port = r(0177714);
+    return textContent(QString(
+        "I/O state:\n"
+        "  Keyboard  status 0177660=%1  data 0177662=%2  (%3)%4\n"
+        "  Scroll    0177664=%5\n"
+        "  Timer     limit 0177706=%6  count 0177710=%7  csr 0177712=%8 [%9]\n"
+        "  Port      0177714=%10  [%11]  раскладка=%12\n"
+        "  System    0177716=%13  (key-held bit6=%14)\n"
+        "  Развёртка строка %15/320 %16%17%18")
+        .arg(oct6(r(0177660))).arg(oct6(r(0177662))).arg(board_.keyReady() ? "code ready" : "empty")
+        .arg(keyLabel(r(0177662)))
+        .arg(oct6(r(0177664)))
+        .arg(oct6(r(0177706))).arg(oct6(r(0177710))).arg(oct6(csr)).arg(timerBits.trimmed().isEmpty() ? "stopped" : timerBits.trimmed())
+        .arg(oct6(port)).arg(QString::fromStdString(bk::joyDecode(joyStd_, port)))
+        .arg(bk::joyStandardName(joyStd_))
+        .arg(oct6(sys)).arg((sys & 0100) ? "1(up) — отпущена" : "0(down) — УДЕРЖИВАЕТСЯ")
+        .arg(board_.vp037().scanline())
+        .arg(board_.vp037().vgate() ? "кадровое гашение"
+             : board_.vp037().hgate() ? "строчное гашение" : "видимая часть")
+        .arg(board_.vp037().inActiveDisplay() ? " (037 занимает шину видеовыборкой)"
+                                              : "")
+        .arg(board_.smk512()
+             ? QString("\n  СМК-512   режим %1 (код %2), страница %3 (код %4)%5")
+                   .arg(QString::fromUtf8(bk::Smk512::modeName(board_.smk().mode())))
+                   .arg(oct6(bk::Smk512::modeCode(board_.smk().mode())))
+                   .arg(board_.smk().page())
+                   .arg(oct6(bk::Smk512::pageCode(board_.smk().page())))
+                   .arg(board_.smk().armed() ? ", строб взведён" : "")
+             : QString())
+    + (board_.bk11() ? QString("\n  БК-0011М  %1  (0177716 память=%2 лента=%3, 0177662=%4)")
+                           .arg(QString::fromStdString(board_.bk11Summary()))
+                           .arg(oct6(board_.memory().pageMap())).arg(oct6(board_.reg716tap()))
+                           .arg(oct6(board_.reg662()))
+                     : QString())
+    + (board_.ay() ? QString("\n  AY-3-8910 %1").arg(QString::fromStdString(board_.aySummary())) : QString())
+    + (board_.ay2Active() ? QString("\n  AY №2     %1").arg(QString::fromStdString(board_.aySummary(1))) : QString())
+    + (board_.ay() && board_.ay2() ? QString("\n  2AY       выбор TurboSound: AY№%1").arg(board_.ayTurboChip() + 1) : QString())
+    + (board_.covox() ? QString("\n  Covox     %1, %2")
+                            .arg(covoxModeName(board_.covoxMode()))
+                            .arg(board_.covoxStereo()
+                                     ? QString("стерео: левый %1, правый %2").arg(oct6(board_.covoxSample()), oct6(board_.covoxSampleR()))
+                                     : QString("моно (в оба канала): отсчёт %1").arg(oct6(board_.covoxSample()))) : QString())
+    + (board_.diskControllerOn() ? fddState() : QString())
+    + (board_.ide().any() ? hddState() : QString())
+    + ((board_.diskControllerOn() && args.value("fdd_log").toBool())
+           ? fddLog(std::max(4, args.value("fdd_log_count").toInt(40))) : QString()));
+}
+
+QJsonObject McpServer::tool_bk_io_log(const QJsonObject& args) {
+    if (args.contains("enable")) {
+        const bool on = args.value("enable").toBool();
+        uint16_t filt = 0;
         QString err;
-        if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
-        if (args.contains("end") && !resolveAddr(args, "end", end, err)) return fail(err);
-        if (end <= start) return fail("end должен быть больше start");
+        if (args.contains("addr") && !resolveAddr(args, "addr", filt, err)) return fail(err);
+        const size_t cap = (size_t)std::max(16, args.value("cap").toInt(2048));
+        if (on) board_.clearIoLog();
+        board_.setIoLog(on, args.value("reads").toBool(false), cap, filt);
+    }
+    const std::map<uint16_t, const char*> nm = {
+        {0177660, "kbd.status"}, {0177662, board_.bk11() ? "palette/screen" : "kbd.data"}, {0177664, "scroll"},
+        {0177706, "timer.limit"}, {0177710, "timer.count"}, {0177712, "timer.csr"},
+        {0177714, "port(джойстик)"}, {0177716, "system/speaker"}};
+    const int count = args.value("count").toInt(60);
+    const auto& log = board_.ioLog();
+    QString out = QString("Обращения к В-В (%1 в буфере; чтения: %2%3):\n")
+        .arg(log.size()).arg(board_.ioLogReads() ? "да" : "нет")
+        .arg(board_.ioLogFilter() ? QString(", фильтр %1").arg(oct6(board_.ioLogFilter())) : QString());
+    const int startIdx = std::max(0, (int)log.size() - count);
+    for (int i = startIdx; i < (int)log.size(); ++i) {
+        const auto& e = log[i];
+        auto it = nm.find(e.addr);
+        // Байтовая запись: настоящий адрес байта и сам байт («WB 177663 = 013»).
+        const uint16_t shownAddr = static_cast<uint16_t>(e.addr | (e.isByte && e.odd ? 1 : 0));
+        const QString shownVal = e.isByte ? QString("%1").arg(e.value & 0377, 3, 8, QChar('0')).rightJustified(6)
+                                          : oct6(e.value);
+        out += QString("  %1 %2 = %3   %4  стр %5:%6  PC=%7  %8\n")
+                   .arg(e.isRead ? "R " : e.isByte ? "WB" : "W ").arg(oct6(shownAddr)).arg(shownVal)
+                   .arg(it != nm.end() ? it->second : "", -16)
+                   .arg(e.line, 3).arg(e.word, 2, 10, QChar('0')).arg(oct6(e.pc))
+                   .arg(QString::fromStdString(bk::disasm(board_.memory(), e.pc).text));
+    }
+    if (log.empty())
+        out += "  (буфер пуст — включите захват: {\"enable\":true}, при нужде "
+               "{\"reads\":true,\"addr\":\"0177714\"}, затем прогоните и снимите дамп)\n";
+    return textContent(out);
+}
 
-        std::vector<uint8_t> checkpoint;
-        board_.saveStateMem(checkpoint);
-        const uint16_t joySaved = board_.joystick();
+QJsonObject McpServer::tool_bk_joy_probe(const QJsonObject& args) {
+    // Определить раскладку джойстика неизвестной игры эмпирически: для каждого
+    // бита порта — чекпоинт, выставить бит, прогнать, снять ОЗУ, откатиться.
+    // Меняющиеся ячейки и знак дельты выдают координату игрока (см. docs/joystick.md).
+    const int nbits = std::clamp(args.value("bits").toInt(8), 1, 16);
+    const int frames = std::clamp(args.value("frames").toInt(10), 1, 200);
+    const int maxCells = std::clamp(args.value("max").toInt(8), 1, 64);
+    uint16_t start = 0, end = 0037777;
+    QString err;
+    if (args.contains("start") && !resolveAddr(args, "start", start, err)) return fail(err);
+    if (args.contains("end") && !resolveAddr(args, "end", end, err)) return fail(err);
+    if (end <= start) return fail("end должен быть больше start");
 
-        // Опорный прогон без ввода — чтобы отсеять то, что меняется само по себе
-        // (таймеры, анимация, счётчики кадров).
-        auto snapshot = [&]() {
-            std::vector<uint16_t> s;
-            for (uint32_t a = start; a + 1 <= end; a += 2) s.push_back(board_.memory().peekWord((uint16_t)a));
-            return s;
-        };
-        board_.setJoystick(0);
+    std::vector<uint8_t> checkpoint;
+    board_.saveStateMem(checkpoint);
+    const uint16_t joySaved = board_.joystick();
+
+    // Опорный прогон без ввода — чтобы отсеять то, что меняется само по себе
+    // (таймеры, анимация, счётчики кадров).
+    auto snapshot = [&]() {
+        std::vector<uint16_t> s;
+        for (uint32_t a = start; a + 1 <= end; a += 2) s.push_back(board_.memory().peekWord((uint16_t)a));
+        return s;
+    };
+    board_.setJoystick(0);
+    runFrames(frames);
+    const std::vector<uint16_t> base = snapshot();
+    board_.loadStateMem(checkpoint);
+
+    QString out = QString("Проба джойстика: %1 бит(ов) x %2 кадров, диапазон %3..%4.\n"
+                          "Показаны слова, изменившиеся ИНАЧЕ, чем в прогоне без ввода.\n")
+        .arg(nbits).arg(frames).arg(oct6(start)).arg(oct6(end));
+    for (int b = 0; b < nbits; ++b) {
+        const uint16_t bit = (uint16_t)(1u << b);
+        board_.loadStateMem(checkpoint);
+        board_.setJoystick(bit);
         runFrames(frames);
-        const std::vector<uint16_t> base = snapshot();
-        board_.loadStateMem(checkpoint);
-
-        QString out = QString("Проба джойстика: %1 бит(ов) x %2 кадров, диапазон %3..%4.\n"
-                              "Показаны слова, изменившиеся ИНАЧЕ, чем в прогоне без ввода.\n")
-            .arg(nbits).arg(frames).arg(oct6(start)).arg(oct6(end));
-        for (int b = 0; b < nbits; ++b) {
-            const uint16_t bit = (uint16_t)(1u << b);
-            board_.loadStateMem(checkpoint);
-            board_.setJoystick(bit);
-            runFrames(frames);
-            const std::vector<uint16_t> cur = snapshot();
-            QString line;
-            int shown = 0;
-            for (size_t i = 0; i < cur.size() && i < base.size(); ++i) {
-                if (cur[i] == base[i]) continue;
-                if (++shown > maxCells) { line += " …"; break; }
-                const uint16_t addr = (uint16_t)(start + i * 2);
-                line += QString(" %1:%2%3").arg(oct6(addr))
-                            .arg((int16_t)(cur[i] - base[i]) >= 0 ? "+" : "")
-                            .arg((int16_t)(cur[i] - base[i]));
-            }
-            out += QString("  бит%1 (%2):%3\n").arg(b, -2).arg(oct6(bit))
-                       .arg(line.isEmpty() ? QString(" — ничего") : line);
+        const std::vector<uint16_t> cur = snapshot();
+        QString line;
+        int shown = 0;
+        for (size_t i = 0; i < cur.size() && i < base.size(); ++i) {
+            if (cur[i] == base[i]) continue;
+            if (++shown > maxCells) { line += " …"; break; }
+            const uint16_t addr = (uint16_t)(start + i * 2);
+            line += QString(" %1:%2%3").arg(oct6(addr))
+                        .arg((int16_t)(cur[i] - base[i]) >= 0 ? "+" : "")
+                        .arg((int16_t)(cur[i] - base[i]));
         }
-        board_.loadStateMem(checkpoint);
-        board_.setJoystick(joySaved);
-        out += "Состояние машины восстановлено. Малая ±дельта обычно = горизонталь, "
-               "большая = вертикаль (шаг строки экрана).";
-        return textContent(out);
+        out += QString("  бит%1 (%2):%3\n").arg(b, -2).arg(oct6(bit))
+                   .arg(line.isEmpty() ? QString(" — ничего") : line);
     }
-
-    return fail("unknown tool: " + name);
+    board_.loadStateMem(checkpoint);
+    board_.setJoystick(joySaved);
+    out += "Состояние машины восстановлено. Малая ±дельта обычно = горизонталь, "
+           "большая = вертикаль (шаг строки экрана).";
+    return textContent(out);
 }

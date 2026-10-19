@@ -1,12 +1,9 @@
 #pragma once
-#include <QWidget>
 #include <memory>
 #include "HexPageView.h"
 
 namespace bk { class Board; }
-class QScrollBar;
 class QComboBox;
-class QLabel;
 
 // Память самой БК по страницам — по образцу окна «ДОЗУ СМК-512 по страницам».
 // БК-0011М: восемь страниц ОЗУ по 16 Кбайт (код страницы в 0177716 не двоичный —
@@ -18,29 +15,23 @@ class QLabel;
 // делит её на ОЗУ 000000–037777, экран 040000–077777 и ПЗУ.
 class BkRamSource;
 
-class BkRamWidget : public QWidget {
+class BkRamWidget : public HexPageWindow {
     Q_OBJECT
 public:
     explicit BkRamWidget(bk::Board* board, QWidget* parent = nullptr);
-    ~BkRamWidget() override;
     void refresh();          // вызывается из главного цикла, троттлится внутри
+
+protected:
+    void updateStatus() override;
+    void pagePicked() override;
 
 private:
     void rebuild();          // список страниц — по машине и вставленным ПЗУ
-    void showPage(int i);
     void followPage();
-    void syncBar();
-    void updateStatus();
+    QStringList titles() const;
 
-    bk::Board*  board_;
-    std::unique_ptr<BkRamSource> src_;
-    HexPageView* view_;
-    QScrollBar* bar_;
-    QComboBox*  pageBox_;
-    QComboBox*  jumpBox_;
-    QComboBox*  follow_;
-    QLabel*     status_;
-    QLabel*     hint_;
-    QString     layout_;     // какой список страниц построен (машина + ПЗУ)
-    int tick_ = 0;
+    bk::Board*   board_;
+    BkRamSource* bsrc_;      // источник окна (принадлежит HexPageWindow)
+    QComboBox*   follow_;
+    QString      layout_;    // какой список страниц построен (машина + ПЗУ)
 };

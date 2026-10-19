@@ -1,14 +1,18 @@
 #include "HexPageView.h"
+#include "QtFormat.h"
 #include <QPainter>
 #include <QFontDatabase>
 #include <QWheelEvent>
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <algorithm>
+#include <QScrollBar>
+#include <QComboBox>
+#include <QLabel>
+#include <QSignalBlocker>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
 
-namespace {
-QString oct6(unsigned v) { return QString("%1").arg(v & 0177777, 6, 8, QChar('0')); }
-}
 
 HexPageView::HexPageView(HexPageSource* src, QWidget* parent) : QWidget(parent), src_(src) {
     mono_ = QFontDatabase::systemFont(QFontDatabase::FixedFont);
@@ -220,4 +224,96 @@ void HexPageView::keyPressEvent(QKeyEvent* e) {
     case Qt::Key_End:      setTop(rows()); return;
     default: QWidget::keyPressEvent(e);
     }
+}
+
+// ---- Окно со страницами ----------------------------------------------------
+
+HexPageWindow::HexPageWindow(std::unique_ptr<HexPageSource> src, const QString& editHint, QWidget* parent)
+    : QWidget(parent), src_(std::move(src)) {
+    view_ = new HexPageView(src_.get(), this);
+    bar_ = new QScrollBar(Qt::Vertical, this);
+    bar_->setRange(0, 0);              // точный диапазон — в syncBar()
+    bar_->setSingleStep(1);
+    pageBox_ = new QComboBox;
+    jumpBox_ = new QComboBox;
+    status_ = new QLabel;
+    hint_ = new QLabel(QString::fromUtf8("ЛКМ по слову — правка: цифры 0-7, Enter — применить и "
+                                         "перейти к следующему, Esc — отмена. ") + editHint);
+    hint_->setEnabled(false);
+
+    connect(pageBox_, QOverload<int>::of(&QComboBox::activated), this, [this](int i) {
+        pagePicked();
+        showPage(i);
+    });
+    connect(jumpBox_, QOverload<int>::of(&QComboBox::activated), this, [this](int i) {
+        if (i <= 0) return;
+        view_->setTop((i - 1) * src_->sectionBytes(view_->page()) / HexPageView::BYTES_PER_ROW);
+        syncBar();
+        jumpBox_->setCurrentIndex(0);
+    });
+    connect(view_, &HexPageView::edited, this, [this](int page, int off, uint16_t v) {
+        hint_->setText(QString::fromUtf8("записано: %1, смещение %2 = %3")
+                           .arg(pageBox_->itemText(page), oct6(static_cast<unsigned>(off)), oct6(v)));
+    });
+    connect(bar_, &QScrollBar::valueChanged, this, [this](int v) { view_->setTop(v); });
+    connect(view_, &HexPageView::topChanged, this, [this](int v) {
+        QSignalBlocker b(bar_);
+        bar_->setValue(v);
+    });
+
+    controls_ = new QHBoxLayout;
+    controls_->addWidget(pageBox_);
+    controls_->addWidget(jumpBox_);
+    controls_->addStretch(1);
+    controls_->setContentsMargins(0, 0, 0, 0);
+
+    auto* body = new QHBoxLayout;
+    body->addWidget(view_, 1);
+    body->addWidget(bar_);
+    body->setContentsMargins(0, 0, 0, 0);
+    body->setSpacing(2);
+
+    auto* lay = new QVBoxLayout(this);
+    lay->setContentsMargins(4, 4, 4, 4);
+    lay->setSpacing(3);
+    lay->addLayout(controls_);
+    lay->addWidget(status_);
+    lay->addLayout(body, 1);
+    lay->addWidget(hint_);
+}
+
+HexPageWindow::~HexPageWindow() = default;
+
+void HexPageWindow::addControl(QWidget* w) { controls_->insertWidget(controls_->count() - 1, w); }
+
+void HexPageWindow::setPageTitles(const QStringList& titles) {
+    QSignalBlocker b(pageBox_);
+    if (pageBox_->count() != titles.size()) {
+        pageBox_->clear();
+        pageBox_->addItems(titles);
+        return;
+    }
+    for (int i = 0; i < titles.size(); ++i) pageBox_->setItemText(i, titles[i]);
+}
+
+void HexPageWindow::showPage(int page) {
+    view_->setPage(page, pageBox_->count());
+    {
+        QSignalBlocker b(pageBox_);
+        pageBox_->setCurrentIndex(view_->page());
+    }
+    QSignalBlocker b(jumpBox_);
+    jumpBox_->clear();
+    jumpBox_->addItem(QString::fromUtf8("к началу…"));
+    const int p = view_->page(), sect = src_->sectionBytes(p);
+    for (int s = 0; sect > 0 && s * sect < src_->pageBytes(p); ++s) jumpBox_->addItem(src_->sectionLabel(p, s));
+    syncBar();
+    updateStatus();
+}
+
+void HexPageWindow::syncBar() {
+    QSignalBlocker b(bar_);
+    bar_->setRange(0, std::max(0, view_->rows() - view_->visibleRows()));
+    bar_->setPageStep(view_->visibleRows());
+    bar_->setValue(view_->top());
 }

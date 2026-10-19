@@ -68,71 +68,60 @@ static int runKeyTest() {
     return 0;
 }
 
-// Арбитраж КР1801ВП1-037: доступ к ДОЗУ квантован окном процессора (раз в 4 такта),
-// и команда, промахнувшаяся мимо окна, теряет 4 такта. По умолчанию ВКЛ; ключ
-// --no-arb037 возвращает «идеальную» память (тайминг статического ОЗУ).
-static bool g_arb037 = true;
-// --cpu-phase 0|1: фаза такта ЦП относительно окна 037 — на железе выпадает при
-// включении питания; 0 (по умолчанию) — `MOV (R0),R1` = 28 тактов, 1 — 24.
-static int  g_cpuPhase = 0;
-static bool g_scanline = false;   // --scanline: построчная отрисовка экрана
-// --machine bk10|bk11m (--bk10, --bk11m): эмулируемая машина. -1 — ключ не задан
-// (в GUI берётся сохранённая настройка, по умолчанию БК-0011М; в безголовом режиме
-// и MCP — БК-0011М; с .BIN в командной строке — по программе, см. Board::binTargetsBk11).
-static int  g_machine = -1;
-// --ay / --no-ay: звуковой сопроцессор AY-3-8910 на 0177714. -1 — по машине
-// (на БК-0011М включён, на БК-0010 выключен) или сохранённая настройка GUI.
-static int  g_ay = -1;
-// --2ay / --no-2ay и --covox / --no-covox: второй AY (плата «2AY») и Covox на 0177714.
-// -1 — по машине (на БК-0011М включены, на БК-0010 выключены) или настройка GUI.
-static int  g_ay2 = -1, g_covox = -1;
-// --no-scanline: выключить построчную отрисовку (на БК-0011М она по умолчанию ВКЛ).
-static bool g_noScanline = false;
-// --mstd: вставить блок МСТД (ПЗУ 330) в окно 0160000 БК-0011М.
-static bool g_mstd = false;
+// Ключи командной строки. Один разбор на все режимы: GUI, безголовый и MCP-сервер.
+// -1 — ключ не задан: в GUI берётся сохранённая настройка, иначе — значение по машине.
+struct CliOptions {
+    QString romDir;
+    // Машина и оборудование.
+    int  machine = -1;                    // 0 — БК-0010-01, 1 — БК-0011М
+    int  ay = -1, ay2 = -1, covox = -1;   // звук на 0177714
+    int  smk = -1;                        // блок расширения памяти СМК-512
+    int  aspect34 = -1;                   // GUI: неквадратный пиксель БК
+    bool mstd = false;                    // блок МСТД (ПЗУ 330) в окне 0160000 БК-0011М
+    // Арбитраж КР1801ВП1-037: доступ к ДОЗУ квантован окном процессора (раз в 4 такта),
+    // и команда, промахнувшаяся мимо окна, теряет 4 такта. --no-arb037 возвращает
+    // «идеальную» память (тайминг статического ОЗУ).
+    bool arb037 = true;
+    // Фаза такта ЦП относительно окна 037 — на железе выпадает при включении питания;
+    // 0 — `MOV (R0),R1` = 28 тактов, 1 — 24.
+    int  cpuPhase = 0;
+    int  scanline = -1;                   // построчная отрисовка: -1 — по машине (11М — вкл)
+    // Носители. Образы по умолчанию открываются ТОЛЬКО НА ЧТЕНИЕ — чужой рабочий образ
+    // портить нельзя; --disk-rw / --hdd-rw разрешают запись обратно в файл.
+    QString disk, diskB, hdd, hddB;
+    bool diskRw = false, hddRw = false;
+    int  diskSides = 0;                   // 0 — по размеру образа, 1 или 2 — принудительно
+    QString diskRom;                      // --disk-rom smk|326|<файл>: прошивка контроллера
+    bk::Board::HddController hddCtl = bk::Board::HddController::Auto;
+    // Запись видео: --video-codec, --video-size, --video-audio перекрывают настройки GUI.
+    QString video, videoCodec;
+    int  videoAspect = -1;                // 1 — кадр 1024x768, 0 — 512x256
+    int  videoAudio = -1;
+    // Режимы.
+    bool server = false, keytest = false, headless = false, color = true;
+    // Безголовый режим.
+    QString bin, shot, dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList;
+    int  frames = 0, keyCode = -1, keyFrame = 0;
 
-// Разбор значения --machine: bk10 / 0010 / bk0010 → 0; bk11m / 0011m / bk0011m → 1.
-static int parseMachine(const QString& v) {
-    const QString s = v.toLower();
-    if (s.contains("11")) return 1;
-    if (s.contains("10")) return 0;
-    std::fprintf(stderr, "Неизвестная машина «%s» (bk10 | bk11m)\n", qPrintable(v));
-    return -1;
-}
-// --smk / --no-smk: блок расширения памяти СМК-512. -1 — ключ не задан (в GUI
-// берётся сохранённая настройка, по умолчанию ВКЛ; в безголовом режиме и в MCP — ВКЛ).
-static int  g_smk = -1;
-// --aspect34 / --no-aspect34: неквадратный пиксель БК (блок 4x3 точки хоста, кадр
-// 1024x768). -1 — ключ не задан, в GUI берётся сохранённая настройка (по умолчанию
-// ВКЛ). На безголовый режим не влияет: --shot пишет буфер как есть, 512x256.
-static int  g_aspect34 = -1;
-// --disk <образ>: вставить дискету в привод 0 и передать управление автозагрузчику
-// в ПЗУ контроллера. По умолчанию образ открывается ТОЛЬКО НА ЧТЕНИЕ — чужой
-// рабочий образ портить нельзя; --disk-rw разрешает запись обратно в файл.
-static QString g_disk, g_diskB;
-static bool    g_diskRw = false;
-static int     g_diskSides = 0;      // 0 — по размеру образа, 1 или 2 — принудительно
-static QString g_diskRom;            // --disk-rom smk|326|<файл>: прошивка контроллера
-// --hdd / --hdd-b <образ.hdi>: винчестер (master / slave) на плате СМК-512. Как и
-// дискета, по умолчанию только на чтение; --hdd-rw пишет изменения в файл.
-// --video <файл.avi>: запись экрана в видео с первого кадра (GUI и безголовый режим);
-// --video-codec, --video-size перекрывают настройки на этот запуск.
-static QString g_video, g_videoCodec;
-static int     g_videoAspect = -1;          // 1 — кадр 1024x768, 0 — 512x256, -1 — настройка
-static int     g_videoAudio = -1;           // --video-audio / --no-video-audio; -1 — настройка (вкл)
-static QString g_hdd, g_hddB;
-static bool    g_hddRw = false;
-// --hdd-ctl auto|smk|samara: контроллер винчестера (auto — по разметке образа).
-static bk::Board::HddController g_hddCtl = bk::Board::HddController::Auto;
-
-static bool parseHddCtl(const QString& s, bk::Board::HddController& out) {
-    const QString v = s.toLower();
-    if (v == "auto") out = bk::Board::HddController::Auto;
-    else if (v == "smk" || v == "smk512") out = bk::Board::HddController::Smk;
-    else if (v == "samara" || v == "самара") out = bk::Board::HddController::Samara;
-    else return false;
-    return true;
-}
+    bk::Board::Setup setup() const {      // конфигурация платы для безголового режима и MCP
+        bk::Board::Setup st;
+        st.machine = machine == 0 ? bk::Machine::Bk0010 : bk::Machine::Bk0011m;
+        st.ay = ay; st.ay2 = ay2; st.covox = covox;
+        st.scanline = scanline;
+        st.smk = smk != 0;                // по умолчанию плата стоит
+        st.mstd = mstd; st.arb037 = arb037; st.cpuPhase = cpuPhase;
+        st.diskRom = diskRom.toStdString();
+        st.hddCtl = hddCtl;
+        return st;
+    }
+    bk::Board::Media media() const {
+        bk::Board::Media m;
+        m.disk = disk.toStdString(); m.diskB = diskB.toStdString();
+        m.hdd = hdd.toStdString(); m.hddB = hddB.toStdString();
+        m.diskRw = diskRw; m.hddRw = hddRw; m.diskSides = diskSides;
+        return m;
+    }
+};
 
 // Попадёт ли образ на контроллер «Самара» (ему плата СМК-512 не нужна).
 static bool hddOnSamara(bk::Board::HddController ctl, const std::string& path) {
@@ -140,36 +129,183 @@ static bool hddOnSamara(bk::Board::HddController ctl, const std::string& path) {
     return bk::hdiLayout(path) == bk::HddMap::Kind::Samara;
 }
 
+// 0 — разобрано; иначе код выхода (сообщение уже напечатано).
+static int parseArgs(const QStringList& args, CliOptions& o) {
+    auto fail = [](const char* msg) { std::fprintf(stderr, "%s\n", msg); return 2; };
+    for (int i = 1; i < args.size(); ++i) {
+        const QString& a = args[i];
+        const bool hasVal = i + 1 < args.size();
+        if (a == "--server") o.server = true;
+        else if (a == "--keytest") o.keytest = true;
+        else if (a == "--roms" && hasVal) o.romDir = args[++i];
+        else if (a == "--frames" && hasVal) { o.frames = args[++i].toInt(); o.headless = true; }
+        else if (a == "--shot" && hasVal) o.shot = args[++i];
+        else if (a == "--dbgshot" && hasVal) { o.dbgShot = args[++i]; o.headless = true; }
+        else if (a == "--memvis" && hasVal) { o.memvisShot = args[++i]; o.headless = true; }
+        else if (a == "--hotpath" && hasVal) { o.hpShot = args[++i]; o.headless = true; }
+        else if (a == "--callgraph" && hasVal) { o.caShot = args[++i]; o.headless = true; }
+        else if (a == "--flame" && hasVal) { o.faShot = args[++i]; o.headless = true; }
+        else if (a == "--flamechart" && hasVal) { o.fcShot = args[++i]; o.headless = true; }
+        else if (a == "--hotchart" && hasVal) { o.hcShot = args[++i]; o.headless = true; }
+        else if (a == "--type" && hasVal) { o.typeStr = args[++i]; o.headless = true; }
+        else if (a == "--keys" && hasVal) { o.keysList = args[++i]; o.headless = true; }
+        else if (a == "--key" && hasVal) o.keyCode = args[++i].toInt(nullptr, 0);
+        else if (a == "--keyframe" && hasVal) o.keyFrame = args[++i].toInt();
+        else if (a == "--mono") o.color = false;
+        else if (a == "--scanline") o.scanline = 1;
+        else if (a == "--no-scanline") o.scanline = 0;
+        else if (a == "--machine" && hasVal) {
+            bk::Machine mm;
+            if (bk::Board::parseMachine(args[++i].toLower().toStdString(), mm)) o.machine = mm == bk::Machine::Bk0011m;
+            else std::fprintf(stderr, "Неизвестная машина «%s» (bk10 | bk11m)\n", qPrintable(args[i]));
+        }
+        else if (a == "--bk10") o.machine = 0;
+        else if (a == "--bk11m") o.machine = 1;
+        else if (a == "--ay") o.ay = 1;
+        else if (a == "--no-ay") o.ay = 0;
+        else if (a == "--2ay") o.ay2 = 1;
+        else if (a == "--no-2ay") o.ay2 = 0;
+        else if (a == "--covox") o.covox = 1;
+        else if (a == "--no-covox") o.covox = 0;
+        else if (a == "--smk") o.smk = 1;
+        else if (a == "--no-smk") o.smk = 0;
+        else if (a == "--mstd") o.mstd = true;
+        else if (a == "--aspect34") o.aspect34 = 1;
+        else if (a == "--no-aspect34") o.aspect34 = 0;
+        else if (a == "--no-arb037") o.arb037 = false;
+        else if (a == "--cpu-phase" && hasVal) o.cpuPhase = args[++i].toInt() & 1;
+        else if (a == "--disk" && hasVal) o.disk = args[++i];
+        else if (a == "--disk-b" && hasVal) o.diskB = args[++i];
+        else if (a == "--disk-rw") o.diskRw = true;
+        else if (a == "--disk-sides" && hasVal) {
+            o.diskSides = args[++i].toInt();
+            if (o.diskSides < 0 || o.diskSides > 2) return fail("--disk-sides: ожидается 1 или 2");
+        }
+        else if (a == "--disk-rom" && hasVal) {
+            const QString v = args[++i];
+            o.diskRom = (v == "smk") ? "smk512.rom" : (v == "326") ? "disk326.rom" : v;
+        }
+        else if (a == "--hdd" && hasVal) o.hdd = args[++i];
+        else if (a == "--hdd-b" && hasVal) o.hddB = args[++i];
+        else if (a == "--hdd-rw") o.hddRw = true;
+        else if (a == "--hdd-ctl" && hasVal) {
+            if (!bk::Board::parseHddController(args[++i].toLower().toStdString(), o.hddCtl))
+                return fail("--hdd-ctl: ожидается auto, smk или samara");
+        }
+        else if (a == "--video" && hasVal) o.video = args[++i];
+        else if (a == "--video-codec" && hasVal) {
+            o.videoCodec = args[++i].toLower();
+            if (o.videoCodec == "mp4" || o.videoCodec == "h.264") o.videoCodec = "h264";
+            if (o.videoCodec == "avi") o.videoCodec = "zmbv";
+            const std::string why = bk::videoCodecUnavailableReason(o.videoCodec.toStdString());
+            if (!why.empty()) {
+                std::fprintf(stderr, "--video-codec %s: %s\n", qPrintable(o.videoCodec), why.c_str());
+                return 2;
+            }
+        }
+        else if (a == "--video-audio") o.videoAudio = 1;
+        else if (a == "--no-video-audio") o.videoAudio = 0;
+        else if (a == "--video-size" && hasVal) {
+            const QString v = args[++i].toLower();
+            if (v == "1024x768" || v == "4:3") o.videoAspect = 1;
+            else if (v == "512x256" || v == "raw") o.videoAspect = 0;
+            else return fail("--video-size: ожидается 1024x768 или 512x256");
+        }
+        // Позиционный аргумент: .bkd и .img (в любом регистре) — образ дискеты, .hdi —
+        // винчестер, всё остальное — программа в формате .BIN.
+        else if (!a.startsWith("--")) {
+            if (bk::Fdd::looksLikeImage(a.toStdString())) o.disk = a;
+            else if (bk::looksLikeHdi(a.toStdString())) o.hdd = a;
+            else o.bin = a;
+        }
+        else std::fprintf(stderr, "Неизвестный ключ %s (список — --help)\n", qPrintable(a));
+    }
+    return 0;
+}
+
+// Что из ключей следует для машины и платы: машина по .BIN, плата СМК для дискеты и
+// винчестера, кодек по расширению файла видео. smkSaved — стоит ли плата по настройке
+// GUI (в безголовом режиме и MCP она стоит всегда). 0 — порядок, иначе код выхода.
+static int resolveOptions(CliOptions& o) {
+    const bool gui = !o.headless && !o.server;
+    // Машина по умолчанию — БК-0011М. Но почти все .BIN — программы для БК-0010-01,
+    // поэтому без явного --machine машину выбирает сама программа: пишет в регистр
+    // 0177662 (палитра и экран 11М) — БК-0011М, иначе БК-0010-01 (сохранённую
+    // настройку GUI это не меняет).
+    if (o.machine < 0 && !o.server && !o.bin.isEmpty() && o.disk.isEmpty()) {
+        o.machine = bk::Board::binTargetsBk11(o.bin.toStdString()) ? 1 : 0;
+        std::fprintf(stderr, o.machine
+            ? ".BIN: программа для БК-0011М (палитра 0177662 или вызовы БОС) — машина БК-0011М\n"
+            : ".BIN: машина БК-0010-01 (для БК-0011М — ключ --machine bk11m)\n");
+    }
+    // Какая машина реально запустится: ключ, иначе сохранённая настройка GUI, иначе 11М.
+    const int effMachine = o.machine >= 0 ? o.machine : gui ? QSettings().value("machine", 1).toInt() : 1;
+    // Дискета почти всегда подразумевает и блок расширения памяти: у голой БК-0010-01
+    // под ядро остаётся около 16 Кбайт ОЗУ, и большинство систем без платы просто
+    // некуда грузить. Плата стоит по умолчанию, но в GUI могла быть снята
+    // переключателем — тогда образ включает её сам на этот запуск, если ключ не задан
+    // явно; --no-smk по-прежнему сильнее. Сохранённую настройку это не меняет.
+    const bool smkSaved = !gui || QSettings().value(effMachine == 1 ? "smk512_11m" : "smk512", true).toBool();
+    if (!o.disk.isEmpty() && o.smk < 0 && effMachine == 0 && !smkSaved) {
+        o.smk = 1;
+        std::fprintf(stderr, "Дискета: включён блок расширения памяти СМК-512 (отключить — ключом --no-smk)\n");
+    }
+    // Винчестер СМК — узел платы СМК-512: без неё регистров НЖМД на шине нет. У «Самары»
+    // своя плата, а драйвер — в прошивке КНГМД.
+    const QString hddFirst = o.hdd.isEmpty() ? o.hddB : o.hdd;
+    if (!hddFirst.isEmpty() && hddOnSamara(o.hddCtl, hddFirst.toStdString())) {
+        std::fprintf(stderr, "Винчестер: контроллер «Самара» (0177620–0177656, прошивка samara.rom)\n");
+        // На БК-0010 загрузчику нужна память на месте Бейсика — как и дискете.
+        if (effMachine == 0 && o.smk < 0 && !smkSaved) {
+            o.smk = 1;
+            std::fprintf(stderr, "Винчестер: включён блок расширения памяти СМК-512 (отключить — ключом --no-smk)\n");
+        }
+    } else if (!hddFirst.isEmpty()) {
+        if (o.smk == 0) {
+            std::fprintf(stderr, "Винчестер подключается к плате СМК-512 — уберите --no-smk\n");
+            return 2;
+        }
+        if (o.smk < 0 && !smkSaved) std::fprintf(stderr, "Винчестер: включён блок расширения памяти СМК-512\n");
+        o.smk = 1;
+    }
+    // Кодек по расширению файла --video, если не задан ключом: .mp4 — H.264 + AAC.
+    if (!o.video.isEmpty() && o.videoCodec.isEmpty()) {
+        if (const bk::VideoCodecInfo* c = bk::videoCodecForPath(o.video.toStdString())) {
+            const std::string why = bk::videoCodecUnavailableReason(c->name);
+            if (!why.empty()) {
+                std::fprintf(stderr, "--video %s: %s\n", qPrintable(o.video), why.c_str());
+                return 2;
+            }
+            o.videoCodec = QString::fromStdString(c->name);
+        }
+    }
+    return 0;
+}
+
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
 // and save the screen (rendered from the CPU-side pixel buffer, no GL needed).
-static int runHeadless(const QString& romDir, const QString& bin,
-                       int frames, bool color, const QString& shot,
-                       int keyCode, int keyFrame, const QString& dbgShot,
-                       const QString& memvisShot, const QString& hpShot,
-                       const QString& caShot, const QString& faShot, const QString& fcShot,
-                       const QString& hcShot,
-                       const QString& typeStr, const QString& keysList) {
+static int runHeadless(const CliOptions& o) {
+    const QString& bin = o.bin;
+    const int frames = o.frames;
+    const QString& shot = o.shot;
+    const QString& dbgShot = o.dbgShot;
+    const QString& memvisShot = o.memvisShot;
+    const QString& hpShot = o.hpShot;
+    const QString& caShot = o.caShot;
+    const QString& faShot = o.faShot;
+    const QString& fcShot = o.fcShot;
+    const QString& hcShot = o.hcShot;
     // Parse "frame:code,frame:code,..." into precisely-timed key injections.
     std::vector<std::pair<int,int>> keys;
-    for (const QString& part : keysList.split(',', Qt::SkipEmptyParts)) {
+    for (const QString& part : o.keysList.split(',', Qt::SkipEmptyParts)) {
         const auto fc = part.split(':');
         if (fc.size() == 2) keys.push_back({fc[0].toInt(), fc[1].toInt(nullptr, 0)});
     }
     bk::Board board;
-    board.setMachine(g_machine == 0 ? bk::Machine::Bk0010 : bk::Machine::Bk0011m);
-    if (g_ay >= 0) board.setAy(g_ay != 0);
-    if (g_ay2 >= 0) board.setAy2(g_ay2 != 0);
-    if (g_covox >= 0) board.setCovox(g_covox != 0);
-    board.setMstd(g_mstd);
-    board.setArbitration(g_arb037);
-    board.setCpuPhase(g_cpuPhase);
-    board.setScanlineRender((g_scanline || board.bk11()) && !g_noScanline);
-    board.setSmk512(g_smk != 0);              // по умолчанию плата стоит
-    if (!board.loadRoms(romDir.toStdString())) {
-        std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(romDir));
+    if (!board.powerOn(o.setup(), o.romDir.toStdString())) {
+        std::fprintf(stderr, "headless: failed to load ROMs from %s\n", qPrintable(o.romDir));
         return 2;
     }
-    board.reset();
     if (!memvisShot.isEmpty() || !hpShot.isEmpty() || !caShot.isEmpty() || !hcShot.isEmpty()
         || !dbgShot.isEmpty() || !faShot.isEmpty() || !fcShot.isEmpty())
         board.trace().setEnabled(true);
@@ -177,53 +313,38 @@ static int runHeadless(const QString& romDir, const QString& bin,
     if (!fcShot.isEmpty()) board.trace().setSpansEnabled(true);
     // Let the monitor ROM initialise (vectors, stack, display driver) before
     // jumping into a game.
-    for (int i = 0; i < 25; ++i) board.runFrame();
-    // Дискета: вставляем после того, как поднялся монитор, и сразу отдаём
-    // управление автозагрузчику ПЗУ контроллера — как «160000G» в мониторе.
-    if (!g_disk.isEmpty()) {
-        if (!g_diskRom.isEmpty()) board.setDiskRom(g_diskRom.toStdString());
-        if (!g_diskB.isEmpty())
-            board.attachDisk(1, g_diskB.toStdString(), !g_diskRw, g_diskSides);
-        if (!board.attachDisk(0, g_disk.toStdString(), !g_diskRw, g_diskSides)) {
-            std::fprintf(stderr, "headless: не удалось вставить образ %s\n", qPrintable(g_disk));
-            return 6;
-        }
-        board.bootFromDisk();
-        std::printf("headless: загрузка с диска %s\n", qPrintable(g_disk));
+    board.ensureMonitorBooted();
+    // Дискета — автозагрузчику ПЗУ контроллера, как «160000G» в мониторе; винчестер —
+    // прошивке контроллера, перехватывающей пуск.
+    std::string err;
+    if (!board.bootMedia(o.media(), err)) {
+        std::fprintf(stderr, "headless: %s\n", err.c_str());
+        return 6;
     }
-    // Винчестер: прошивка СМК перехватывает пуск и грузит систему с него сама, поэтому
-    // после подключения образа — включение питания.
-    if (!g_hdd.isEmpty() || !g_hddB.isEmpty()) {
-        if (!g_diskRom.isEmpty()) board.setDiskRom(g_diskRom.toStdString());
-        board.setHddController(g_hddCtl);
-        if (!g_hddB.isEmpty() && !board.attachHdd(1, g_hddB.toStdString(), !g_hddRw)) return 7;
-        if (!g_hdd.isEmpty() && !board.attachHdd(0, g_hdd.toStdString(), !g_hddRw)) return 7;
-        if (board.bootFromHdd())
-            std::printf("headless: загрузка с винчестера %s\n", qPrintable(g_hdd.isEmpty() ? g_hddB : g_hdd));
-        else
-            std::fprintf(stderr, "headless: винчестер подключён, но прошивка контроллера не "
-                                 "перехватывает пуск (--disk-rom?) — загрузки с него не будет\n");
-    }
+    if (!err.empty()) std::fprintf(stderr, "headless: %s\n", err.c_str());
+    else if (!o.disk.isEmpty()) std::printf("headless: загрузка с диска %s\n", qPrintable(o.disk));
+    else if (!o.hdd.isEmpty() || !o.hddB.isEmpty())
+        std::printf("headless: загрузка с винчестера %s\n", qPrintable(o.hdd.isEmpty() ? o.hddB : o.hdd));
     if (!bin.isEmpty() && !board.loadBin(bin.toStdString(), true)) {
         std::fprintf(stderr, "headless: failed to load bin %s\n", qPrintable(bin));
         return 3;
     }
-    board.screen().setColorMode(color);
+    board.screen().setColorMode(o.color);
     // --video: запись с первого кадра основного прогона (загрузка уже позади).
     bk::VideoCapture video;
     std::vector<int16_t> videoAudio;
-    if (!g_video.isEmpty()) {
+    if (!o.video.isEmpty()) {
         bk::VideoCapture::Options vo;
-        if (!g_videoCodec.isEmpty()) vo.codec = g_videoCodec.toStdString();
-        vo.aspect43 = g_videoAspect != 0;
-        if (g_videoAudio != 0) {
+        if (!o.videoCodec.isEmpty()) vo.codec = o.videoCodec.toStdString();
+        vo.aspect43 = o.videoAspect != 0;
+        if (o.videoAudio != 0) {
             vo.audioRate = board.sound().sampleRate();
             board.sound().setCapture(true);       // отвод звука — с начала первого кадра записи
         }
         std::string err;
-        if (!video.start(g_video.toStdString(), vo, bk::Screen::TEX_W, bk::Screen::TEX_H,
+        if (!video.start(o.video.toStdString(), vo, bk::Screen::TEX_W, bk::Screen::TEX_H,
                          static_cast<uint32_t>(board.cpuFreqHz()), static_cast<uint32_t>(board.ticksPerFrame()), &err)) {
-            std::fprintf(stderr, "headless: видео %s не открыто: %s\n", qPrintable(g_video), err.c_str());
+            std::fprintf(stderr, "headless: видео %s не открыто: %s\n", qPrintable(o.video), err.c_str());
             return 8;
         }
     }
@@ -231,10 +352,10 @@ static int runHeadless(const QString& romDir, const QString& bin,
     // keyboard queue the GUI uses (verifies the key -> register -> ISR -> echo path).
     // Текст — в коды КОИ-7 с переключением РУС/ЛАТ, как bk_type в MCP.
     bool cyr = false;
-    const std::vector<uint16_t> typeCodes = bk::bkEncodeText(typeStr.toStdString(), cyr);
+    const std::vector<uint16_t> typeCodes = bk::bkEncodeText(o.typeStr.toStdString(), cyr);
     size_t typeIdx = 0;
     for (int i = 0; i < frames; ++i) {
-        if (keyCode >= 0 && i == keyFrame) board.pressKey(static_cast<uint16_t>(keyCode));
+        if (o.keyCode >= 0 && i == o.keyFrame) board.pressKey(static_cast<uint16_t>(o.keyCode));
         for (const auto& kv : keys) if (kv.first == i) board.pressKey(static_cast<uint16_t>(kv.second));
         if (i >= 60 && typeIdx < typeCodes.size() && !board.keyReady())
             board.pressKey(typeCodes[typeIdx++]);
@@ -249,7 +370,7 @@ static int runHeadless(const QString& romDir, const QString& bin,
     if (video.active()) {
         const uint64_t n = video.frames();
         if (video.stop())
-            std::printf("headless: видео %s — %llu кадров, %.2f с\n", qPrintable(g_video),
+            std::printf("headless: видео %s — %llu кадров, %.2f с\n", qPrintable(o.video),
                         static_cast<unsigned long long>(n), double(n) * board.ticksPerFrame() / board.cpuFreqHz());
         else
             std::fprintf(stderr, "headless: видео не записано: %s\n", video.error().c_str());
@@ -536,8 +657,7 @@ static void printHelp(const char* prog) {
         "\n"
         "Прочее:\n"
         "  --server               MCP-сервер (JSON-RPC 2.0 по stdio) для отладки через Claude;\n"
-        "                         понимает --roms, --machine, --bk10/--bk11m, --ay/--no-ay,\n"
-        "                         --smk/--no-smk, --disk, --disk-rw, --hdd, --hdd-rw, --hdd-ctl\n"
+        "                         понимает ключи машины, дисковода, винчестера и тайминга\n"
         "                         и позиционный образ диска или винчестера\n"
         "  --keytest              самопроверка перевода клавиш Qt в коды БК\n"
         "  -h, --help             эта справка\n"
@@ -555,59 +675,27 @@ int main(int argc, char** argv) {
     QCoreApplication::setOrganizationName("bk0010-emulator");
     QCoreApplication::setApplicationName("bk0010-emulator");
 
-    for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i];
-        if (a == "--help" || a == "-h") { printHelp(argv[0]); return 0; }
-    }
+    QStringList args;
+    for (int i = 0; i < argc; ++i) args << QString::fromLocal8Bit(argv[i]);
+    if (args.contains("--help") || args.contains("-h")) { printHelp(argv[0]); return 0; }
+
+    CliOptions o;
+    // ROM directory: --roms <dir>, else BK_ROM_DIR env, else compiled default.
+#ifdef BK_DEFAULT_ROM_DIR
+    o.romDir = BK_DEFAULT_ROM_DIR;
+#endif
+    if (qEnvironmentVariableIsSet("BK_ROM_DIR")) o.romDir = qEnvironmentVariable("BK_ROM_DIR");
+    if (const int rc = parseArgs(args, o)) return rc;
 
     // MCP server mode: a headless JSON-RPC-over-stdio server for debugging BK
     // programs from an MCP client (e.g. Claude Code). Handled before the GUI so
     // no display/OpenGL is needed; offscreen QGuiApplication enables PNG output.
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--server") {
-            qputenv("QT_QPA_PLATFORM", "offscreen");
-            QGuiApplication app(argc, argv);
-            QString romDir;
-#ifdef BK_DEFAULT_ROM_DIR
-            romDir = BK_DEFAULT_ROM_DIR;
-#endif
-            if (qEnvironmentVariableIsSet("BK_ROM_DIR")) romDir = qEnvironmentVariable("BK_ROM_DIR");
-            bool smk = true;               // СМК-512 по умолчанию стоит
-            std::string disk; bool diskRw = false;
-            std::string hdd; bool hddRw = false;
-            bk::Board::HddController hddCtl = bk::Board::HddController::Auto;
-            int machine = 1, ay = -1, ay2 = -1, covox = -1;   // по умолчанию — БК-0011М
-            for (int j = 1; j < argc; ++j) {
-                if (std::string(argv[j]) == "--machine" && j + 1 < argc) {
-                    const int m = parseMachine(QString::fromLocal8Bit(argv[j + 1]));
-                    if (m >= 0) machine = m;     // опечатка — машина по умолчанию, как в GUI
-                }
-                else if (std::string(argv[j]) == "--bk11m") machine = 1;
-                else if (std::string(argv[j]) == "--bk10") machine = 0;
-                else if (std::string(argv[j]) == "--ay") ay = 1;
-                else if (std::string(argv[j]) == "--no-ay") ay = 0;
-                else if (std::string(argv[j]) == "--2ay") ay2 = 1;
-                else if (std::string(argv[j]) == "--no-2ay") ay2 = 0;
-                else if (std::string(argv[j]) == "--covox") covox = 1;
-                else if (std::string(argv[j]) == "--no-covox") covox = 0;
-                if (std::string(argv[j]) == "--roms" && j + 1 < argc) romDir = argv[j + 1];
-                else if (std::string(argv[j]) == "--smk") smk = true;
-                else if (std::string(argv[j]) == "--no-smk") smk = false;
-                else if (std::string(argv[j]) == "--disk" && j + 1 < argc) disk = argv[j + 1];
-                else if (argv[j][0] != '-' && bk::Fdd::looksLikeImage(argv[j])) disk = argv[j];
-                else if (std::string(argv[j]) == "--disk-rw") diskRw = true;
-                else if (std::string(argv[j]) == "--hdd" && j + 1 < argc) hdd = argv[j + 1];
-                else if (argv[j][0] != '-' && bk::looksLikeHdi(argv[j])) hdd = argv[j];
-                else if (std::string(argv[j]) == "--hdd-rw") hddRw = true;
-                else if (std::string(argv[j]) == "--hdd-ctl" && j + 1 < argc)
-                    parseHddCtl(QString::fromLocal8Bit(argv[j + 1]), hddCtl);
-            }
-            // Винчестер СМК — узел платы СМК-512; «Самаре» плата не нужна.
-            if (!hdd.empty() && !hddOnSamara(hddCtl, hdd)) smk = true;
-            McpServer server(romDir.toStdString(), smk, disk, diskRw, machine, ay, hdd, hddRw, ay2, covox,
-                             hddCtl);
-            return server.run();
-        }
+    if (o.server) {
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+        QGuiApplication app(argc, argv);
+        if (const int rc = resolveOptions(o)) return rc;
+        McpServer server(o.romDir.toStdString(), o.setup(), o.media());
+        return server.run();
     }
 
     // NVIDIA under a Wayland session: Qt6's default EGL/GLES path fails to create
@@ -634,175 +722,26 @@ int main(int argc, char** argv) {
     fmt.setDepthBufferSize(0);
     QSurfaceFormat::setDefaultFormat(fmt);
 
-    // ROM directory: --roms <dir>, else BK_ROM_DIR env, else compiled default.
-    QString romDir;
-#ifdef BK_DEFAULT_ROM_DIR
-    romDir = BK_DEFAULT_ROM_DIR;
-#endif
-    if (qEnvironmentVariableIsSet("BK_ROM_DIR"))
-        romDir = qEnvironmentVariable("BK_ROM_DIR");
+    if (o.keytest) return runKeyTest();
+    if (const int rc = resolveOptions(o)) return rc;
+    if (o.headless) return runHeadless(o);
 
-    QString binToLoad, shot, dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList;
-    int frames = 0, keyCode = -1, keyFrame = 0;
-    bool color = true, headless = false;
-    const QStringList args = app.arguments();
-    for (int i = 1; i < args.size(); ++i) {
-        if (args[i] == "--roms" && i + 1 < args.size()) romDir = args[++i];
-        else if (args[i] == "--frames" && i + 1 < args.size()) { frames = args[++i].toInt(); headless = true; }
-        else if (args[i] == "--shot" && i + 1 < args.size()) shot = args[++i];
-        else if (args[i] == "--dbgshot" && i + 1 < args.size()) { dbgShot = args[++i]; headless = true; }
-        else if (args[i] == "--memvis" && i + 1 < args.size()) { memvisShot = args[++i]; headless = true; }
-        else if (args[i] == "--hotpath" && i + 1 < args.size()) { hpShot = args[++i]; headless = true; }
-        else if (args[i] == "--callgraph" && i + 1 < args.size()) { caShot = args[++i]; headless = true; }
-        else if (args[i] == "--flame" && i + 1 < args.size()) { faShot = args[++i]; headless = true; }
-        else if (args[i] == "--flamechart" && i + 1 < args.size()) { fcShot = args[++i]; headless = true; }
-        else if (args[i] == "--hotchart" && i + 1 < args.size()) { hcShot = args[++i]; headless = true; }
-        else if (args[i] == "--mono") color = false;
-        else if (args[i] == "--scanline") g_scanline = true;
-        else if (args[i] == "--no-scanline") g_noScanline = true;
-        else if (args[i] == "--machine" && i + 1 < args.size()) g_machine = parseMachine(args[++i]);
-        else if (args[i] == "--bk10") g_machine = 0;
-        else if (args[i] == "--bk11m") g_machine = 1;
-        else if (args[i] == "--ay") g_ay = 1;
-        else if (args[i] == "--no-ay") g_ay = 0;
-        else if (args[i] == "--2ay") g_ay2 = 1;
-        else if (args[i] == "--no-2ay") g_ay2 = 0;
-        else if (args[i] == "--covox") g_covox = 1;
-        else if (args[i] == "--no-covox") g_covox = 0;
-        else if (args[i] == "--mstd") g_mstd = true;
-        else if (args[i] == "--no-arb037") g_arb037 = false;
-        else if (args[i] == "--cpu-phase" && i + 1 < args.size()) g_cpuPhase = args[++i].toInt() & 1;
-        else if (args[i] == "--disk" && i + 1 < args.size()) g_disk = args[++i];
-        else if (args[i] == "--disk-b" && i + 1 < args.size()) g_diskB = args[++i];
-        else if (args[i] == "--disk-sides" && i + 1 < args.size()) g_diskSides = args[++i].toInt();
-        else if (args[i] == "--disk-rom" && i + 1 < args.size()) {
-            const QString v = args[++i];
-            g_diskRom = (v == "smk") ? "smk512.rom" : (v == "326") ? "disk326.rom" : v;
-        }
-        else if (args[i] == "--disk-rw") g_diskRw = true;
-        else if (args[i] == "--hdd" && i + 1 < args.size()) g_hdd = args[++i];
-        else if (args[i] == "--hdd-b" && i + 1 < args.size()) g_hddB = args[++i];
-        else if (args[i] == "--hdd-rw") g_hddRw = true;
-        else if (args[i] == "--video" && i + 1 < args.size()) g_video = args[++i];
-        else if (args[i] == "--video-codec" && i + 1 < args.size()) {
-            g_videoCodec = args[++i].toLower();
-            if (g_videoCodec == "mp4" || g_videoCodec == "h.264") g_videoCodec = "h264";
-            if (g_videoCodec == "avi") g_videoCodec = "zmbv";
-            const std::string why = bk::videoCodecUnavailableReason(g_videoCodec.toStdString());
-            if (!why.empty()) { std::fprintf(stderr, "--video-codec %s: %s\n", qPrintable(g_videoCodec), why.c_str()); return 2; }
-        }
-        else if (args[i] == "--video-audio") g_videoAudio = 1;
-        else if (args[i] == "--no-video-audio") g_videoAudio = 0;
-        else if (args[i] == "--video-size" && i + 1 < args.size()) {
-            const QString v = args[++i].toLower();
-            if (v == "1024x768" || v == "4:3") g_videoAspect = 1;
-            else if (v == "512x256" || v == "raw") g_videoAspect = 0;
-            else { std::fprintf(stderr, "--video-size: ожидается 1024x768 или 512x256\n"); return 2; }
-        }
-        else if (args[i] == "--hdd-ctl" && i + 1 < args.size()) {
-            if (!parseHddCtl(args[++i], g_hddCtl)) {
-                std::fprintf(stderr, "--hdd-ctl: ожидается auto, smk или samara\n");
-                return 2;
-            }
-        }
-        else if (args[i] == "--smk") g_smk = 1;
-        else if (args[i] == "--no-smk") g_smk = 0;
-        else if (args[i] == "--aspect34") g_aspect34 = 1;
-        else if (args[i] == "--no-aspect34") g_aspect34 = 0;
-        else if (args[i] == "--key" && i + 1 < args.size()) keyCode = args[++i].toInt(nullptr, 0);
-        else if (args[i] == "--keyframe" && i + 1 < args.size()) keyFrame = args[++i].toInt();
-        else if (args[i] == "--type" && i + 1 < args.size()) { typeStr = args[++i]; headless = true; }
-        else if (args[i] == "--keys" && i + 1 < args.size()) { keysList = args[++i]; headless = true; }
-        // Позиционный аргумент: .bkd и .img (в любом регистре) — это образ диска,
-        // всё остальное — игра в формате .BIN.
-        else if (!args[i].startsWith("--")) {
-            if (bk::Fdd::looksLikeImage(args[i].toStdString())) g_disk = args[i];
-            else if (bk::looksLikeHdi(args[i].toStdString())) g_hdd = args[i];
-            else binToLoad = args[i];
-        }
-    }
-
-    // Машина по умолчанию — БК-0011М. Но почти все .BIN — программы для БК-0010-01,
-    // поэтому без явного --machine машину выбирает сама программа: пишет в регистр
-    // 0177662 (палитра и экран 11М) — БК-0011М, иначе БК-0010-01 (сохранённую
-    // настройку GUI это не меняет).
-    if (g_machine < 0 && !binToLoad.isEmpty() && g_disk.isEmpty()) {
-        g_machine = bk::Board::binTargetsBk11(binToLoad.toStdString()) ? 1 : 0;
-        std::fprintf(stderr, g_machine
-            ? ".BIN: программа для БК-0011М (палитра 0177662 или вызовы БОС) — машина БК-0011М\n"
-            : ".BIN: машина БК-0010-01 (для БК-0011М — ключ --machine bk11m)\n");
-    }
-    // Какая машина реально запустится: ключ, иначе сохранённая настройка GUI, иначе 11М.
-    const int effMachine = g_machine >= 0 ? g_machine
-                         : headless ? 1 : QSettings().value("machine", 1).toInt();
-
-    // Дискета почти всегда подразумевает и блок расширения памяти: у голой
-    // БК-0010-01 под ядро остаётся около 16 Кбайт ОЗУ, и большинство систем без
-    // платы просто некуда грузить. Плата стоит по умолчанию, но в GUI могла быть
-    // снята переключателем — тогда образ включает её сам на этот запуск, если ключ не
-    // задан явно; --no-smk по-прежнему сильнее. Сохранённую настройку это не меняет.
-    const bool smkSaved = headless || QSettings().value(effMachine == 1 ? "smk512_11m" : "smk512", true).toBool();
-    if (!g_disk.isEmpty() && g_smk < 0 && effMachine == 0 && !smkSaved) {
-        g_smk = 1;
-        std::fprintf(stderr, "Дискета: включён блок расширения памяти СМК-512 "
-                             "(отключить — ключом --no-smk)\n");
-    }
-
-    // Кодек по расширению файла --video, если не задан ключом: .mp4 — H.264 + AAC.
-    if (!g_video.isEmpty() && g_videoCodec.isEmpty()) {
-        if (const bk::VideoCodecInfo* c = bk::videoCodecForPath(g_video.toStdString())) {
-            const std::string why = bk::videoCodecUnavailableReason(c->name);
-            if (!why.empty()) {
-                std::fprintf(stderr, "--video %s: %s\n", qPrintable(g_video), why.c_str());
-                return 2;
-            }
-            g_videoCodec = QString::fromStdString(c->name);
-        }
-    }
-
-    // Винчестер СМК — узел платы СМК-512: без неё регистров НЖМД на шине нет. У «Самары»
-    // своя плата, а драйвер — в прошивке КНГМД.
-    const QString hddFirst = g_hdd.isEmpty() ? g_hddB : g_hdd;
-    if (!hddFirst.isEmpty() && hddOnSamara(g_hddCtl, hddFirst.toStdString())) {
-        std::fprintf(stderr, "Винчестер: контроллер «Самара» (0177620–0177656, прошивка samara.rom)\n");
-        // На БК-0010 загрузчику нужна память на месте Бейсика — как и дискете.
-        if (effMachine == 0 && g_smk < 0 && !smkSaved) {
-            g_smk = 1;
-            std::fprintf(stderr, "Винчестер: включён блок расширения памяти СМК-512 "
-                                 "(отключить — ключом --no-smk)\n");
-        }
-    } else if (!hddFirst.isEmpty()) {
-        if (g_smk == 0) {
-            std::fprintf(stderr, "Винчестер подключается к плате СМК-512 — уберите --no-smk\n");
-            return 2;
-        }
-        if (g_smk < 0 && !smkSaved)
-            std::fprintf(stderr, "Винчестер: включён блок расширения памяти СМК-512\n");
-        g_smk = 1;
-    }
-
-    if (args.contains("--keytest"))
-        return runKeyTest();
-
-    if (headless)
-        return runHeadless(romDir, binToLoad, frames, color, shot, keyCode, keyFrame,
-                           dbgShot, memvisShot, hpShot, caShot, faShot, fcShot, hcShot, typeStr, keysList);
-
-    MainWindow w(romDir, g_smk, g_aspect34, g_machine, g_ay, g_ay2, g_covox);
-    w.setScanlineOverride(g_noScanline ? 0 : g_scanline ? 1 : -1);
-    w.setMstd(g_mstd);
-    w.setArbitration(g_arb037);
-    w.setCpuPhase(g_cpuPhase);
-    w.setDiskWritable(g_diskRw);
+    MainWindow w(o.romDir, o.smk, o.aspect34, o.machine, o.ay, o.ay2, o.covox);
+    w.setScanlineOverride(o.scanline);
+    w.setMstd(o.mstd);
+    w.setArbitration(o.arb037);
+    w.setCpuPhase(o.cpuPhase);
+    w.setDiskWritable(o.diskRw);
+    if (!o.diskRom.isEmpty()) w.setDiskRom(o.diskRom);
     w.show();
-    if (!g_disk.isEmpty()) w.insertDiskAndBoot(g_disk, 0);
-    else if (!binToLoad.isEmpty()) w.loadBinFromPath(binToLoad);
-    if (!g_diskB.isEmpty()) w.insertDiskAndBoot(g_diskB, 1);
-    w.setHddWritable(g_hddRw);
-    w.setHddController(g_hddCtl);
-    if (!g_video.isEmpty()) w.startVideo(g_video, g_videoCodec, g_videoAspect, g_videoAudio);
-    if (!g_hddB.isEmpty()) w.attachHdd(g_hddB, 1, g_hdd.isEmpty());
-    if (!g_hdd.isEmpty()) w.attachHdd(g_hdd, 0, true);
+    if (!o.disk.isEmpty()) w.insertDiskAndBoot(o.disk, 0);
+    else if (!o.bin.isEmpty()) w.loadBinFromPath(o.bin);
+    if (!o.diskB.isEmpty()) w.insertDiskAndBoot(o.diskB, 1);
+    w.setHddWritable(o.hddRw);
+    w.setHddController(o.hddCtl);
+    if (!o.video.isEmpty()) w.startVideo(o.video, o.videoCodec, o.videoAspect, o.videoAudio);
+    if (!o.hddB.isEmpty()) w.attachHdd(o.hddB, 1, o.hdd.isEmpty());
+    if (!o.hdd.isEmpty()) w.attachHdd(o.hdd, 0, true);
 
     // Ctrl+C / kill в терминале: закрыть окно как обычно — иначе файл видео остался бы
     // без индекса, а изменённые дискеты не записались бы.
@@ -810,4 +749,3 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, [](int) { MainWindow::requestQuit(); });
     return app.exec();
 }
-

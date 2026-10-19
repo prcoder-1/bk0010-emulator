@@ -1,4 +1,5 @@
 #include "MemVisWidget.h"
+#include "QtFormat.h"
 #include <algorithm>
 #include <array>
 #include <iterator>
@@ -380,7 +381,7 @@ void MemCanvas::drawMarks11(QPainter& p, const int* romLin, int imgH) {
     struct Mark { int idx; QString text; QColor color; };
     std::vector<Mark> marks;
     const QColor live(120, 230, 160, 200), plain(255, 160, 80, 110);
-    auto at = [](int addr) { return QString(" · %1").arg(addr, 6, 8, QChar('0')); };
+    auto at = [](int addr) { return " · " + oct6(static_cast<unsigned>(addr)); };
     const int w0 = mem.window0Page(), w1 = mem.window1Page(), vp = mem.videoPage();
     for (int pg = 0; pg < 8; ++pg) {
         QString t = QString("стр %1").arg(pg);

@@ -44,6 +44,9 @@ public:
     Machine machine() const { return machine_; }
     bool bk11() const { return machine_ == Machine::Bk0011m; }
     static const char* machineName(Machine m) { return m == Machine::Bk0011m ? "БК-0011М" : "БК-0010-01"; }
+    // Имя машины из ключа или аргумента: bk10 / 0010 / bk0010 — БК-0010-01; bk11m / 0011m /
+    // bk0011m — БК-0011М (регистр не важен). false — не опознано.
+    static bool parseMachine(const std::string& s, Machine& out);
     int  cpuFreqHz() const { return cpuFreqHz_; }
 
     bool loadRoms(const std::string& romDir);
@@ -122,7 +125,7 @@ public:
     // (roms/smk512.rom) ставится ключом --disk-rom smk: она перехватывает адрес
     // начального пуска и приносит свой ROM-BIOS, но образов с ней поднимается
     // меньше (см. docs/floppy.md).
-    void setDiskRom(const std::string& nameOrPath) { diskRom_ = nameOrPath; }
+    void setDiskRom(const std::string& nameOrPath);
     bool attachDisk(int drive, const std::string& path, bool readOnly = true, int sides = 0);
     // Поставить контроллер (ПЗУ + 1801ВП1-128) на шину без дискет — так на БК-0011М
     // с СМК-512, где плата и есть контроллер.
@@ -146,6 +149,8 @@ public:
     // установленной плате). Без явного setDiskRom ставится прошивка этого контроллера.
     // readOnly: записанное БК остаётся в памяти поверх файла. Ошибка — в err.
     enum class HddController { Auto, Smk, Samara };
+    // auto | smk (smk512) | samara (самара). false — не опознано.
+    static bool parseHddController(const std::string& s, HddController& out);
     void setHddController(HddController c) { hddCtl_ = c; }
     HddController hddController() const { return hddCtl_; }
     // Какой контроллер получит образ path, если подключить его сейчас.
@@ -162,10 +167,36 @@ public:
     // 0160000 сначала пробует винчестер. false — нет образа, платы или прошивки.
     bool bootFromHdd();
 
+    // Конфигурация машины одним куском — общая для безголового режима и MCP-сервера
+    // (GUI берёт её из своих настроек). -1 — по машине: AY, второй AY и Covox стоят на
+    // БК-0011М, построчная отрисовка — тоже.
+    struct Setup {
+        Machine machine = Machine::Bk0011m;
+        int  ay = -1, ay2 = -1, covox = -1, scanline = -1;
+        bool smk = true, mstd = false, arb037 = true;
+        int  cpuPhase = 0;
+        std::string diskRom;                         // пусто — прошивка по конфигурации
+        HddController hddCtl = HddController::Auto;
+    };
+    // Включить питание машины в этой конфигурации. false — не загрузились ПЗУ.
+    bool powerOn(const Setup& s, const std::string& romDir);
+    // Носители из командной строки: дискеты A/B и винчестеры master/slave.
+    struct Media {
+        std::string disk, diskB, hdd, hddB;
+        bool diskRw = false, hddRw = false;
+        int  diskSides = 0;                          // 0 — по размеру образа
+        bool empty() const { return disk.empty() && diskB.empty() && hdd.empty() && hddB.empty(); }
+    };
+    // Вставить носители и загрузиться: с дискеты A (из поднятого монитора, как «160000G»),
+    // иначе с винчестера. false — носитель не вставился; err — что не так (и
+    // предупреждения, если загрузки не будет).
+    bool bootMedia(const Media& m, std::string& err);
+
     // Run enough frames for the monitor ROM to initialise (vectors, stack,
     // display driver) if it hasn't yet. A game must not be started before this,
     // or it will jump into an uninitialised system and crash. Idempotent.
-    void ensureMonitorBooted(int bootFrames = 25) {
+    static constexpr int kBootFrames = 25;    // кадров до готового монитора после сброса
+    void ensureMonitorBooted(int bootFrames = kBootFrames) {
         while (framesSinceReset_ < bootFrames) runFrame();
     }
 
@@ -175,8 +206,7 @@ public:
     // "ready" flag (0177660 bit 7) just marks "a code arrived since the last
     // read" and is cleared by reading 0177662. The interrupt (vector 060, or
     // 0274 for codes with bit 0200) fires only if enabled (0177660 bit 6).
-    // Always returns true (kept bool for call-site compatibility).
-    bool pressKey(uint16_t bkCode);
+    void pressKey(uint16_t bkCode);
 
     // Клавиша «СТОП». Физически вынесена из матрицы (отдельная цепь STOP_IN/STOP_OUT),
     // кода в 0177662 не даёт, а вызывает прерывание по вектору 4 — тому же, что HALT и
@@ -256,9 +286,13 @@ public:
     void addBreakpoint(uint16_t addr) { breakpoints_.insert(addr); }
     void removeBreakpoint(uint16_t addr) { breakpoints_.erase(addr); breakConds_.erase(addr); }
 
-    // Optional condition on a breakpoint: only stop when it holds. kind: 0=register
-    // Ra, 1=memory word @a, 2=memory byte @a. op: 0 ==, 1 !=, 2 <, 3 >, 4 >=, 5 <=.
-    struct BreakCond { uint8_t kind, op; uint16_t a, val; };
+    // Optional condition on a breakpoint: only stop when `lhs op val` holds; lhs —
+    // регистр Ra, слово или байт памяти по адресу a.
+    struct BreakCond {
+        enum class Lhs : uint8_t { Reg, Word, Byte } lhs;
+        enum class Op : uint8_t { Eq, Ne, Lt, Gt, Ge, Le } op;
+        uint16_t a, val;
+    };
     void setBreakCond(uint16_t addr, BreakCond c) { breakConds_[addr] = c; }
     bool breakAllows(uint16_t pc) const;   // true if pc's breakpoint (if any) should fire
     bool hasBreakpoint(uint16_t addr) const { return breakpoints_.count(addr) != 0; }
@@ -316,6 +350,11 @@ public:
     // `targetDepth` (i.e. the current subroutine returns), a breakpoint, HALT, or
     // the tick limit. For "step out". Needs the flame/CCT tracker enabled.
     bool runUntilReturn(size_t targetDepth, int maxTicks);
+
+    // Шаг с обходом (F8 отладчика, MCP bk_step_over): вызов — JSR или EMT/TRAP/IOT/BPT —
+    // прогоняется до команды за ним (с кадрами и точками останова), прочее — один шаг.
+    static constexpr int kDebugRunTicks = 20'000'000;   // бюджет прогонов отладчика (~5–7 с БК)
+    void stepOver(int maxTicks = kDebugRunTicks);
 
     // I/O-register write log (0177600..0177776), captured only while enabled — for
     // debugging how a game programs the keyboard / timer / sound / port.
@@ -411,6 +450,17 @@ public:
     // отложенные события клавиатуры, взведённые прерывания, фаза таймера.
     void saveStateExt(std::vector<uint8_t>& out) const;
     void loadStateExt(const std::vector<uint8_t>& in, size_t off);
+private:
+    // Общие куски обоих форматов снимка (раскладка — у saveStateMem в Board.cpp).
+    struct SnapReader;
+    void saveCpuDev(std::vector<uint8_t>& out) const;   // R0–R7, PSW, устройства, ввод, фаза 037
+    void loadCpuDev(SnapReader& r);
+    void saveSmk(std::vector<uint8_t>& out) const;      // СМК-512: режим, страница, ДОЗУ
+    void loadSmk(SnapReader& r);
+    void saveBus(std::vector<uint8_t>& out) const;      // фаза цепочки шины
+    void loadBus(SnapReader& r);
+    void finishLoad(const std::vector<uint8_t>& in, size_t off);
+public:
 
     // IoBus
     bool ioRead(uint16_t addr, uint16_t& value) override;
@@ -595,6 +645,14 @@ private:
     uint32_t timerPeriod_ = 128;    // CPU ticks per timer decrement
     void timerCheck();              // lazily advance the counter to "now"
     void timerSetMode(uint8_t mode);
+    static uint32_t timerPeriodFor(uint8_t csr);   // тактов ЦП на отсчёт по делителям CSR
+    // Счётчик продвигается лениво — при чтении регистров. Тот же расчёт без записи в
+    // плату нужен отладчику (peekReg), поэтому он отдельно от timerCheck.
+    struct TimerState { uint16_t count; uint8_t csr; uint64_t start; };
+    bool timerAdvance(TimerState& t, uint64_t now) const;   // true — перезагрузка из предела
+    // Значение регистра В-В, каким его прочтёт процессор, но без побочных эффектов
+    // чтения. false — регистр не наш (на странице В-В тогда читается 0).
+    bool regValue(uint16_t addr, uint16_t& value) const;
 
     // Tick timestamps of recent timer-underflow (frame-sync) events (capped ring).
     std::deque<uint64_t> frameTicks_;
@@ -614,6 +672,7 @@ private:
 
     // Разбор чтения регистра без побочки логирования (ioRead — обёртка над ним).
     bool ioReadRaw(uint16_t addr, uint16_t& value);
+    void logIo(uint16_t addr, uint16_t value, bool read, bool isByte, bool odd);   // в ioLog_, если включён
 
     std::set<uint16_t> breakpoints_;
     std::map<uint16_t, BreakCond> breakConds_;   // optional per-breakpoint condition
@@ -630,6 +689,15 @@ private:
     uint16_t watchAddr_ = 0, watchPc_ = 0;
     void checkWatch(uint16_t addr, bool write, bool isByte);
 
+    // Общий цикл прогонов (runTicks, runUntil, runUntilReturn): команды, простой по WAIT,
+    // точки останова и наблюдения. frames — цикл сам ведёт кадры (прогоны отладчика;
+    // иначе кадр ведёт вызывающий). target() проверяется после каждой команды.
+    enum class RunStop { Budget, Halt, Break, Target };
+    template <class Target> RunStop runLoop(int maxTicks, bool frames, Target target, int& done);
+    bool breakAt(uint16_t pc) const {
+        return !breakpoints_.empty() && breakpoints_.count(pc) && breakAllows(pc);
+    }
+    void endFrame() { trace_.tick(); ++framesSinceReset_; }   // кадр досчитан
     void deliverFrameInterrupts(); // взвести кадровый запрос 50 Гц и попробовать выдать
     int  tryDeliverInterrupts();   // выдать взведённые запросы; возвращает такты входа
     int  stepCore();               // one instruction + sound/trace bookkeeping

@@ -1,11 +1,8 @@
 #include "BkRamWidget.h"
+#include "QtFormat.h"
 #include "Board.h"
-#include <QScrollBar>
 #include <QComboBox>
 #include <QLabel>
-#include <QSignalBlocker>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
 #include <algorithm>
 #include <vector>
 
@@ -13,7 +10,6 @@ using bk::Board;
 using bk::Memory;
 
 namespace {
-QString oct6(unsigned v) { return QString("%1").arg(v & 0177777, 6, 8, QChar('0')); }
 
 constexpr int BLOCK = 020000;              // блок карты памяти БК-0011М, 8 Кбайт
 }
@@ -144,74 +140,32 @@ private:
     std::vector<Page> pages_;
 };
 
-BkRamWidget::BkRamWidget(Board* board, QWidget* parent) : QWidget(parent), board_(board) {
+BkRamWidget::BkRamWidget(Board* board, QWidget* parent)
+    : HexPageWindow(std::make_unique<BkRamSource>(board),
+                    QString::fromUtf8("Пишется прямо в ОЗУ страницы, мимо карты адресов; ПЗУ — только просмотр."),
+                    parent),
+      board_(board), bsrc_(static_cast<BkRamSource*>(source())) {
     setWindowTitle("Память БК по страницам");
-    src_ = std::make_unique<BkRamSource>(board);
-    view_ = new HexPageView(src_.get(), this);
-    bar_ = new QScrollBar(Qt::Vertical, this);
-    bar_->setSingleStep(1);
-    pageBox_ = new QComboBox;
     pageBox_->setMinimumContentsLength(34);
-    jumpBox_ = new QComboBox;
     follow_ = new QComboBox;
     follow_->addItem(QString::fromUtf8("не следить"));
     follow_->addItem(QString::fromUtf8("следить за окном 0 (040000)"));
     follow_->addItem(QString::fromUtf8("следить за окном 1 (100000)"));
     follow_->addItem(QString::fromUtf8("следить за экранной страницей"));
     follow_->setCurrentIndex(1);    // окно 0 — страница, которую программа чаще всего переключает
-    status_ = new QLabel;
-    hint_ = new QLabel(QString::fromUtf8(
-        "ЛКМ по слову — правка: цифры 0-7, Enter — применить и перейти к следующему, "
-        "Esc — отмена. Пишется прямо в ОЗУ страницы, мимо карты адресов; ПЗУ — только просмотр."));
-    hint_->setEnabled(false);
-
-    connect(pageBox_, QOverload<int>::of(&QComboBox::activated), this, [this](int i) {
-        follow_->setCurrentIndex(0);    // ручной выбор отменяет слежение
-        showPage(i);
-    });
     connect(follow_, QOverload<int>::of(&QComboBox::activated), this, [this](int) { followPage(); });
-    connect(jumpBox_, QOverload<int>::of(&QComboBox::activated), this, [this](int i) {
-        if (i <= 0) return;
-        view_->setTop((i - 1) * src_->sectionBytes(view_->page()) / HexPageView::BYTES_PER_ROW);
-        syncBar();
-        jumpBox_->setCurrentIndex(0);
-    });
-    connect(view_, &HexPageView::edited, this, [this](int page, int off, uint16_t v) {
-        hint_->setText(QString::fromUtf8("записано: %1, смещение %2 = %3")
-                           .arg(src_->title(page)).arg(oct6(static_cast<unsigned>(off))).arg(oct6(v)));
-    });
-    connect(bar_, &QScrollBar::valueChanged, this, [this](int v) { view_->setTop(v); });
-    connect(view_, &HexPageView::topChanged, this, [this](int v) {
-        QSignalBlocker b(bar_);
-        bar_->setValue(v);
-    });
-
-    auto* controls = new QHBoxLayout;
-    controls->addWidget(pageBox_);
-    controls->addWidget(jumpBox_);
-    controls->addWidget(follow_);
-    controls->addStretch(1);
-    controls->setContentsMargins(0, 0, 0, 0);
-
-    auto* body = new QHBoxLayout;
-    body->addWidget(view_, 1);
-    body->addWidget(bar_);
-    body->setContentsMargins(0, 0, 0, 0);
-    body->setSpacing(2);
-
-    auto* lay = new QVBoxLayout(this);
-    lay->setContentsMargins(4, 4, 4, 4);
-    lay->setSpacing(3);
-    lay->addLayout(controls);
-    lay->addWidget(status_);
-    lay->addLayout(body, 1);
-    lay->addWidget(hint_);
-
+    addControl(follow_);
     rebuild();
     resize(980, 620);
 }
 
-BkRamWidget::~BkRamWidget() = default;
+void BkRamWidget::pagePicked() { follow_->setCurrentIndex(0); }   // ручной выбор отменяет слежение
+
+QStringList BkRamWidget::titles() const {
+    QStringList t;
+    for (size_t i = 0; i < bsrc_->pages().size(); ++i) t << bsrc_->title(static_cast<int>(i));
+    return t;
+}
 
 // Список страниц зависит от машины и вставленных ПЗУ: окно может быть открыто, когда
 // машину переключают из меню.
@@ -221,30 +175,12 @@ void BkRamWidget::rebuild() {
     for (int s = 0; s < Memory::ROM11_SLOTS; ++s) key += m.rom11Loaded(s) ? '1' : '0';
     if (key == layout_) return;
     layout_ = key;
-    src_->build();
+    bsrc_->build();
     follow_->setVisible(board_->bk11());
-    QSignalBlocker b(pageBox_);
-    pageBox_->clear();
-    for (size_t i = 0; i < src_->pages().size(); ++i) pageBox_->addItem(src_->title(static_cast<int>(i)));
+    setPageTitles(titles());
     // 11М — со страницы в окне 0, БК-0010 — с экрана; дальше — по слежению.
     showPage(board_->bk11() ? m.window0Page() : 1);
     followPage();
-}
-
-void BkRamWidget::showPage(int i) {
-    view_->setPage(i, static_cast<int>(src_->pages().size()));
-    {
-        QSignalBlocker b(pageBox_);
-        pageBox_->setCurrentIndex(view_->page());
-    }
-    QSignalBlocker b(jumpBox_);
-    jumpBox_->clear();
-    jumpBox_->addItem(QString::fromUtf8("к началу…"));
-    const int sect = src_->sectionBytes(view_->page());
-    for (int s = 0; s * sect < src_->pageBytes(view_->page()); ++s)
-        jumpBox_->addItem(src_->sectionLabel(view_->page(), s));
-    syncBar();
-    updateStatus();
 }
 
 void BkRamWidget::followPage() {
@@ -261,13 +197,6 @@ void BkRamWidget::followPage() {
     else updateStatus();
 }
 
-void BkRamWidget::syncBar() {
-    QSignalBlocker b(bar_);
-    bar_->setRange(0, std::max(0, view_->rows() - view_->visibleRows()));
-    bar_->setPageStep(view_->visibleRows());
-    bar_->setValue(view_->top());
-}
-
 void BkRamWidget::updateStatus() {
     const Memory& m = board_->memory();
     if (!board_->bk11()) {
@@ -281,8 +210,7 @@ void BkRamWidget::updateStatus() {
     status_->setText(QString::fromUtf8("0177716 = %1: окно 0 — стр. %2, окно 1 — %3; экран — стр. %4")
                          .arg(oct6(m.pageMap())).arg(m.window0Page()).arg(w1).arg(m.videoPage()));
     // Названия страниц несут «окно 0 / окно 1 / экран» — обновить без смены выбора.
-    QSignalBlocker b(pageBox_);
-    for (int i = 0; i < pageBox_->count(); ++i) pageBox_->setItemText(i, src_->title(i));
+    setPageTitles(titles());
 }
 
 // Троттлинг как у остальных окон: дамп на каждом кадре не нужен, а время это отнимает
@@ -291,5 +219,5 @@ void BkRamWidget::refresh() {
     rebuild();
     if (follow_->currentIndex() > 0) followPage();
     syncBar();
-    if (++tick_ >= 3) { tick_ = 0; view_->update(); updateStatus(); }
+    if (repaintDue()) { view_->update(); updateStatus(); }
 }

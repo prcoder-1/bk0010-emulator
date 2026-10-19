@@ -24,6 +24,7 @@ registers, interrupt vectors, screen encoding, palette, .BIN format, timing).
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/cpu_tests                      # unit tests (CPU decode, flags, save/restore)
+./build/cpu_tests Covox BKX1           # only sections whose title contains these words
 ctest --test-dir build                 # same, via ctest
 ./build/bk0010-emulator game.bin       # GUI
 ```
@@ -96,7 +97,34 @@ Two layers, deliberately decoupled:
   `main()` before any GUI setup; runs under an offscreen `QGuiApplication` so
   `bk_screenshot` can save PNGs. Registered for Claude Code via `.mcp.json` (server
   name `bk0010`). Tool args accept decimal / `0x` hex / leading-0 octal, and symbols
-  loaded via `bk_symbols`. Recipes for driving a game: `docs/mcp-debugging.md`.
+  loaded via `bk_symbols` (into `Board::symbols()`, the same table the GUI debugger uses).
+  Tools are listed ONCE in `BK_MCP_TOOLS` (`McpServer.h`): each is `tool_<name>(args)`, the
+  dispatcher `callTool` is a table built from that list, and the constructor checks it
+  against `toolDefs()` (descriptions/schemas) — a mismatch is printed at startup. A new tool
+  = a `toolDefs` entry + a name in `BK_MCP_TOOLS` + `tool_<name>`.
+  Recipes for driving a game: `docs/mcp-debugging.md`.
+
+- **Command line**: ONE parser (`parseArgs` → `CliOptions` in `src/main.cpp`) for the GUI,
+  headless mode and `--server`; `resolveOptions` applies the cross-option rules (.BIN picks
+  the machine, a disk/HDD turns the СМК on). Headless and MCP configure the board through
+  `Board::Setup` + `Board::powerOn` and boot media through `Board::Media` +
+  `Board::bootMedia`; the GUI keeps its own per-machine `QSettings` but takes the same
+  overrides. The GUI remembers what it booted (`MainWindow::boot_`: .BIN, disk A, HDD), and
+  reset/СМК/machine switches repeat THAT boot.
+
+- **Instruction classification lives in `src/core/Instr.h`**: `instrInfo(mem, addr)` (length,
+  `Flow` = next/branch/jump/call/trap/return/halt, static target), `instrFlow(ir)`,
+  `operandWords`, `isJsr`, `staticXrefs`. Step-over (`Board::stepOver`), the debugger's
+  follow/xrefs/auto-analysis, MCP xrefs/backtrace, the profilers and `.BIN` machine detection
+  all use it — do not write opcode ranges by hand elsewhere (an old copy lost half of BLE).
+  `cpu_tests` checks `instrInfo` lengths against `disasm` for all 65536 codes.
+- **Profiler costs are real ticks**: `Trace::ticks/execTicks` accumulate the bus-model ticks
+  of every instruction (`Board::stepCore`), so the call graph, hot path and hot chart agree
+  with the flame graph. Call targets / function-of-address: `Trace::callTargets`, `funcOf`.
+  Profiler windows derive from `src/ui/ProfilerView` (refresh, `addressPicked`,
+  `hoverAddress`, `setHighlight`) and are opened by `MainWindow::openProfiler`; the paged
+  memory windows derive from `HexPageWindow` (`src/ui/HexPageView`); octal/count formatting
+  for the UI and MCP is `src/ui/QtFormat.h`.
 
 - **Shared input tables** live in the core as header-only files so the GUI, the MCP
   server and `cpu_tests` (which links only `bkcore`) all agree: `src/core/Joystick.h`
@@ -160,6 +188,8 @@ Key cross-cutting facts to know before editing the CPU or screen:
 - **WAIT idles in time**: `runTicks` no longer skips the rest of the frame on WAIT; it calls
   `idleTicks` in 64-tick chunks so sound (AY music runs from the frame IRQ), the floppy, the
   VM1 timer and the beam keep going. Interrupt entry ticks also go through `advanceDevices`.
+  `runTicks`, `runUntil` and `runUntilReturn` share ONE loop (`Board::runLoop`: WAIT idling,
+  breakpoints/watchpoints, frame boundaries for the debugger runs) — keep it that way.
 - **CPU dispatch** (`Cpu::buildTable`): a 1024-entry table indexed by `ir >> 6`,
   mirroring the reference `bk` emulator's `itab.c`. Instruction semantics/flags are
   ported 1:1 from that emulator (`/home/prcoder/emulators/БК-0010-01/bk`). If you
