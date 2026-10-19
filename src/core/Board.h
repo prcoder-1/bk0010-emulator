@@ -30,6 +30,11 @@ struct DataItem { DataType type; uint16_t len; };
 // 0177662 на запись, кадровое прерывание с запретом. См. docs/bk0011m.md.
 enum class Machine : uint8_t { Bk0010 = 0, Bk0011m = 1 };
 
+// Выбор машины в настройках GUI, ключе --machine и MCP. Auto — машину выбирает
+// программа (.BIN, Board::binTargetsBk11), без программы — БК-0011М. Явный выбор
+// программу не проверяет: что выбрано, то и работает.
+enum class MachineChoice : uint8_t { Auto, Bk0010, Bk0011m };
+
 // The BK-0010 "motherboard": wires the CPU, memory, screen and the internal
 // I/O registers together and drives the emulation. Pure C++ (no Qt) so it can
 // run in a worker thread owned by the GUI.
@@ -44,9 +49,12 @@ public:
     Machine machine() const { return machine_; }
     bool bk11() const { return machine_ == Machine::Bk0011m; }
     static const char* machineName(Machine m) { return m == Machine::Bk0011m ? "БК-0011М" : "БК-0010-01"; }
-    // Имя машины из ключа или аргумента: bk10 / 0010 / bk0010 — БК-0010-01; bk11m / 0011m /
-    // bk0011m — БК-0011М (регистр не важен). false — не опознано.
-    static bool parseMachine(const std::string& s, Machine& out);
+    // Выбор машины из ключа или аргумента: auto / авто; bk10 / 0010 / bk0010 — БК-0010-01;
+    // bk11m / 0011m / bk0011m — БК-0011М (латиница — в любом регистре). false — не опознано.
+    static bool parseMachineChoice(const std::string& s, MachineChoice& out);
+    static const char* machineChoiceName(MachineChoice c);    // "auto" / "bk10" / "bk11m"
+    // Машина для выбора c: явный — он сам; Auto — по программе binPath (пусто — БК-0011М).
+    static Machine machineFor(MachineChoice c, const std::string& binPath = {});
     int  cpuFreqHz() const { return cpuFreqHz_; }
 
     bool loadRoms(const std::string& romDir);

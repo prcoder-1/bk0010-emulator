@@ -991,10 +991,31 @@ void Board::detachHdd(int unit) {
     updateMpi();
 }
 
-bool Board::parseMachine(const std::string& s, Machine& out) {
-    if (s.find("11") != std::string::npos) { out = Machine::Bk0011m; return true; }
-    if (s.find("10") != std::string::npos) { out = Machine::Bk0010; return true; }
-    return false;
+bool Board::parseMachineChoice(const std::string& s, MachineChoice& out) {
+    std::string v;
+    for (char c : s) v += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (v == "auto" || v == "авто" || v == "Авто" || v == "АВТО") out = MachineChoice::Auto;
+    else if (v.find("11") != std::string::npos) out = MachineChoice::Bk0011m;
+    else if (v.find("10") != std::string::npos) out = MachineChoice::Bk0010;
+    else return false;
+    return true;
+}
+
+const char* Board::machineChoiceName(MachineChoice c) {
+    switch (c) {
+    case MachineChoice::Bk0010:  return "bk10";
+    case MachineChoice::Bk0011m: return "bk11m";
+    default:                     return "auto";
+    }
+}
+
+Machine Board::machineFor(MachineChoice c, const std::string& binPath) {
+    switch (c) {
+    case MachineChoice::Bk0010:  return Machine::Bk0010;
+    case MachineChoice::Bk0011m: return Machine::Bk0011m;
+    default:
+        return !binPath.empty() && !binTargetsBk11(binPath) ? Machine::Bk0010 : Machine::Bk0011m;
+    }
 }
 
 bool Board::parseHddController(const std::string& s, HddController& out) {

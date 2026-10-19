@@ -33,8 +33,10 @@ public:
     QString fddLog(int limit) const;      // сводка по контроллеру НГМД для bk_io_state
 
     // Машина и носители — из командной строки (тот же разбор, что у GUI и безголового режима).
+    // choice — выбор машины (--machine): auto — машину выбирает программа в bk_load.
     explicit McpServer(std::string romDir, const bk::Board::Setup& setup = {},
-                       const bk::Board::Media& media = {});
+                       const bk::Board::Media& media = {},
+                       bk::MachineChoice choice = bk::MachineChoice::Auto);
 
     // Run the stdio message loop until EOF. Returns a process exit code.
     int run();
@@ -43,7 +45,8 @@ private:
     bk::Board   board_;
     std::string romDir_;
     bool        romsOk_ = false;
-    QString     lastBin_;
+    bk::MachineChoice choice_ = bk::MachineChoice::Auto;   // выбор машины: auto — по программе
+    QString     lastBin_;     // загруженная программа (пусто — после включения питания её нет)
     // Свои имена (bk_symbols), а за ними — имена ПЗУ контроллера дисковода (roms/*.sym).
     const std::string* symAt(uint16_t a) const;
     bool symAddrOf(const std::string& name, uint16_t& a) const;

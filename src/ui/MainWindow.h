@@ -38,13 +38,16 @@ public:
     // сохранённую настройку (ключ командной строки перекрывает её, но не
     // перезаписывает: настройка меняется только переключателем в меню).
     // aspectOverride — то же для неквадратных пикселей БК (--aspect34/--no-aspect34).
-    // machineOverride: 0 — БК-0010-01, 1 — БК-0011М, -1 — сохранённая настройка;
-    // ayOverride — звуковой сопроцессор (-1 — настройка этой машины); ay2Override и
-    // covoxOverride — то же для второго AY (плата «2AY») и Covox.
-    explicit MainWindow(const QString& romDir, int smkOverride = -1,
-                        int aspectOverride = -1, int machineOverride = -1,
+    // choice — выбор машины (ключ --machine или настройка, см. savedMachineChoice),
+    // machine — машина, с которой стартуем (для auto её уже выбрала программа из
+    // командной строки). ayOverride — звуковой сопроцессор (-1 — настройка этой машины);
+    // ay2Override и covoxOverride — то же для второго AY (плата «2AY») и Covox.
+    explicit MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Machine machine,
+                        int smkOverride = -1, int aspectOverride = -1,
                         int ayOverride = -1, int ay2Override = -1, int covoxOverride = -1,
                         QWidget* parent = nullptr);
+    // Выбор машины из настроек (меню «Машина»), по умолчанию — auto.
+    static bk::MachineChoice savedMachineChoice();
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
@@ -74,9 +77,9 @@ public:
     void setCpuPhase(int p) { if (board_) board_->setCpuPhase(p); }
     void setSmk512(bool on);            // подключить/снять плату и перезапустить машину
     void setPixelAspect34(bool on);     // пиксель БК блоком 4x3 точек хоста
-    // Смена машины — как включение другой машины: ПЗУ, частота, карта памяти;
-    // настройка сохраняется между запусками.
-    void setMachine(int m, bool persist = true);   // persist — запомнить выбор в настройках
+    // Выбор машины в меню (сохраняется между запусками): явная машина включается сразу,
+    // auto — машину выбирает загруженная программа.
+    void setMachineChoice(bk::MachineChoice c);
     void setAy(bool on);                // звуковой сопроцессор AY-3-8910 на 0177714
     void setAy2(bool on);               // второй AY (плата «2AY»: TurboSound / «Грифон»)
     void setCovox(bool on);             // Covox — ЦАП на 0177714
@@ -150,8 +153,13 @@ private:
     QTimer* timer_ = nullptr;
     QLabel* status_ = nullptr;
     QAction* smkAction_ = nullptr;   // галка «СМК-512» — синхронизируется при загрузке снимка
-    QAction* machine10Action_ = nullptr;   // радиопункты меню «Машина»
+    QAction* machineAutoAction_ = nullptr; // радиопункты меню «Машина»
+    QAction* machine10Action_ = nullptr;
     QAction* machine11Action_ = nullptr;
+    bk::MachineChoice machineChoice_ = bk::MachineChoice::Auto;
+    // Включить другую машину — как выключить одну и включить другую: ПЗУ, частота, карта
+    // памяти, звук и плата по её настройкам; загруженная программа забывается.
+    void switchMachine(bk::Machine m);
     QAction* ayAction_ = nullptr;          // галка «AY-3-8910»
     QAction* ay2Action_ = nullptr;         // галка «второй AY»
     QAction* covoxAction_ = nullptr;       // галка «Covox»

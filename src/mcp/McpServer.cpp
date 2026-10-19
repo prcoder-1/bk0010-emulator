@@ -84,8 +84,9 @@ static bool parseNumber(const QJsonValue& v, long& out) {
     return false;
 }
 
-McpServer::McpServer(std::string romDir, const bk::Board::Setup& setup, const bk::Board::Media& media)
-    : romDir_(std::move(romDir)) {
+McpServer::McpServer(std::string romDir, const bk::Board::Setup& setup, const bk::Board::Media& media,
+                     bk::MachineChoice choice)
+    : romDir_(std::move(romDir)), choice_(choice) {
     romsOk_ = board_.powerOn(setup, romDir_);
     board_.kngmd().fdd().setLog(true);    // сервер — инструмент отладки: журнал НГМД сразу
     std::string err;
@@ -115,6 +116,7 @@ bool McpServer::switchMachine(bool want11) {
     romsOk_ = board_.loadRoms(romDir_);
     board_.reset();
     cyrState_ = false;
+    lastBin_.clear();                    // питание выключали — программы в памяти нет
     return true;
 }
 
@@ -131,14 +133,16 @@ static const char* covoxModeName(bk::Board::CovoxMode m) {
 
 QString McpServer::machineText() {
     const bool b11 = board_.bk11();
-    QString s = QString("Машина: %1, ЦП %2 МГц, кадр %3 тактов (%4 Гц). AY-3-8910 %5, СМК-512 %6, "
-                        "отрисовка %7. Второй AY (2AY) %8, Covox %9.")
+    QString s = QString("Машина: %1 (выбор: %10), ЦП %2 МГц, кадр %3 тактов (%4 Гц). AY-3-8910 %5, "
+                        "СМК-512 %6, отрисовка %7. Второй AY (2AY) %8, Covox %9.")
         .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
         .arg(board_.cpuFreqHz() / 1000000).arg(board_.ticksPerFrame())
         .arg(board_.frameRateHz(), 0, 'f', 2)
         .arg(board_.ay() ? "вкл" : "выкл").arg(board_.smk512() ? "вкл" : "выкл")
         .arg(board_.scanlineRender() ? "по лучу" : "покадровая")
-        .arg(board_.ay2() ? "вкл" : "выкл").arg(board_.covox() ? "вкл" : "выкл");
+        .arg(board_.ay2() ? "вкл" : "выкл").arg(board_.covox() ? "вкл" : "выкл")
+        .arg(choice_ == bk::MachineChoice::Auto ? QString("auto — по программе")
+                                                : QString::fromLatin1(bk::Board::machineChoiceName(choice_)));
     if (board_.diskAttached(0)) s += QString(" Дискета A: %1.").arg(QString::fromStdString(board_.diskPath(0)));
     for (int u = 0; u < bk::Ide::DRIVES; ++u)
         if (board_.hddAttached(u))
@@ -354,13 +358,15 @@ QJsonArray McpServer::toolDefs() const {
 
     t.append(tool("bk_load", "Load a .BIN game/program (boots the monitor first) and start it. "
                   "Use frames to run it right away, and reset=true when loading a second game "
-                  "so its trace/hotspot data is not mixed with the previous one. The machine is picked "
-                  "by the program unless `machine` is given: one that writes the 0177662 register "
-                  "(БК-0011М palette/screen) runs on bk11m, anything else on bk10. On bk11m the load "
+                  "so its trace/hotspot data is not mixed with the previous one. In the \"auto\" machine mode "
+                  "(the default; see bk_machine) the program picks the machine: one that writes the 0177662 "
+                  "register (БК-0011М palette/screen) or calls BOS runs on bk11m, anything else on bk10. "
+                  "An explicit mode (bk10/bk11m, or `machine` here) keeps that machine and does not "
+                  "check the program. On bk11m the load "
                   "goes like the BOS monitor's L / R6/1000 / G: power-on with a key held (BOS drops into "
                   "its monitor), the file into the user memory map, SP=01000, PSW from the monitor.",
         schema({{"path", P("string", "Path to the .BIN file")},
-                {"machine", P("string", "\"bk10\" or \"bk11m\" (default: chosen by the program)")},
+                {"machine", P("string", "\"auto\", \"bk10\" or \"bk11m\" for this load (default: the server's machine mode)")},
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
                 {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
                 {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
@@ -387,7 +393,7 @@ QJsonArray McpServer::toolDefs() const {
                   "layout goes to the Samara controller (0177620–0177656, samara.rom in the floppy "
                   "controller, no memory board needed), anything else to the СМК-512 board (0177740–0177757, "
                   "installing the board and its smk512.rom firmware).",
-        schema({{"machine", P("string", "\"bk10\" or \"bk11m\" (default: keep)")},
+        schema({{"machine", P("string", "Machine mode: \"auto\" (keep the machine, bk_load picks it by the program), \"bk10\" or \"bk11m\" (default: keep)")},
                 {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: keep)")},
                 {"ay2", P("boolean", "Second AY (\"2AY\" board: TurboSound and Gryphon chip select) on/off (default: keep)")},
                 {"covox", P("boolean", "Covox DAC on 0177714 on/off (default: keep)")},
@@ -399,15 +405,18 @@ QJsonArray McpServer::toolDefs() const {
                 {"hdd_rw", P("boolean", "Attach the HDD image writable (default false: BK writes stay in memory)")},
                 {"hdd_ctl", P("string", "HDD controller: \"auto\" (by the image's layout), \"smk\" or \"samara\" (default: keep)")},
                 {"frames", P("integer", "Run this many frames after reset/boot (default 0)")}})));
-    t.append(tool("bk_machine", "Show or switch the emulated machine. Without `machine` it reports the "
-                  "current model (БК-0010-01 or БК-0011М), CPU clock, frame length, AY / СМК-512 state and the "
-                  "inserted floppy. With `machine` = \"bk10\" or \"bk11m\" it powers on the other machine: "
+    t.append(tool("bk_machine", "Show or switch the emulated machine and the machine mode. Without `machine` "
+                  "it reports the current model (БК-0010-01 or БК-0011М), the mode, CPU clock, frame length, "
+                  "AY / СМК-512 state and the inserted floppy. `machine` = \"auto\" (the default mode): "
+                  "bk_load picks the machine by the program, and an already loaded program is reloaded on "
+                  "its machine if that differs. With \"bk10\" or \"bk11m\" the mode becomes explicit "
+                  "(programs are not checked any more) and it powers on that machine: "
                   "ROMs, 3/4 MHz clock, memory map and per-scanline rendering change, RAM is cleared and the CPU "
                   "starts from the ROM (switching to the current model does nothing). An inserted floppy stays "
                   "in drive A and is booted (BOS boots it on the 11M by itself). The AY chip follows the "
                   "machine's default (on for bk11m) unless `ay` is given; so do the second AY (`ay2`, \"2AY\" "
                   "board) and the Covox DAC (`covox`) — both on for bk11m by default.",
-        schema({{"machine", P("string", "\"bk10\" (БК-0010-01) or \"bk11m\" (БК-0011М); omit to just report")},
+        schema({{"machine", P("string", "\"auto\", \"bk10\" (БК-0010-01) or \"bk11m\" (БК-0011М); omit to just report")},
                 {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: the machine's default when switching, else keep)")},
                 {"ay2", P("boolean", "Second AY (\"2AY\") on/off (default: the machine's default when switching, else keep)")},
                 {"covox", P("boolean", "Covox DAC on 0177714 on/off (default: the machine's default when switching, else keep)")},
@@ -947,21 +956,21 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args) {
 
 QJsonObject McpServer::tool_bk_load(const QJsonObject& args) {
     if (!romsOk_) return fail("ROMs not loaded from " + QString::fromStdString(romDir_));
-    // Машину выбирает программа (запись в 0177662 — БК-0011М), если её не задали явно.
+    // Машину выбирает программа (запись в 0177662 или вызовы БОС — БК-0011М) только при
+    // выборе auto; явно выбранная машина (аргумент machine или выбор сервера) не меняется.
     const QString path = args.value("path").toString();
-    bool want11 = bk::Board::binTargetsBk11(path.toStdString());
-    if (args.contains("machine")) {
-        bk::Machine m;
-        if (!bk::Board::parseMachine(args.value("machine").toString().toStdString(), m))
-            return fail("machine must be \"bk10\" or \"bk11m\"");
-        want11 = m == bk::Machine::Bk0011m;
-    }
+    bk::MachineChoice choice = choice_;
+    if (args.contains("machine")
+        && !bk::Board::parseMachineChoice(args.value("machine").toString().toStdString(), choice))
+        return fail("machine must be \"auto\", \"bk10\" or \"bk11m\"");
+    const bool want11 = bk::Board::machineFor(choice, path.toStdString()) == bk::Machine::Bk0011m;
     QString switched;
     if (switchMachine(want11))
         switched = QString("Машина переключена на %1%2. ")
             .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
-            .arg(args.contains("machine") ? QString() : want11
-                 ? QString(" (программа для неё: палитра 0177662 или вызовы БОС)") : QString());
+            .arg(choice != bk::MachineChoice::Auto ? QString() : want11
+                 ? QString(" (программа для неё: палитра 0177662 или вызовы БОС)")
+                 : QString(" (программа для неё)"));
     if (args.value("reset").toBool(false)) {
         board_.reset();          // заодно сбрасывает трассу: данные двух игр не смешиваются
         cyrState_ = false;
@@ -1021,11 +1030,26 @@ QJsonObject McpServer::tool_bk_disk_save(const QJsonObject& args) {
 QJsonObject McpServer::tool_bk_machine(const QJsonObject& args) {
     QString head;
     if (args.contains("machine")) {
-        bk::Machine m;
-        if (!bk::Board::parseMachine(args.value("machine").toString().toStdString(), m))
-            return fail("machine must be \"bk10\" or \"bk11m\"");
-        const bool want11 = m == bk::Machine::Bk0011m;
-        if (switchMachine(want11)) {
+        bk::MachineChoice c;
+        if (!bk::Board::parseMachineChoice(args.value("machine").toString().toStdString(), c))
+            return fail("machine must be \"auto\", \"bk10\" or \"bk11m\"");
+        choice_ = c;
+        if (c == bk::MachineChoice::Auto) {
+            // Авто: машину выбирает загруженная программа; нет её — машину выберет следующая.
+            const QString bin = lastBin_;
+            const bk::Machine m = bk::Board::machineFor(c, bin.toStdString());
+            if (bin.isEmpty()) {
+                head = "Выбор машины: auto — её выберет следующая программа (bk_load).";
+            } else if (m != board_.machine()) {
+                switchMachine(m == bk::Machine::Bk0011m);
+                board_.ensureMonitorBooted();
+                if (board_.loadBin(bin.toStdString(), true)) lastBin_ = bin;
+                head = QString("Выбор машины: auto. Программа %1 — для %2: машина переключена, программа "
+                               "загружена заново.").arg(bin, QString::fromUtf8(bk::Board::machineName(m)));
+            } else {
+                head = QString("Выбор машины: auto. Программа %1 подходит этой машине.").arg(lastBin_);
+            }
+        } else if (switchMachine(c == bk::MachineChoice::Bk0011m)) {
             head = "Машина переключена, питание включено заново.";
             if (board_.diskAttached(0) && !board_.bk11()) {
                 // БК-0010: сначала монитор, потом автозагрузчик контроллера (на 11М это делает БОС).
@@ -1034,7 +1058,7 @@ QJsonObject McpServer::tool_bk_machine(const QJsonObject& args) {
                 head += " Загрузка с дискеты A.";
             }
         } else {
-            head = "Машина уже такая — ничего не меняю.";
+            head = "Машина уже такая — ничего не меняю (выбор теперь явный, программа его не меняет).";
         }
     }
     if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
@@ -1049,11 +1073,11 @@ QJsonObject McpServer::tool_bk_machine(const QJsonObject& args) {
 
 QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
     if (args.contains("machine")) {
-        bk::Machine m;
-        if (!bk::Board::parseMachine(args.value("machine").toString().toStdString(), m))
-            return fail("machine must be \"bk10\" or \"bk11m\"");
-        const bool want11 = m == bk::Machine::Bk0011m;
-        switchMachine(want11);
+        bk::MachineChoice c;
+        if (!bk::Board::parseMachineChoice(args.value("machine").toString().toStdString(), c))
+            return fail("machine must be \"auto\", \"bk10\" or \"bk11m\"");
+        choice_ = c;                                    // auto — машина остаётся, её выберет bk_load
+        if (c != bk::MachineChoice::Auto) switchMachine(c == bk::MachineChoice::Bk0011m);
     }
     if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
     if (args.contains("ay2")) board_.setAy2(args.value("ay2").toBool());
@@ -1066,6 +1090,7 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
     }
     board_.reset();
     cyrState_ = false;
+    lastBin_.clear();
     QString extra;
     if (args.contains("disk")) {
         const QString path = args.value("disk").toString();

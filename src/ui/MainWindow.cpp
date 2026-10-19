@@ -43,15 +43,19 @@
 #include <QProxyStyle>
 #include <cstdio>
 
-MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverride,
-                       int machineOverride, int ayOverride, int ay2Override, int covoxOverride,
-                       QWidget* parent)
-    : QMainWindow(parent) {
+bk::MachineChoice MainWindow::savedMachineChoice() {
+    bk::MachineChoice c = bk::MachineChoice::Auto;
+    bk::Board::parseMachineChoice(QSettings().value("machineMode", "auto").toString().toStdString(), c);
+    return c;
+}
+
+MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Machine machine,
+                       int smkOverride, int aspectOverride,
+                       int ayOverride, int ay2Override, int covoxOverride, QWidget* parent)
+    : QMainWindow(parent), machineChoice_(choice) {
     board_ = std::make_unique<bk::Board>();
-    // Машина: настройка запоминается между запусками, --machine перекрывает её.
-    const int machine = machineOverride >= 0 ? machineOverride
-                                             : QSettings().value("machine", 1).toInt();
-    board_->setMachine(machine == 1 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+    // Выбор машины запоминается между запусками (меню), --machine перекрывает его.
+    board_->setMachine(machine);
     applySoundSettings(ayOverride, ay2Override, covoxOverride);
     applyScanline();
     // Блок расширения памяти СМК-512: настройка запоминается между запусками,
@@ -147,11 +151,17 @@ MainWindow::MainWindow(const QString& romDir, int smkOverride, int aspectOverrid
     QMenu* mach = menuBar()->addMenu("&Машина");
     auto* machGroup = new QActionGroup(this);
     machGroup->setExclusive(true);
+    // Авто — машину выбирает программа (.BIN), явный выбор программу не проверяет.
+    machineAutoAction_ = mach->addAction("&Автоматически — по программе");
     machine10Action_ = mach->addAction("БК-00&10-01 (3 МГц, 32 Кбайт ОЗУ)");
     machine11Action_ = mach->addAction("БК-00&11М (4 МГц, 128 Кбайт ОЗУ, 16 палитр)");
-    for (auto* a : {machine10Action_, machine11Action_}) { a->setCheckable(true); machGroup->addAction(a); }
-    connect(machine10Action_, &QAction::triggered, this, [this] { setMachine(0); });
-    connect(machine11Action_, &QAction::triggered, this, [this] { setMachine(1); });
+    for (auto* a : {machineAutoAction_, machine10Action_, machine11Action_}) {
+        a->setCheckable(true);
+        machGroup->addAction(a);
+    }
+    connect(machineAutoAction_, &QAction::triggered, this, [this] { setMachineChoice(bk::MachineChoice::Auto); });
+    connect(machine10Action_, &QAction::triggered, this, [this] { setMachineChoice(bk::MachineChoice::Bk0010); });
+    connect(machine11Action_, &QAction::triggered, this, [this] { setMachineChoice(bk::MachineChoice::Bk0011m); });
     mach->addSeparator();
     // Блок расширения памяти СМК-512 («АльтПро») в разъёме МПИ. На живой машине
     // плату ставят только при выключенном питании, поэтому переключатель
@@ -704,11 +714,13 @@ void MainWindow::openBin() {
 
 bool MainWindow::loadBinFromPath(const QString& path) {
     uint16_t addr = 0, len = 0;
-    // Машину выбирает программа (Board::binTargetsBk11): палитра 0177662 или вызовы БОС —
-    // БК-0011М, иначе БК-0010-01. Сохранённый выбор машины это не меняет.
     if (path != lastBin_) forgetBin();
-    const bool want11 = bk::Board::binTargetsBk11(path.toStdString());
-    if (want11 != board_->bk11()) setMachine(want11 ? 1 : 0, false);
+    // В режиме auto машину выбирает программа (Board::binTargetsBk11): палитра 0177662 или
+    // вызовы БОС — БК-0011М, иначе БК-0010-01. Явно выбранная машина остаётся какой есть.
+    if (machineChoice_ == bk::MachineChoice::Auto) {
+        const bk::Machine m = bk::Board::machineFor(machineChoice_, path.toStdString());
+        if (m != board_->machine()) switchMachine(m);
+    }
     // The monitor ROM must have initialised before a game is started; when a bin
     // is passed on the command line this happens before the 50 Hz timer has run
     // a single frame, so boot it here first. (На БК-0011М монитор БОС поднимает сам
@@ -781,24 +793,42 @@ void MainWindow::applyScanline() {
 }
 
 void MainWindow::syncMachineMenu() {
-    for (QAction* a : {machine10Action_, machine11Action_, ayAction_, ay2Action_, covoxAction_, smkAction_})
+    for (QAction* a : {machineAutoAction_, machine10Action_, machine11Action_, ayAction_, ay2Action_,
+                       covoxAction_, smkAction_})
         if (!a) return;
-    QSignalBlocker b1(machine10Action_), b2(machine11Action_), b3(ayAction_), b4(smkAction_),
-                   b5(ay2Action_), b6(covoxAction_);
-    machine10Action_->setChecked(!board_->bk11());
-    machine11Action_->setChecked(board_->bk11());
+    QSignalBlocker b0(machineAutoAction_), b1(machine10Action_), b2(machine11Action_), b3(ayAction_),
+                   b4(smkAction_), b5(ay2Action_), b6(covoxAction_);
+    machineAutoAction_->setChecked(machineChoice_ == bk::MachineChoice::Auto);
+    machine10Action_->setChecked(machineChoice_ == bk::MachineChoice::Bk0010);
+    machine11Action_->setChecked(machineChoice_ == bk::MachineChoice::Bk0011m);
+    machineAutoAction_->setText(QString("&Автоматически — по программе (сейчас %1)")
+                                    .arg(QString::fromUtf8(bk::Board::machineName(board_->machine()))));
     ayAction_->setChecked(board_->ay());
     ay2Action_->setChecked(board_->ay2());
     covoxAction_->setChecked(board_->covox());
     smkAction_->setChecked(board_->smk512());
 }
 
-void MainWindow::setMachine(int m, bool persist) {
-    const bool want11 = m == 1;
-    if (persist) QSettings().setValue("machine", want11 ? 1 : 0);
-    if (want11 == board_->bk11()) { syncMachineMenu(); return; }
+void MainWindow::setMachineChoice(bk::MachineChoice c) {
+    machineChoice_ = c;
+    QSettings().setValue("machineMode", QString::fromLatin1(bk::Board::machineChoiceName(c)));
+    if (c != bk::MachineChoice::Auto) { switchMachine(bk::Board::machineFor(c)); return; }
+    // Авто: машину выбирает загруженная программа; без программы машина остаётся, её
+    // выберет следующая.
+    if (!lastBin_.isEmpty() && bk::Board::machineFor(c, lastBin_.toStdString()) != board_->machine()) {
+        loadBinFromPath(QString(lastBin_));
+    } else {
+        syncMachineMenu();
+        updateTitle();
+        status_->setText(lastBin_.isEmpty() ? QString("Машина: автоматически — её выберет следующая программа")
+                                            : QString("Машина: автоматически — программа подходит этой машине"));
+    }
+}
+
+void MainWindow::switchMachine(bk::Machine m) {
+    if (m == board_->machine()) { syncMachineMenu(); updateTitle(); return; }
     saveDisks();
-    board_->setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+    board_->setMachine(m);
     applySoundSettings();
     // Плата — своя настройка у каждой машины (на БК-0011М её ставят реже).
     board_->setSmk512(QSettings().value(smkKey(), true).toBool());
@@ -1165,7 +1195,8 @@ void MainWindow::loadState() {
 }
 
 void MainWindow::updateTitle() {
-    QString t = QString("%1 — эмулятор-отладчик").arg(QString::fromUtf8(bk::Board::machineName(board_->machine())));
+    QString t = QString("%1%2 — эмулятор-отладчик").arg(QString::fromUtf8(bk::Board::machineName(board_->machine())))
+                    .arg(machineChoice_ == bk::MachineChoice::Auto ? " (авто)" : "");
     if (!lastBin_.isEmpty()) t += " — " + QFileInfo(lastBin_).fileName();
     setWindowTitle(t);
 }
