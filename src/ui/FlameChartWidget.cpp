@@ -1,4 +1,5 @@
 #include "FlameChartWidget.h"
+#include "QtFormat.h"
 #include "Board.h"
 #include "Disasm.h"
 #include <QPainter>
@@ -11,7 +12,6 @@
 
 using bk::Board;
 
-static QString oct6(uint16_t v) { return QString("%1").arg(v, 6, 8, QChar('0')); }
 
 // Stable warm colour per function (flame look), brighter when highlighted/hovered.
 static QColor flameColor(uint16_t func, bool hot) {
@@ -22,7 +22,7 @@ static QColor flameColor(uint16_t func, bool hot) {
 }
 
 FlameChartWidget::FlameChartWidget(Board* board, QWidget* parent)
-    : QWidget(parent), board_(board) {
+    : ProfilerView(parent), board_(board) {
     setMinimumSize(460, 240);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
@@ -143,7 +143,7 @@ void FlameChartWidget::mouseMoveEvent(QMouseEvent* e) {
     }
     int found = -1;
     for (const Bar& b : bars_) if (b.rect.contains(e->pos())) { found = b.func; break; }
-    if (found != hoverEmit_) { hoverEmit_ = found; setHighlight(found); emit hoverAddress(found); }
+    hoverTo(found);
 }
 
 void FlameChartWidget::mouseReleaseEvent(QMouseEvent* e) {
@@ -155,6 +155,5 @@ void FlameChartWidget::mouseReleaseEvent(QMouseEvent* e) {
 }
 
 void FlameChartWidget::leaveEvent(QEvent*) {
-    if (hoverEmit_ != -1) { hoverEmit_ = -1; emit hoverAddress(-1); }
-    setHighlight(-1);
+    leaveHover();
 }

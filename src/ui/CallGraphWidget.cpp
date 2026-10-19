@@ -1,4 +1,5 @@
 #include "CallGraphWidget.h"
+#include "QtFormat.h"
 #include "Board.h"
 #include "Disasm.h"
 #include <QPainter>
@@ -22,30 +23,11 @@ static QColor dim(QColor c, double k);       // scale brightness (defined below)
 // executing; once fully dark it can be purged with Delete/Backspace.
 static constexpr int ACTIVE_WINDOW = 350;
 
-// JSR opcode range (octal) — a subroutine call.
-static bool cgIsJsr(uint16_t ir) { return ir >= 0004000 && ir <= 0004777; }
-
-// Format a large count with a K/M/G suffix, e.g. 1209 -> "1.2K".
-static QString cgCount(uint64_t n) {
-    struct { double div; const char* suf; } units[] = {{1e9, "G"}, {1e6, "M"}, {1e3, "K"}};
-    for (auto& u : units)
-        if (n >= u.div) {
-            double v = n / u.div;
-            return (v < 100.0) ? QString::number(v, 'f', 1) + u.suf
-                               : QString::number(int(v + 0.5)) + u.suf;
-        }
-    return QString::number((qulonglong)n);
-}
-
-static QString oct6(uint16_t v) {
-    return QString("%1").arg(v, 6, 8, QChar('0'));
-}
-
 // Box geometry in graph (pre-zoom) coordinates.
 static constexpr double BOX_W = 150, BOX_H = 46, H_GAP = 34, V_GAP = 96;
 
 CallGraphWidget::CallGraphWidget(Board* board, QWidget* parent)
-    : QWidget(parent), board_(board) {
+    : ProfilerView(parent), board_(board) {
     setMinimumSize(320, 240);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);   // hover → linked highlighting across profiler windows
@@ -74,13 +56,10 @@ void CallGraphWidget::rebuild() {
     bk::Trace& tr = board_->trace();
     tr.setEnabled(true);
     const bk::Memory& mem = board_->memory();
-    bk::Cpu& cpu = board_->cpu();
 
     // 1. Function entries = JSR destinations. Add the lowest executed address as
     //    a synthetic "main" entry so pre-subroutine code has a home too.
-    std::set<uint16_t> entrySet;
-    for (auto& e : tr.edges())
-        if (cgIsJsr(mem.peekWord(e.first >> 16))) entrySet.insert(e.first & 0xFFFF);
+    std::set<uint16_t> entrySet = tr.callTargets(mem);
 
     int firstExec = -1;
     for (int a = 0; a < 0x10000; a += 2)
@@ -89,11 +68,8 @@ void CallGraphWidget::rebuild() {
     if (entrySet.empty() || (uint16_t)firstExec < *entrySet.begin())
         entrySet.insert((uint16_t)firstExec);
 
-    std::vector<uint16_t> entries(entrySet.begin(), entrySet.end()); // sorted
-    auto funcOf = [&](uint16_t a) -> uint16_t {
-        auto it = std::upper_bound(entries.begin(), entries.end(), a);
-        return (it == entries.begin()) ? entries.front() : *(--it);
-    };
+    // Ниже первой точки входа исполненного кода нет: она не выше firstExec.
+    auto funcOf = [&](uint16_t a) { return bk::Trace::funcOf(entrySet, a); };
 
     // 2. Cost per function = Σ execCount × per-instruction ticks over its range;
     //    also track each function's most recent execution time (for the fade-out).
@@ -104,8 +80,8 @@ void CallGraphWidget::rebuild() {
         uint32_t c = tr.execCount((uint16_t)a);
         if (!c) continue;
         uint16_t f = funcOf((uint16_t)a);
-        cost[f] += (uint64_t)c * cpu.instrTicks(mem.peekWord((uint16_t)a));
-        totalCost_ += (uint64_t)c * cpu.instrTicks(mem.peekWord((uint16_t)a));
+        cost[f] += tr.execTicks((uint16_t)a);
+        totalCost_ += tr.execTicks((uint16_t)a);
         uint32_t le = tr.lastExec((uint16_t)a);
         if (le > lastAct[f]) lastAct[f] = le;
     }
@@ -116,8 +92,8 @@ void CallGraphWidget::rebuild() {
     std::map<std::pair<uint16_t, uint16_t>, uint64_t> edgeW;
     std::unordered_map<uint16_t, uint64_t> incoming;
     for (auto& e : tr.edges()) {
-        uint16_t from = e.first >> 16, to = e.first & 0xFFFF;
-        if (!cgIsJsr(mem.peekWord(from))) continue;
+        const uint16_t from = bk::Trace::edgeFrom(e.first), to = bk::Trace::edgeTo(e.first);
+        if (!bk::isJsr(mem.peekWord(from))) continue;
         uint16_t cf = funcOf(from);
         incoming[to] += e.second;
         if (cf != to) edgeW[{cf, to}] += e.second;
@@ -603,7 +579,7 @@ void CallGraphWidget::paintGraph(QPainter& p) {
             QPointF mid = (!back && !e.bends.empty())
                 ? vt.map(e.bends[e.bends.size() / 2])
                 : 0.125 * p1 + 0.375 * c1 + 0.375 * c2 + 0.125 * pB;
-            QString lbl = cgCount(e.weight);
+            QString lbl = countKMG(e.weight);
             QFont ef = mono; ef.setPixelSize(std::clamp(int(10 * zoom_), 7, 12));
             p.setFont(ef);
             QFontMetrics fm(ef);
@@ -639,7 +615,7 @@ void CallGraphWidget::paintGraph(QPainter& p) {
         p.setFont(nf);
         QFontMetrics fm(nf);
         QString l1 = oct6(n.entry);
-        QString l2 = QString("%1%  ×%2").arg(pct, 0, 'f', pct >= 10 ? 0 : 1).arg(cgCount(n.calls));
+        QString l2 = QString("%1%  ×%2").arg(pct, 0, 'f', pct >= 10 ? 0 : 1).arg(countKMG(n.calls));
         p.setPen(dim(QColor(240, 244, 255), dk));
         p.drawText(r.adjusted(4, 2, -4, -2), Qt::AlignHCenter | Qt::AlignTop, l1);
         p.setPen(dim(QColor(210, 220, 240), dk));
@@ -727,13 +703,12 @@ void CallGraphWidget::mouseMoveEvent(QMouseEvent* e) {
         int found = -1;
         for (int i = (int)nodes_.size() - 1; i >= 0; --i)
             if (nodes_[i].box.contains(g)) { found = nodes_[i].entry; break; }
-        if (found != hoverEmit_) { hoverEmit_ = found; setHighlight(found); emit hoverAddress(found); }
+        hoverTo(found);
     }
 }
 
 void CallGraphWidget::leaveEvent(QEvent*) {
-    if (hoverEmit_ != -1) { hoverEmit_ = -1; emit hoverAddress(-1); }
-    setHighlight(-1);
+    leaveHover();
 }
 
 void CallGraphWidget::mouseReleaseEvent(QMouseEvent* e) {

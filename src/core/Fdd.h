@@ -153,7 +153,8 @@ public:
     // диск, с положением головки — разбирать, что легло на дорожку.
     const std::vector<LogEntry>& writeLog() const { return wlog_; }
     void clearWriteLog() { wlog_.clear(); }
-    size_t logPos() const { return logPos_; }   // начало кольца, когда оно заполнено
+    // Индекс самой старой записи журнала: кольцо, пока не заполнено, начинается с 0.
+    size_t logStart() const { return log_.size() < LOG_CAP ? 0 : logPos_; }
     void clearLog() { log_.clear(); }
     // Номер сектора, который сейчас под головкой (1..10), 0 — межсекторный промежуток.
     int sectorUnderHead() const;

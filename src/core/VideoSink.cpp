@@ -58,8 +58,8 @@ namespace {
 // Все кодеки, которые эмулятор знает; доступны ли они в этой сборке — videoCodecList().
 const std::vector<VideoCodecInfo>& knownCodecs() {
     static const std::vector<VideoCodecInfo> all = {
-        {"zmbv", "ZMBV + PCM в AVI — без потерь (кодек DOSBox)", ".avi"},
-        {"h264", "H.264 + AAC в MP4 — для Telegram и телефонов", ".mp4"},
+        {"zmbv", "ZMBV + PCM в AVI — без потерь (кодек DOSBox)", ".avi", "ZMBV + PCM"},
+        {"h264", "H.264 + AAC в MP4 — для Telegram и телефонов", ".mp4", "H.264 + AAC"},
     };
     return all;
 }

@@ -1,4 +1,5 @@
 #include "HotChartWidget.h"
+#include "QtFormat.h"
 #include <algorithm>
 #include <unordered_map>
 #include <cstdio>
@@ -11,22 +12,6 @@
 
 using bk::Board;
 
-// JSR opcode range (subroutine call) — its target is a function entry.
-static bool isJsr(uint16_t ir) { return ir >= 0004000 && ir <= 0004777; }
-
-// Compact large counts with K/M/G suffixes (matches the code-graph hot list).
-static QString fmtCount(uint32_t n) {
-    struct { double div; const char* suf; } units[] = {{1e9, "G"}, {1e6, "M"}, {1e3, "K"}};
-    for (auto& u : units) {
-        if (n >= u.div) {
-            double v = n / u.div;
-            return (v < 100.0) ? QString::number(v, 'f', 1) + u.suf
-                               : QString::number(int(v + 0.5)) + u.suf;
-        }
-    }
-    return QString::number(n);
-}
-
 // Colour for a normalised address position t in [0,1]: a continuous hue sweep,
 // so instructions with nearby addresses get nearby colours and distant ones get
 // distinct colours. Hue runs 0°→300° (red→…→violet) to avoid the red wrap-around.
@@ -36,7 +21,7 @@ static QColor addrColor(double t) {
 }
 
 HotChartWidget::HotChartWidget(Board* board, QWidget* parent)
-    : QWidget(parent), board_(board) {
+    : ProfilerView(parent), board_(board) {
     setWindowTitle("Горячие инструкции во времени");
     setMinimumSize(640, 360);
     setFocusPolicy(Qt::StrongFocus);
@@ -44,22 +29,15 @@ HotChartWidget::HotChartWidget(Board* board, QWidget* parent)
 }
 
 uint16_t HotChartWidget::funcOf(uint16_t addr) const {
-    if (subEntries_.empty()) return 0;
-    auto it = subEntries_.upper_bound(addr);
-    if (it == subEntries_.begin()) return 0;  // before the first known entry
-    --it;
-    return *it;
+    return bk::Trace::funcOf(subEntries_, addr);
 }
 
 void HotChartWidget::sample() {
     bk::Trace& tr = board_->trace();
     const bk::Memory& mem = board_->memory();
-    bk::Cpu& cpu = board_->cpu();
 
     // Subroutine entries = JSR destinations (for colouring and aggregation).
-    subEntries_.clear();
-    for (auto& e : tr.edges())
-        if (isJsr(mem.peekWord(e.first >> 16))) subEntries_.insert(e.first & 0xFFFF);
+    subEntries_ = tr.callTargets(mem);
 
     // Cumulative CPU ticks per key (instruction, or subroutine when aggregating),
     // plus a representative call count. Hidden keys leave the ranking but still
@@ -71,7 +49,7 @@ void HotChartWidget::sample() {
         uint16_t a16 = static_cast<uint16_t>(a);
         uint32_t c = tr.execCount(a16);
         if (!c) continue;
-        uint64_t tk = static_cast<uint64_t>(c) * cpu.instrTicks(mem.peekWord(a16));
+        const uint64_t tk = tr.execTicks(a16);
         totalTicks += tk;
         uint16_t key = a16;
         if (aggregate_) { uint16_t fe = funcOf(a16); if (fe) key = fe; }
@@ -307,7 +285,7 @@ void HotChartWidget::paintEvent(QPaintEvent*) {
         p.setPen(QColor(225, 228, 235));
         QString right = QString("%1%  ×%2")
                             .arg(s->pctAll, 0, 'f', s->pctAll >= 10.0 ? 0 : 1)
-                            .arg(fmtCount(s->calls));
+                            .arg(countKMG(s->calls));
         int rw = fm.horizontalAdvance(right);
         int rightX = width() - 6 - rw;
         int tx = lx + 16;

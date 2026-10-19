@@ -1,6 +1,8 @@
 #include "HotPathWidget.h"
+#include "QtFormat.h"
 #include "Board.h"
 #include "Disasm.h"
+#include "Instr.h"
 #include <QPainter>
 #include <QWheelEvent>
 #include <QMouseEvent>
@@ -13,40 +15,19 @@
 
 using bk::Board;
 
-// A control-transfer instruction ends a basic block (PDP-11/ВМ1, octal ranges).
-static bool isTerminator(uint16_t ir) {
-    if (ir >= 0000400 && ir <= 0003477) return true; // conditional branches / BR
-    if (ir >= 0100000 && ir <= 0103777) return true; // BPL..BCS
-    if (ir >= 0000100 && ir <= 0000177) return true; // JMP
-    if (ir >= 0004000 && ir <= 0004777) return true; // JSR
-    if (ir >= 0000200 && ir <= 0000207) return true; // RTS
-    if (ir == 0000002 || ir == 0000006) return true; // RTI / RTT
-    if (ir >= 0104000 && ir <= 0104777) return true; // EMT / TRAP
-    if (ir >= 0077000 && ir <= 0077777) return true; // SOB
-    if (ir == 0000000) return true;                  // HALT
-    return false;
-}
+// A control-transfer instruction ends a basic block.
+static bool isTerminator(uint16_t ir) { return bk::instrFlow(ir) != bk::Flow::Next; }
 
 // True for transfers that do NOT fall through to the next instruction.
 static bool isUncond(uint16_t ir) {
-    if (ir >= 0000400 && ir <= 0000777) return true; // unconditional BR
-    if (ir >= 0000100 && ir <= 0000177) return true; // JMP
-    if (ir >= 0000200 && ir <= 0000207) return true; // RTS
-    if (ir == 0000002 || ir == 0000006) return true; // RTI / RTT
-    if (ir == 0000000) return true;                  // HALT
-    return false;
+    const bk::Flow f = bk::instrFlow(ir);
+    return f == bk::Flow::Jump || f == bk::Flow::Return || f == bk::Flow::Halt;
 }
 
-static QString oct6(uint16_t v) { return QString("%1").arg(v, 6, 8, QChar('0')); }
 
-static QString cnt(uint32_t n) {
-    if (n >= 1000000) return QString::number(n / 1e6, 'f', 1) + "M";
-    if (n >= 1000)    return QString::number(n / 1e3, 'f', 1) + "K";
-    return QString::number(n);
-}
 
 HotPathWidget::HotPathWidget(Board* board, QWidget* parent)
-    : QWidget(parent), board_(board) {
+    : ProfilerView(parent), board_(board) {
     setMinimumSize(360, 260);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);   // hover → linked highlighting
@@ -69,7 +50,6 @@ void HotPathWidget::rebuild() {
     bk::Trace& tr = board_->trace();
     tr.setEnabled(true);
     const bk::Memory& mem = board_->memory();
-    bk::Cpu& cpu = board_->cpu();
 
     // 1. Executed instructions in address order (skip user-hidden ones).
     instrs_.clear();
@@ -77,7 +57,7 @@ void HotPathWidget::rebuild() {
     for (int a = 0; a < 0x10000; a += 2) {
         uint32_t c = tr.execCount((uint16_t)a);
         if (!c) continue;
-        totalCost_ += (uint64_t)c * cpu.instrTicks(mem.peekWord((uint16_t)a));
+        totalCost_ += tr.execTicks((uint16_t)a);
         if (excluded_.count((uint16_t)a)) continue;
         instrs_.push_back({ (uint16_t)a, c });
         maxCount_ = std::max(maxCount_, c);
@@ -94,7 +74,7 @@ void HotPathWidget::rebuild() {
     std::set<uint16_t> leaders;
     leaders.insert(instrs_[0].addr);
     for (auto& e : tr.edges()) {
-        uint16_t to = e.first & 0xFFFF;
+        uint16_t to = bk::Trace::edgeTo(e.first);
         if (idxOf.count(to)) leaders.insert(to);
     }
     for (int i = 0; i + 1 < NI; ++i) {
@@ -126,7 +106,7 @@ void HotPathWidget::rebuild() {
     // 4. Block-level successor/predecessor weights: taken branches + fall-through.
     std::vector<std::map<int, uint64_t>> succ(NB), pred(NB);
     for (auto& e : tr.edges()) {
-        uint16_t from = e.first >> 16, to = e.first & 0xFFFF;
+        uint16_t from = bk::Trace::edgeFrom(e.first), to = bk::Trace::edgeTo(e.first);
         auto f = blockByLast.find(from); auto t = blockOfLeader.find(to);
         if (f == blockByLast.end() || t == blockOfLeader.end() || f->second == t->second) continue;
         succ[f->second][t->second] += e.second;
@@ -163,7 +143,7 @@ void HotPathWidget::rebuild() {
         pth.cost = 0;
         for (int b : pth.blocks)
             for (int k = blocks_[b].first; k <= blocks_[b].last; ++k)
-                pth.cost += (uint64_t)instrs_[k].count * cpu.instrTicks(mem.peekWord(instrs_[k].addr));
+                pth.cost += tr.execTicks(instrs_[k].addr);
         paths_.push_back(std::move(pth));
         if ((int)paths_.size() >= topN_) break;
     }
@@ -201,7 +181,6 @@ void HotPathWidget::paintEvent(QPaintEvent*) {
 
     rows_.clear();
     double y = top - scroll_;
-    const int bottom = height() - rowH_ - 6;
     const double logMax = std::log(double(maxCount_) + 1.0);
     auto hfrac = [&](uint32_t c) { return c ? std::log(double(c) + 1.0) / (logMax + 1e-9) : 0.0; };
 
@@ -231,7 +210,7 @@ void HotPathWidget::paintEvent(QPaintEvent*) {
             p.setPen(QColor(235, 240, 255));
             p.drawText(x, (int)y + fm.ascent() + 2,
                        QString("#%1  %2  %3  %4 бл  %5%")
-                           .arg(rank).arg(oct6(path.entry)).arg("×" + cnt(blocks_[path.blocks.front()].count), -8)
+                           .arg(rank).arg(oct6(path.entry)).arg("×" + countKMG(blocks_[path.blocks.front()].count), -8)
                            .arg((int)path.blocks.size(), 2).arg(pct, 4, 'f', 1));
             // heat bar (proportional to % CPU) at the right edge
             int barW = width() / 4;
@@ -265,7 +244,7 @@ void HotPathWidget::paintEvent(QPaintEvent*) {
                     nextTxt = "→ " + oct6(blocks_[path.blocks[bi + 1]].leader);
                 p.setPen(QColor(225, 232, 246));
                 QString s = QString("%1  %2  ×%3  %4 инстр  %5")
-                                .arg(oct6(blk.leader)).arg(mnem, -18).arg(cnt(blk.count), -6)
+                                .arg(oct6(blk.leader)).arg(mnem, -18).arg(countKMG(blk.count), -6)
                                 .arg(ni, 2).arg(nextTxt);
                 p.drawText(QRect(x, (int)y, width() - x - 10, rowH_),
                            Qt::AlignVCenter | Qt::AlignLeft,
@@ -295,7 +274,7 @@ void HotPathWidget::paintEvent(QPaintEvent*) {
                                QString::fromStdString(d.text));
                     p.setPen(QColor(230, 170, 120));
                     p.drawText(QRect(0, (int)y, width() - 10, rowH_),
-                               Qt::AlignVCenter | Qt::AlignRight, "×" + cnt(instrs_[k].count));
+                               Qt::AlignVCenter | Qt::AlignRight, "×" + countKMG(instrs_[k].count));
                 }
                 y += rowH_;
             }
@@ -337,12 +316,11 @@ void HotPathWidget::mouseMoveEvent(QMouseEvent* e) {
     // Hover → broadcast the address under the cursor for linked highlighting.
     int found = -1;
     for (const Row& r : rows_) if (r.rect.contains(e->pos())) { found = r.addr; break; }
-    if (found != hoverEmit_) { hoverEmit_ = found; setHighlight(found); emit hoverAddress(found); }
+    hoverTo(found);
 }
 
 void HotPathWidget::leaveEvent(QEvent*) {
-    if (hoverEmit_ != -1) { hoverEmit_ = -1; emit hoverAddress(-1); }
-    setHighlight(-1);
+    leaveHover();
 }
 
 void HotPathWidget::mouseReleaseEvent(QMouseEvent* e) {

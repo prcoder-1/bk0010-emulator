@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include "ProfilerView.h"
 #include <QRect>
 #include <QColor>
 #include <cstdint>
@@ -15,18 +16,14 @@ namespace bk { class Board; }
 // instruction's executions-per-interval over time; lines are coloured by the
 // subroutine (function) the instruction belongs to, so activity of different
 // functions is easy to tell apart. Opened from the Отладка menu.
-class HotChartWidget : public QWidget {
+class HotChartWidget : public ProfilerView {
     Q_OBJECT
 public:
     explicit HotChartWidget(bk::Board* board, QWidget* parent = nullptr);
     // Driven from the 50 Hz loop; takes a new sample once enough emulated frames
     // have elapsed (so the time axis follows emulated, not wall-clock, time).
-    void refresh();
+    void refresh() override;
 
-signals:
-    // Emitted when the user clicks a legend row, so the debugger's disassembler
-    // can jump to that instruction (same wiring as the code graph).
-    void addressPicked(uint16_t addr);
 
 protected:
     void paintEvent(QPaintEvent*) override;

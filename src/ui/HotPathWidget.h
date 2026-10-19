@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include "ProfilerView.h"
 #include <QRect>
 #include <QPoint>
 #include <cstdint>
@@ -18,16 +19,12 @@ namespace bk { class Board; }
 // Opened from the Отладка menu. Scroll with the wheel or by dragging; click a
 // row's triangle to fold/unfold, click its body to jump the disassembler there;
 // right-click hides a swamping address; +/- change how many paths are shown.
-class HotPathWidget : public QWidget {
+class HotPathWidget : public ProfilerView {
     Q_OBJECT
 public:
     explicit HotPathWidget(bk::Board* board, QWidget* parent = nullptr);
-    void refresh();
-    void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
+    void refresh() override;
 
-signals:
-    void addressPicked(uint16_t addr);
-    void hoverAddress(int addr);   // address under the cursor (-1 = none)
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -74,7 +71,5 @@ private:
     double   contentH_ = 0.0;
     bool     dragging_ = false;
     QPoint   lastDrag_, pressPos_;
-    int      link_ = -1;            // linked-highlight address (-1 = none)
-    int      hoverEmit_ = -2;       // last address broadcast via hoverAddress
     std::vector<Row> rows_;         // rows from the last paint (hit-testing)
 };

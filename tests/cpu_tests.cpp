@@ -3,6 +3,7 @@
 #include "Cpu.h"
 #include "Memory.h"
 #include "Disasm.h"
+#include "Instr.h"
 #include "Board.h"
 #include "Vp037.h"
 #include "Joystick.h"
@@ -32,6 +33,8 @@ extern "C" {
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <csignal>
+#include <unistd.h>
 
 using namespace bk;
 
@@ -40,8 +43,31 @@ static int g_total = 0;
 
 #define CHECK(cond, msg) do { \
     ++g_total; \
-    if (!(cond)) { std::printf("FAIL: %s (line %d)\n", msg, __LINE__); ++g_fail; } \
+    if (!(cond)) { std::printf("FAIL: [%s] %s (line %d)\n", g_section, msg, __LINE__); ++g_fail; } \
 } while (0)
+
+// Разделы тестов. `cpu_tests <подстрока>…` гоняет только разделы с такими словами в
+// названии (код вне разделов выполняется всегда), а при падении процесса видно, в каком
+// разделе оно случилось.
+static const char* g_section = "";
+static std::vector<std::string> g_filters;
+static bool beginSection(const char* name) {
+    g_section = name;
+    if (g_filters.empty()) return true;
+    for (const std::string& f : g_filters)
+        if (std::string(name).find(f) != std::string::npos) return true;
+    return false;
+}
+#define SECTION(name) if (!beginSection(name)) {} else
+
+static void onCrash(int sig) {
+    const char head[] = "\nCRASH (signal) in section: ";
+    (void)!write(2, head, sizeof head - 1);
+    (void)!write(2, g_section, std::strlen(g_section));
+    (void)!write(2, "\n", 1);
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
 
 // Helper: assemble a program of raw words into RAM at addr, reset PC there.
 static void loadProg(Memory& m, uint16_t addr, std::initializer_list<uint16_t> words) {
@@ -49,8 +75,11 @@ static void loadProg(Memory& m, uint16_t addr, std::initializer_list<uint16_t> w
     for (uint16_t w : words) { m.pokeWord(a, w); a += 2; }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) g_filters.push_back(argv[i]);
+    for (int sig : {SIGSEGV, SIGABRT, SIGFPE, SIGILL}) std::signal(sig, onCrash);
     // ---- MOV immediate ----
+    SECTION("MOV immediate")
     {
         Memory m; Cpu c(m);
         loadProg(m, 01000, {012700, 0123456}); // MOV #123456, R0
@@ -61,6 +90,7 @@ int main() {
         CHECK(!(c.psw & Cpu::CC_Z), "MOV nonzero clears Z");
     }
     // ---- ADD with carry/overflow ----
+    SECTION("ADD with carry/overflow")
     {
         Memory m; Cpu c(m);
         loadProg(m, 01000, {012700, 0100000, 012701, 0100000, 060100}); // R0=100000; R1=100000; ADD R1,R0
@@ -72,6 +102,7 @@ int main() {
         CHECK((c.psw & Cpu::CC_V), "neg+neg->pos sets V");
     }
     // ---- SUB / CMP flags ----
+    SECTION("SUB / CMP flags")
     {
         Memory m; Cpu c(m);
         loadProg(m, 01000, {012700, 5, 012701, 5, 020001}); // R0=5;R1=5; CMP R0,R1
@@ -82,6 +113,7 @@ int main() {
         CHECK(!(c.psw & Cpu::CC_C), "CMP equal: no borrow -> C clear");
     }
     // ---- INC / DEC ----
+    SECTION("INC / DEC")
     {
         Memory m; Cpu c(m);
         loadProg(m, 01000, {012700, 0077777, 005200}); // R0=077777; INC R0
@@ -92,6 +124,7 @@ int main() {
         CHECK((c.psw & Cpu::CC_N), "INC result negative sets N");
     }
     // ---- Rotate / shift ----
+    SECTION("Rotate / shift")
     {
         Memory m; Cpu c(m);
         loadProg(m, 01000, {012700, 1, 006000}); // R0=1; ROR R0
@@ -109,6 +142,7 @@ int main() {
         CHECK((c.psw & Cpu::CC_N), "ASL result negative");
     }
     // ---- Branch taken (BEQ) ----
+    SECTION("Branch taken (BEQ)")
     {
         Memory m; Cpu c(m);
         // CLR R0 (Z=1); BEQ +2 (skip next); MOV #1,R0 (skipped); MOV #2,R0
@@ -120,6 +154,7 @@ int main() {
         CHECK(c.r[7] == 01010, "BEQ taken skips one 2-word instruction");
     }
     // ---- JSR / RTS ----
+    SECTION("JSR / RTS")
     {
         Memory m; Cpu c(m);
         // 01000: JSR PC, sub ; 01004: HALT
@@ -137,6 +172,7 @@ int main() {
         CHECK(c.r[7] == 01004, "RTS returns to caller");
     }
     // ---- SOB loop ----
+    SECTION("SOB loop")
     {
         Memory m; Cpu c(m);
         // R1=3; loop: DEC R0 (dummy) ; SOB R1, loop
@@ -155,6 +191,7 @@ int main() {
         CHECK(iters == 3, "SOB loops exactly 3 times");
     }
     // ---- Disassembler smoke test ----
+    SECTION("Disassembler smoke test")
     {
         Memory m;
         m.pokeWord(01000, 012700); m.pokeWord(01002, 0123456); // MOV #123456,R0
@@ -164,7 +201,29 @@ int main() {
         std::printf("disasm: %s\n", d.text.c_str());
     }
 
+    // ---- Разбор команды (Instr.h): длина совпадает с дизассемблером, цели переходов ----
+    SECTION("Разбор команды (Instr.h): длина совпадает с дизассемблером, цели переходов")
+    {
+        Memory m;
+        int bad = -1;
+        for (uint32_t ir = 0; ir <= 0177777 && bad < 0; ++ir) {
+            m.pokeWord(01000, static_cast<uint16_t>(ir));
+            m.pokeWord(01002, 0123); m.pokeWord(01004, 0456);
+            if (instrInfo(m, 01000).words != disasm(m, 01000).words) bad = static_cast<int>(ir);
+        }
+        CHECK(bad < 0, "instrInfo: длина команды = disasm для всех 65536 кодов");
+        loadProg(m, 01000, {0000403, 0077005, 0004737, 02000, 0000167, 010, 0104035, 0000207});
+        const InstrInfo br = instrInfo(m, 01000), sob = instrInfo(m, 01002), jsr = instrInfo(m, 01004),
+                        jmp = instrInfo(m, 01010), emt = instrInfo(m, 01014), rts = instrInfo(m, 01016);
+        CHECK(br.flow == Flow::Jump && br.target == 01010 && sob.flow == Flow::Branch && sob.target == 0772
+              && jsr.flow == Flow::Call && jsr.words == 2 && jsr.target == 02000
+              && jmp.flow == Flow::Jump && jmp.target == 01024 && emt.flow == Flow::Trap && !emt.hasTarget
+              && rts.flow == Flow::Return,
+              "instrInfo: BR, SOB, JSR @#, JMP a(PC), EMT, RTS — вид и цель");
+    }
+
     // ---- Save / restore state round-trip ----
+    SECTION("Save / restore state round-trip")
     {
         Board b;
         b.reset();
@@ -192,6 +251,7 @@ int main() {
     }
 
     // ---- HALT traps through vector 0004 (BK-0010), not a permanent stop ----
+    SECTION("HALT traps through vector 0004 (BK-0010), not a permanent stop")
     {
         Memory m; Cpu c(m);
         m.pokeWord(0004, 03000);   // STOP vector -> handler
@@ -214,6 +274,7 @@ int main() {
 
     // ---- 1801VM1 programmable timer (0177706/0177710/0177712) ----
     // Bits: CONTINUOUS=002 ENBEND=004 ONCE=010 START=020 DIV16=040 DIV4=0100 END=0200
+    SECTION("1801VM1 programmable timer (0177706/0177710/0177712)")
     {
         Board b;
         b.reset();
@@ -284,16 +345,17 @@ int main() {
     // ---- Keyboard: single-code register, new press OVERWRITES an unread code ----
     // (как на реальной БК и в референсном bk/tty.c — иначе игры, читающие код
     // только по событию (LAND), получают предыдущую клавишу вместо новой)
+    SECTION("Keyboard: single-code register, new press OVERWRITES an unread code")
     {
         Board b;
         b.reset();
         CHECK(!b.keyReady(), "keyboard: no key ready initially");
-        CHECK(b.pressKey(0101), "keyboard: first key (A) latched");   // 'A'
+        b.pressKey(0101);   // 'A'
         CHECK(b.keyReady(), "keyboard: ready flag set after keypress");
         // Реальная ВП1-014 (как bk/tty.c): новое нажатие ПЕРЕЗАПИСЫВАЕТ регистр,
         // даже если старый код не прочитан. Игры (PITON) читают 0177662 по биту
         // «клавиша нажата» и должны видеть код ПОСЛЕДНЕЙ клавиши, а не застрявший.
-        CHECK(b.pressKey(0102), "keyboard: second key overwrites unread code");
+        b.pressKey(0102);
         CHECK((b.memory().readWord(0177662) & 0177) == 0102, "keyboard: register holds LATEST code");
         // Флаг готовности гаснет НЕ мгновенно, а через ~900 тактов после чтения кода
         // (ВП1-014). Сразу после чтения он ещё стоит.
@@ -302,7 +364,7 @@ int main() {
         b.cpu().reset(01000);
         b.runTicks(1000);
         CHECK(!b.keyReady(), "keyboard: флаг готовности гаснет через ~900 тактов");
-        CHECK(b.pressKey(0103), "keyboard: next key latched after previous was read");
+        b.pressKey(0103);
         CHECK((b.memory().readWord(0177662) & 0177) == 0103, "keyboard: register holds next code");
         // Register 0177716 bit 6 (key-pressed, active-low) tracks the *physical*
         // key-held state, set/cleared independently of the code register — games
@@ -320,6 +382,7 @@ int main() {
     // ---- АР2: прерывание по вектору 0274, в 0177662 — 7-битный код ----------
     // Обработчик монитора 0101362 сам выставляет бит 7 и переводит код в «нижний
     // регистр»: АР2+; (0273) становится командой 0233 «32/64 символа».
+    SECTION("АР2: прерывание по вектору 0274, в 0177662 — 7-битный код")
     {
         Board b;
         if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
@@ -343,6 +406,7 @@ int main() {
     // Прерывание клавиатуры выдаётся НЕ мгновенно: игра, которая его разрешила и
     // при этом сама опрашивает регистр (SOKOBAN: CLR 177660, затем TST/CMPB),
     // должна успеть прочитать код раньше ISR монитора. Отсрочка — четверть кадра.
+    SECTION("Клавиатура: отсрочка прерывания и его отмена по прочтению кода")
     {
         Board b;
         b.reset();
@@ -372,6 +436,7 @@ int main() {
     }
 
     // ---- Vp037: геометрия развёртки (порт va_037.v) ----
+    SECTION("Vp037: геометрия развёртки (порт va_037.v)")
     {
         // Свободный прогон от начала видимого поля. Считаем строки по перепадам
         // HGATE (одна активная зона ~HGATE на строку) и такты с активной развёрткой.
@@ -408,6 +473,7 @@ int main() {
     }
 
     // ---- Модель шины ВМ1 + окно 037 (Vm1Timing.h, Board::busStep) ----
+    SECTION("Модель шины ВМ1 + окно 037 (Vm1Timing.h, Board::busStep)")
     {
         // Эталоны — тесты XOP2/XOP2N на реальной БК-0010-01 пользователя (MOV R0 -> R1
         // по всем режимам; строка — режим источника, столбец — режим приёмника) и
@@ -576,6 +642,7 @@ int main() {
     }
 
     // ---- Быстрая память в модели шины: ОЗУ СМК-512 -------------------------
+    SECTION("Быстрая память в модели шины: ОЗУ СМК-512")
     {
         // Замеры Manwe на реальной БК-0010-01 с СМК-512: тест 45com-hi и полная
         // таблица MOV/CMP/ADD (колонки «всё быстрое» и «быстрый код, данные в ДОЗУ»).
@@ -637,6 +704,7 @@ int main() {
     }
 
     // ---- Вход в прерывание и ловушка T-бита по шине; фаза шины в снимке ----
+    SECTION("Вход в прерывание и ловушка T-бита по шине; фаза шины в снимке")
     {
         // Шаблоны входа — из симуляции кристалла (eCat3): PSW и PC в стек, вектор,
         // у клавиатуры ещё цикл IAKO. Раньше вход стоил константу 40 тактов, а ловушка
@@ -715,6 +783,7 @@ int main() {
     }
 
     // ---- Board: арбитраж 037 замедляет исполнение ----
+    SECTION("Board: арбитраж 037 замедляет исполнение")
     {
         // Тесный цикл в ОЗУ, теряющий окно 037 (чтение по -(R) + переход обратно).
         // За фиксированный бюджет тактов с арбитражем проходит МЕНЬШЕ инструкций.
@@ -736,6 +805,7 @@ int main() {
     }
 
     // ---- Раскладки джойстика (общая таблица ядра, src/core/Joystick.h) ----
+    SECTION("Раскладки джойстика (общая таблица ядра, src/core/Joystick.h)")
     {
         std::string err;
         CHECK(joyMask(JoyStandard::Klad2, "right", &err) == 0001, "Клад-2: ВПРАВО = 001");
@@ -763,6 +833,7 @@ int main() {
     }
 
     // ---- Имена клавиш и кодирование текста в КОИ-7 (src/core/BkKeys.h) ----
+    SECTION("Имена клавиш и кодирование текста в КОИ-7 (src/core/BkKeys.h)")
     {
         CHECK(bkKeyByName("enter") == 012, "имя enter -> 012");
         CHECK(bkKeyByName("ВВОД") == 012, "русское имя, верхний регистр");
@@ -797,6 +868,7 @@ int main() {
     }
 
     // ---- Снимок состояния: джойстик и удержание клавиши ----
+    SECTION("Снимок состояния: джойстик и удержание клавиши")
     {
         Board b; b.reset();
         b.memory().pokeWord(01000, 0123456);
@@ -837,6 +909,7 @@ int main() {
     }
 
     // ---- Снимок: хвост BKX1 — звук, порт, клавиатура, фаза таймера (обе машины) ----
+    SECTION("Снимок: хвост BKX1 — звук, порт, клавиатура, фаза таймера (обе машины)")
     for (int mach = 0; mach < 2; ++mach) {
         Board b;
         b.setMachine(mach ? Machine::Bk0011m : Machine::Bk0010);
@@ -880,6 +953,7 @@ int main() {
     }
 
     // ---- Лог обращений к В-В: чтения, фильтр адреса, PC инструкции ----
+    SECTION("Лог обращений к В-В: чтения, фильтр адреса, PC инструкции")
     {
         Board b; b.reset();
         b.setJoystick(0123);
@@ -899,6 +973,7 @@ int main() {
     }
 
     // ---- Лог фронтов динамика ----
+    SECTION("Лог фронтов динамика")
     {
         Board b; b.reset();
         b.setSpeakerLog(true);
@@ -911,6 +986,7 @@ int main() {
     }
 
     // ---- Динамик: 8 уровней из битов 6, 5 и 2 регистра 0177716 ----
+    SECTION("Динамик: 8 уровней из битов 6, 5 и 2 регистра 0177716")
     {
         Board b; b.reset();
         b.setSpeakerLog(true);
@@ -934,6 +1010,7 @@ int main() {
     }
 
     // ---- Параллельный порт: раздельные регистры ввода и вывода ----
+    SECTION("Параллельный порт: раздельные регистры ввода и вывода")
     {
         Board b; b.reset();
         b.setJoystick(0123);
@@ -943,6 +1020,7 @@ int main() {
     }
 
     // ---- 0177716 бит 2: признак записи в системный регистр ----
+    SECTION("0177716 бит 2: признак записи в системный регистр")
     {
         Board b; b.reset();
         CHECK(!(b.memory().readWord(0177716) & 004), "бит 2 сброшен, пока записи не было");
@@ -952,6 +1030,7 @@ int main() {
     }
 
     // ---- RESET: PSW не трогает, периферию сбрасывает ----
+    SECTION("RESET: PSW не трогает, периферию сбрасывает")
     {
         Board b; b.reset();
         b.memory().writeWord(0177712, 020 | 004);   // запустить таймер
@@ -967,6 +1046,7 @@ int main() {
     }
 
     // ---- WAIT: прерывание возвращает управление ЗА команду, а не на неё ----
+    SECTION("WAIT: прерывание возвращает управление ЗА команду, а не на неё")
     {
         Memory m; Cpu c(m);
         m.pokeWord(0100, 03000);    // вектор кадрового прерывания
@@ -1000,6 +1080,7 @@ int main() {
     }
 
     // ---- Кадровое прерывание защёлкивается, а не теряется при закрытой маске ----
+    SECTION("Кадровое прерывание защёлкивается, а не теряется при закрытой маске")
     {
         Board b; b.reset();
         b.memory().pokeWord(0100, 03000);
@@ -1017,6 +1098,7 @@ int main() {
     }
 
     // ---- Внутренние регистры ЦП 0177700/02/04 (04-процессор, §4.3) ----
+    SECTION("Внутренние регистры ЦП 0177700/02/04 (04-процессор, §4.3)")
     {
         Board b; b.reset();
         CHECK(b.memory().readWord(0177700) == 0177740, "CPU_MODE читается как 177740");
@@ -1033,6 +1115,7 @@ int main() {
     }
 
     // ---- «Баг флага C» ВМ1 [ВМ1 §10]: примеры прямо из документации ----
+    SECTION("«Баг флага C» ВМ1 [ВМ1 §10]: примеры прямо из документации")
     {
         // SEC / MOVB R1,R0 / BCC — переход БУДЕТ выполнен (неверно, но так на железе).
         Memory m; Cpu c(m);
@@ -1085,6 +1168,7 @@ int main() {
     }
 
     // ---- Длительность кадра: 61440 тактов (48,83 Гц), а не 60000 ----
+    SECTION("Длительность кадра: 61440 тактов (48,83 Гц), а не 60000")
     {
         Board b;
         CHECK(b.ticksPerFrame() == 61440, "кадр = 61440 тактов ЦП");
@@ -1105,6 +1189,7 @@ int main() {
     }
 
     // ---- Клавиша «СТОП»: вектор 4, приоритет её не запрещает ----
+    SECTION("Клавиша «СТОП»: вектор 4, приоритет её не запрещает")
     {
         Board b; b.reset();
         b.memory().pokeWord(0004, 03000);    // обработчик «СТОП»/зависания
@@ -1137,6 +1222,7 @@ int main() {
     }
 
     // ---- runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры ----
+    SECTION("runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры")
     {
         Board b; b.reset();
         b.memory().pokeWord(0100, 03000);    // ISR
@@ -1146,13 +1232,17 @@ int main() {
         b.memory().pokeWord(01002, 0000240); // NOP — цель прогона
         b.cpu().reset(01000, 0);
         b.cpu().r[6] = 02000;
+        b.trace().setEnabled(true);
         CHECK(b.runUntil(01002, 5 * b.ticksPerFrame()),
               "runUntil проходит WAIT: кадры выдаются и в прогоне отладчика");
+        CHECK(b.trace().execCount(01000) <= 2,
+              "runUntil простаивает на WAIT, как runTicks, а не исполняет его заново");
     }
 
     // ---- Ловушка по T-биту (вектор 014) и разница RTI/RTT ----
     // На ней держится «музыка параллельно с игрой»: обработчик 014 крутит динамик
     // после каждой команды основной программы и возвращается по RTT.
+    SECTION("Ловушка по T-биту (вектор 014) и разница RTI/RTT")
     {
         Memory m; Cpu c(m);
         m.pokeWord(014, 03000);          // вектор T-ловушки
@@ -1205,6 +1295,7 @@ int main() {
 
     // ---- Таймер при включении: непрограммированный счётчик проходит «минус» ----
     // Идиома «ждать таймер» (TST @#177710 / BPL) ждёт знакового бита счётчика.
+    SECTION("Таймер при включении: непрограммированный счётчик проходит «минус»")
     {
         Board b; b.reset();
         CHECK(b.peekReg(0177706) == 0177777, "предел таймера при включении — все единицы");
@@ -1220,6 +1311,7 @@ int main() {
     }
 
     // ---- Динамик: сигнал далеко за Найквистом не сворачивается в слышимую полосу ----
+    SECTION("Динамик: сигнал далеко за Найквистом не сворачивается в слышимую полосу")
     {
         // Меандр с полупериодом 10 тактов = 150 кГц. RC-цепь пищалки (tau = 55.8 мкс,
         // срез ~2.85 кГц) обязана погасить его примерно в 50 раз ДО выборки. Если
@@ -1236,6 +1328,7 @@ int main() {
     }
 
     // ---- Построчная отрисовка: у каждой строки свой скролл ----
+    SECTION("Построчная отрисовка: у каждой строки свой скролл")
     {
         Board b; b.reset();
         for (int i = 0; i < 256; ++i) b.memory().pokeByte(0040000 + i * 64, 0);
@@ -1262,6 +1355,7 @@ int main() {
     }
 
     // ---- Экранная кодировка БК -> UTF-8 ----
+    SECTION("Экранная кодировка БК -> UTF-8")
     {
         CHECK(bkScreenCodeToUtf8(0101) == "A", "0101 -> латинская A");
         CHECK(bkScreenCodeToUtf8(0341) == "А", "0341 -> кириллическая А");
@@ -1273,6 +1367,7 @@ int main() {
     }
 
     // ---- OCR: текст, нарисованный знакогенератором ПЗУ, читается обратно ----
+    SECTION("OCR: текст, нарисованный знакогенератором ПЗУ, читается обратно")
     {
         Board b;
         if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
@@ -1353,6 +1448,7 @@ int main() {
     // Таблица режимов переписана из документации разработчиков (БК-docs,
     // 17-контроллер-СМК.md, Табл. 1) НЕЗАВИСИМО от реализации — это и есть
     // проверка. Вариант «новой» версии контроллера, то есть реплики СМК-512.
+    SECTION("Блок расширения памяти СМК-512 («АльтПро»)")
     {
         using bk::Smk512;
         bk::Board b;
@@ -1589,6 +1685,7 @@ int main() {
     // таблица выше: там мы сверяем реализацию с документацией, здесь — с чужой
     // программой, написанной под живое железо. Результат читается с экрана тем же
     // OCR, что и в MCP (bk_ocr).
+    SECTION("Сквозной тест СМК: сторонний SMKTEST.bin")
     {
         Board probe;
         const std::string binPath = std::string(BK_TEST_DATA_DIR) + "/SMKTEST.bin";
@@ -1648,6 +1745,7 @@ int main() {
     // ячейки (в десятых такта) возвращается в R0 из `CALL @#CODMEM`. Эталон — фото с
     // реальной БК-0010-01 после такого включения питания, что выпала фаза 1
     // (docs/slow-memory-timing.md): 45 из 45.
+    SECTION("45com-lo (©Manwe) на БК-0010-01 пользователя, фаза 1")
     {
         const std::string binPath = std::string(BK_TEST_DATA_DIR) + "/45com-lo.bin";
         Board brd;
@@ -1693,6 +1791,7 @@ int main() {
     // ловит маркер A1. Поэтому проверяем именно то, что видит драйвер: после
     // поиска маркера должно прийти A1A1, затем признак поля (A1FE или A1FB), а
     // за полем идентификатора — дорожка, сторона, номер сектора и код длины.
+    SECTION("Контроллер НГМД: поток дорожки и протокол регистров")
     {
         using bk::Fdd;
         CHECK(Fdd::looksLikeImage("disk.bkd") && Fdd::looksLikeImage("DISK.BKD"),
@@ -1796,6 +1895,7 @@ int main() {
         // Перехват здесь доходит до программы как «файл не найден» — а многие
         // игры этот ответ не проверяют и идут работать с непрочитанным буфером
         // (onslaught.bkd: расшифровывает мусор и передаёт на него управление).
+        SECTION("EMT 36 при вставленной дискете принадлежит ДОС, а не хосту")
         {
             auto runEmt36 = [](Board& b) {
                 b.memory().pokeWord(01000, 0104036);          // EMT 36
@@ -1837,6 +1937,7 @@ int main() {
     // адресу лежит регистр управления экраном: без ловушки она считает машину
     // одиннадцатой, ставит негодный режим памяти, и ни ANDOS, ни игры с дискет
     // не поднимаются.
+    SECTION("«Зависание»: запись в регистр, который её не принимает")
     {
         Board b;
         b.reset();
@@ -1881,6 +1982,7 @@ int main() {
     // ---- Шина МПИ: блок расширения памяти и дисковод вместе ------------------
     // На живой машине это одна плата, поэтому регистры 0177130/0177132 общие, а
     // окно 0160000 отдаётся ПЗУ драйвера только тогда, когда его не занял ДОЗУ.
+    SECTION("Шина МПИ: блок расширения памяти и дисковод вместе")
     {
         Board b;
         if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
@@ -1945,6 +2047,7 @@ int main() {
     // Плата выставляет ПЗУ и на страницу регистров, регистры БК тоже отвечают —
     // читается монтажное ИЛИ. Кроме «дыры» 0177660..0177664 и периферийного блока
     // ВМ1 0177700..0177712, который процессор читает изнутри.
+    SECTION("Закрытие регистров: зеркало ПЗУ СМК в режиме SYS")
     {
         Board b;
         if (!b.loadRoms(BK_DEFAULT_ROM_DIR)) {
@@ -1996,6 +2099,7 @@ int main() {
 
 
     // ---- Таймер ВМ1, режим перезагрузки: отсчёта со значением 0 нет, период = предел ----
+    SECTION("Таймер ВМ1, режим перезагрузки: отсчёта со значением 0 нет, период = предел")
     {
         Board b; b.reset();
         Memory& m = b.memory();
@@ -2024,6 +2128,7 @@ int main() {
     }
 
     // ---- Команда RESET останавливает таймер, но счётчик не трогает (К1801ВМ1, §6.6) ----
+    SECTION("Команда RESET останавливает таймер, но счётчик не трогает (К1801ВМ1, §6.6)")
     {
         Board b; b.reset();
         Memory& m = b.memory();
@@ -2071,6 +2176,7 @@ int main() {
 
     // ======================= БК-0011М ===========================================
     // ---- Растр: кадр эмулятора начинается с nVSYNC (RTL va_037.v:239-241) -------
+    SECTION("Растр: кадр эмулятора начинается с nVSYNC (RTL va_037.v:239-241)")
     {
         Vp037 v;
         v.syncToVsync();
@@ -2087,6 +2193,7 @@ int main() {
         CHECK(v.lineWord() == 10, "слово строки считается по 8 CLKIN");
     }
     // ---- Частота и кадр -----------------------------------------------------
+    SECTION("Частота и кадр")
     {
         Board b; b.setMachine(Machine::Bk0011m);
         CHECK(b.cpuFreqHz() == 4000000, "11М: ЦП 4 МГц");
@@ -2100,6 +2207,7 @@ int main() {
               "11М: 1 такт = 1,5 CLKIN — за полкадра луч проходит полкадра");
     }
     // ---- Простой по WAIT: время идёт ----------------------------------------
+    SECTION("Простой по WAIT: время идёт")
     {
         Board b; b.reset();
         b.memory().pokeWord(01000, 000001);   // WAIT
@@ -2558,6 +2666,7 @@ int main() {
     // ---- БК-0011М: БОС грузится с дискеты и после повторного сброса ----------
     // Сброс обнуляет счёт тактов; момент следующего оборота диска раньше оставался из
     // прошлой сессии, диск «стоял», и второй раз дискета не грузилась.
+    SECTION("БК-0011М: БОС грузится с дискеты и после повторного сброса")
     {
         Board b; b.setMachine(Machine::Bk0011m);
         if (b.loadRoms(BK_DEFAULT_ROM_DIR)) {
@@ -2688,6 +2797,7 @@ int main() {
     }
 
     // ---- Вход в прерывание из WAIT: без предвыборки (RTL ВМ1) ----
+    SECTION("Вход в прерывание из WAIT: без предвыборки (RTL ВМ1)")
     {
         // Фронт IRQ2 на такте 0 — запись PSW в стек на такте 9 (RTL), а посреди потока
         // команд сначала идёт отброшенная предвыборка. Раньше модель считала её и для WAIT.
@@ -2711,6 +2821,7 @@ int main() {
     }
 
     // ---- .BIN на БК-0011М: выбор машины и загрузка через монитор БОС ----
+    SECTION(".BIN на БК-0011М: выбор машины и загрузка через монитор БОС")
     {
         const auto dir = std::filesystem::temp_directory_path();
         auto writeBin = [&](const char* name, uint16_t addr, std::initializer_list<uint16_t> words) {
@@ -2755,6 +2866,7 @@ int main() {
     }
 
     // ---- Винчестер СМК-512: образ HDI, регистры 0177740–0177757 в инверсном коде ----
+    SECTION("Винчестер СМК-512: образ HDI, регистры 0177740–0177757 в инверсном коде")
     {
         // Синтетический образ: паспорт C/H/S = 4/2/8, слово i сектора n на диске =
         // ~(n << 8 | i), то есть процессор должен прочитать n << 8 | i.
@@ -2847,6 +2959,7 @@ int main() {
     }
 
     // ---- Винчестер на контроллере «Самара»: разметка, регистры 0177620–0177656, загрузка ----
+    SECTION("Винчестер на контроллере «Самара»: разметка, регистры 0177620–0177656, загрузка")
     {
         // Образ C/H/S = 20/2/16 в разметке «Самары»: блок 1 — геометрия и таблица дисков,
         // блок 3 — заголовок диска C:, блок 4 — его загрузчик (в 01000):
@@ -2932,6 +3045,7 @@ int main() {
     }
 
     // ---- Видео: ZMBV туда и обратно, AVI с частотой БК, продолжение в новом файле ----
+    SECTION("Видео: ZMBV туда и обратно, AVI с частотой БК, продолжение в новом файле")
     {
         // Минимальный декодер ZMBV (8 бит, по ffmpeg zmbv.c): кадр -> ARGB.
         struct Dec {

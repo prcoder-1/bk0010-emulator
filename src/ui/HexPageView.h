@@ -3,6 +3,12 @@
 #include <QFont>
 #include <QString>
 #include <cstdint>
+#include <memory>
+
+class QScrollBar;
+class QComboBox;
+class QLabel;
+class QHBoxLayout;
 
 // Откуда окно «… по страницам» берёт память: страницы ДОЗУ платы СМК-512 или
 // страницы ОЗУ/ПЗУ самой БК. Окно показывает память как она есть, мимо карты
@@ -76,4 +82,36 @@ private:
     int page_ = 0, top_ = 0;
     int editRow_ = -1, editWord_ = 0;   // строка (абсолютная) и слово 0..7
     QString editBuf_;                   // набранные восьмеричные цифры
+};
+
+// Окно «… по страницам» вокруг HexPageView: выбор страницы, переход к разделу
+// (сегменту, блоку), полоса прокрутки, строка состояния и подсказка по правке. Свои
+// органы управления (слежение) подкласс добавляет addControl().
+class HexPageWindow : public QWidget {
+    Q_OBJECT
+public:
+    HexPageWindow(std::unique_ptr<HexPageSource> src, const QString& editHint, QWidget* parent = nullptr);
+    ~HexPageWindow() override;
+
+protected:
+    HexPageSource* source() const { return src_.get(); }
+    void addControl(QWidget* w);
+    void setPageTitles(const QStringList& titles);   // список страниц, без смены выбора
+    void showPage(int page);         // страница в дамп, разделы в список, полоса, статус
+    void syncBar();
+    bool repaintDue() { if (++tick_ < 3) return false; tick_ = 0; return true; }  // раз в 3 кадра
+    virtual void updateStatus() = 0;
+    virtual void pagePicked() {}     // страницу выбрали вручную — снять слежение
+
+    std::unique_ptr<HexPageSource> src_;
+    HexPageView* view_;
+    QScrollBar*  bar_;
+    QComboBox*   pageBox_;
+    QComboBox*   jumpBox_;
+    QLabel*      status_;
+    QLabel*      hint_;              // подсказка по правке; сюда же — что записали последним
+    QHBoxLayout* controls_;
+
+private:
+    int tick_ = 0;
 };

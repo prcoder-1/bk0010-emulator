@@ -70,6 +70,7 @@ set(APP_SOURCES
     src/ui/FlameWidget.cpp
     src/ui/FlameChartWidget.cpp
     src/ui/HotChartWidget.cpp
+    src/ui/ProfilerView.h
     src/ui/AudioOut.cpp
     src/ui/BkKeymap.cpp
     src/ui/Gamepad.cpp

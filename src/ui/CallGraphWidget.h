@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include "ProfilerView.h"
 #include <QRectF>
 #include <QPointF>
 #include <QTransform>
@@ -18,17 +19,13 @@ namespace bk { class Board; }
 // (Tab) shows the same data as a nested-rectangles "callee map" (area ∝ cost).
 // Opened from the Отладка menu; pan by dragging, zoom with the wheel, click a
 // box to jump the disassembler.
-class CallGraphWidget : public QWidget {
+class CallGraphWidget : public ProfilerView {
     Q_OBJECT
 public:
     explicit CallGraphWidget(bk::Board* board, QWidget* parent = nullptr);
-    void refresh();
+    void refresh() override;
     // Linked highlighting: mark the routine at `addr` (-1 = none) as highlighted.
-    void setHighlight(int addr) { if (link_ != addr) { link_ = addr; update(); } }
 
-signals:
-    void addressPicked(uint16_t addr);
-    void hoverAddress(int addr);   // routine under the cursor (-1 = none)
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -99,6 +96,4 @@ private:
     bool    fitView_ = true;        // auto-fit until the user pans/zooms
     bool    dragging_ = false;
     QPoint  pressPos_, lastDrag_;
-    int     link_ = -1;             // linked-highlight address (-1 = none)
-    int     hoverEmit_ = -2;        // last address broadcast via hoverAddress
 };
