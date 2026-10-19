@@ -73,7 +73,11 @@ static int runKeyTest() {
 struct CliOptions {
     QString romDir;
     // Машина и оборудование.
-    int  machine = -1;                    // 0 — БК-0010-01, 1 — БК-0011М
+    // Машина: выбор (--machine auto|bk10|bk11m; не задан — в GUI настройка, иначе auto) и
+    // машина, с которой стартуем (resolveOptions: явный выбор — он сам, auto — по .BIN).
+    bool machineGiven = false;
+    bk::MachineChoice machineChoice = bk::MachineChoice::Auto;
+    bk::Machine machine = bk::Machine::Bk0011m;
     int  ay = -1, ay2 = -1, covox = -1;   // звук на 0177714
     int  smk = -1;                        // блок расширения памяти СМК-512
     int  aspect34 = -1;                   // GUI: неквадратный пиксель БК
@@ -105,7 +109,7 @@ struct CliOptions {
 
     bk::Board::Setup setup() const {      // конфигурация платы для безголового режима и MCP
         bk::Board::Setup st;
-        st.machine = machine == 0 ? bk::Machine::Bk0010 : bk::Machine::Bk0011m;
+        st.machine = machine;
         st.ay = ay; st.ay2 = ay2; st.covox = covox;
         st.scanline = scanline;
         st.smk = smk != 0;                // по умолчанию плата стоит
@@ -155,12 +159,12 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
         else if (a == "--scanline") o.scanline = 1;
         else if (a == "--no-scanline") o.scanline = 0;
         else if (a == "--machine" && hasVal) {
-            bk::Machine mm;
-            if (bk::Board::parseMachine(args[++i].toLower().toStdString(), mm)) o.machine = mm == bk::Machine::Bk0011m;
-            else std::fprintf(stderr, "Неизвестная машина «%s» (bk10 | bk11m)\n", qPrintable(args[i]));
+            if (!bk::Board::parseMachineChoice(args[++i].toLower().toStdString(), o.machineChoice))
+                return fail("--machine: ожидается auto, bk10 или bk11m");
+            o.machineGiven = true;
         }
-        else if (a == "--bk10") o.machine = 0;
-        else if (a == "--bk11m") o.machine = 1;
+        else if (a == "--bk10")  { o.machineChoice = bk::MachineChoice::Bk0010;  o.machineGiven = true; }
+        else if (a == "--bk11m") { o.machineChoice = bk::MachineChoice::Bk0011m; o.machineGiven = true; }
         else if (a == "--ay") o.ay = 1;
         else if (a == "--no-ay") o.ay = 0;
         else if (a == "--2ay") o.ay2 = 1;
@@ -228,18 +232,18 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
 // GUI (в безголовом режиме и MCP она стоит всегда). 0 — порядок, иначе код выхода.
 static int resolveOptions(CliOptions& o) {
     const bool gui = !o.headless && !o.server;
-    // Машина по умолчанию — БК-0011М. Но почти все .BIN — программы для БК-0010-01,
-    // поэтому без явного --machine машину выбирает сама программа: пишет в регистр
-    // 0177662 (палитра и экран 11М) — БК-0011М, иначе БК-0010-01 (сохранённую
-    // настройку GUI это не меняет).
-    if (o.machine < 0 && !o.server && !o.bin.isEmpty() && o.disk.isEmpty()) {
-        o.machine = bk::Board::binTargetsBk11(o.bin.toStdString()) ? 1 : 0;
-        std::fprintf(stderr, o.machine
+    // Выбор машины: ключ, иначе настройка GUI, иначе auto. Явный выбор — это и есть машина,
+    // программу не проверяем. В auto машину выбирает программа (.BIN пишет в 0177662 или
+    // зовёт БОС — БК-0011М, иначе БК-0010-01), если пуск не с дискеты; без неё — БК-0011М.
+    if (!o.machineGiven && gui) o.machineChoice = MainWindow::savedMachineChoice();
+    const bool fromBin = o.machineChoice == bk::MachineChoice::Auto && !o.server
+                         && !o.bin.isEmpty() && o.disk.isEmpty();
+    o.machine = bk::Board::machineFor(o.machineChoice, fromBin ? o.bin.toStdString() : std::string());
+    if (fromBin)
+        std::fprintf(stderr, o.machine == bk::Machine::Bk0011m
             ? ".BIN: программа для БК-0011М (палитра 0177662 или вызовы БОС) — машина БК-0011М\n"
-            : ".BIN: машина БК-0010-01 (для БК-0011М — ключ --machine bk11m)\n");
-    }
-    // Какая машина реально запустится: ключ, иначе сохранённая настройка GUI, иначе 11М.
-    const int effMachine = o.machine >= 0 ? o.machine : gui ? QSettings().value("machine", 1).toInt() : 1;
+            : ".BIN: машина БК-0010-01 (явно — ключ --machine bk10|bk11m)\n");
+    const int effMachine = o.machine == bk::Machine::Bk0011m ? 1 : 0;
     // Дискета почти всегда подразумевает и блок расширения памяти: у голой БК-0010-01
     // под ядро остаётся около 16 Кбайт ОЗУ, и большинство систем без платы просто
     // некуда грузить. Плата стоит по умолчанию, но в GUI могла быть снята
@@ -576,7 +580,8 @@ static int runHeadless(const CliOptions& o) {
     const uint32_t* px = board.screen().pixels();
     for (int i = 0; i < bk::Screen::TEX_W * bk::Screen::TEX_H; ++i)
         if ((px[i] & 0x00FFFFFF) != 0) ++nonblack;
-    std::printf("headless: PC=%06o non-black pixels=%d\n", board.cpu().pc(), nonblack);
+    std::printf("headless: %s, PC=%06o non-black pixels=%d\n", bk::Board::machineName(board.machine()),
+                board.cpu().pc(), nonblack);
     return 0;
 }
 
@@ -589,13 +594,15 @@ static void printHelp(const char* prog) {
     std::fputs(
         "Позиционный аргумент: .bkd и .img (в любом регистре) — образ дискеты, с него сразу\n"
         "идёт загрузка; .hdi — образ винчестера (то же, что --hdd); любой другой файл —\n"
-        "программа в формате .BIN: машину выбирает она сама (пишет в палитру 0177662 или\n"
-        "зовёт БОС — БК-0011М, иначе БК-0010-01), --machine задаёт явно.\n"
+        "программа в формате .BIN.\n"
         "\n"
         "Машина:\n"
-        "  --machine bk10|bk11m   эмулируемая машина; по умолчанию БК-0011М (в GUI — выбор\n"
-        "                         из меню «Машина»), а с .BIN — по программе\n"
-        "  --bk10, --bk11m        то же коротко\n"
+        "  --machine auto|bk10|bk11m  эмулируемая машина. auto (по умолчанию; в GUI — выбор\n"
+        "                         из меню «Машина») — машину выбирает программа: .BIN, который\n"
+        "                         пишет в палитру 0177662 или зовёт БОС, — БК-0011М, иначе\n"
+        "                         БК-0010-01; без программы — БК-0011М. bk10 и bk11m — только\n"
+        "                         эта машина, программа не проверяется\n"
+        "  --bk10, --bk11m        то же, что --machine bk10 / bk11m\n"
         "  --ay, --no-ay          звуковой сопроцессор AY-3-8910 на порту 0177714\n"
         "                         (по умолчанию: на БК-0011М вкл, на БК-0010 выкл)\n"
         "  --2ay, --no-2ay        второй AY — плата «2AY», выбор чипа по TurboSound и\n"
@@ -694,7 +701,7 @@ int main(int argc, char** argv) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
         QGuiApplication app(argc, argv);
         if (const int rc = resolveOptions(o)) return rc;
-        McpServer server(o.romDir.toStdString(), o.setup(), o.media());
+        McpServer server(o.romDir.toStdString(), o.setup(), o.media(), o.machineChoice);
         return server.run();
     }
 
@@ -726,7 +733,7 @@ int main(int argc, char** argv) {
     if (const int rc = resolveOptions(o)) return rc;
     if (o.headless) return runHeadless(o);
 
-    MainWindow w(o.romDir, o.smk, o.aspect34, o.machine, o.ay, o.ay2, o.covox);
+    MainWindow w(o.romDir, o.machineChoice, o.machine, o.smk, o.aspect34, o.ay, o.ay2, o.covox);
     w.setScanlineOverride(o.scanline);
     w.setMstd(o.mstd);
     w.setArbitration(o.arb037);

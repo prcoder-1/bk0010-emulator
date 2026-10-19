@@ -6,14 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A BK-0010-01 (Soviet PDP-11 clone, K1801VM1 CPU) emulator-debugger in C++17/Qt6
 with OpenGL screen output and a Soft-ICE style debugger. Loads and runs `.BIN`
-game files. Also emulates the **BK-0011M** — the DEFAULT machine of the app (GUI without a
-saved choice, headless, MCP server), with the AY on; a `.BIN` without an explicit machine (CLI,
-GUI «Файл», MCP `bk_load`) picks it itself — `Board::binTargetsBk11`: writes 0177662/3 and neither
+game files. Also emulates the **BK-0011M**. The machine is a three-way CHOICE
+(`bk::MachineChoice`: auto / bk10 / bk11m) in the GUI menu «Машина» (setting `machineMode`),
+`--machine auto|bk10|bk11m` and MCP `bk_machine`/`bk_reset {machine}`; the default is AUTO.
+Only auto looks at the program: `Board::machineFor(choice, bin)` — a `.BIN` (CLI, GUI «Файл»,
+MCP `bk_load`) picks the machine, no program (or a disk/HDD) → the BK-0011M, with the AY on.
+An explicit bk10/bk11m is used as is: no program check, ever (GUI `loadBinFromPath`, MCP
+`bk_load`). Detection is `Board::binTargetsBk11`: writes 0177662/3 and neither
 polls it as the keyboard (CMP/BIT/TST) nor sets vector 4 more than once, OR an odd-numbered EMT
 (a BOS call) within the first 48 instructions reachable from the entry (no own EMT vector 030; `MOV #n,@#30` with n in the BOS ROM 0140000–0157777 is BOS's, not own)
 → BK-0011M, else BK-0010 (14 11M demos, 0/571 BK-0010 programs). `Board`
-itself still defaults to the BK-0010 (tests rely on it). The 11M is selected via the menu «Машина», `--machine bk11m`, MCP
-`bk_reset {machine}`; it has 4 MHz, 128 KB paged RAM, BOS ROMs, 16 palettes switchable
+itself still defaults to the BK-0010 (tests rely on it). The 11M has 4 MHz, 128 KB paged RAM, BOS ROMs, 16 palettes switchable
 mid-frame, the AY-3-8910 on 0177714 — see `docs/bk0011m.md`. See `README.md` for the user-facing feature list and hotkeys, and
 `docs/BK0010-hardware.md` for the verified hardware reference (memory map, I/O
 registers, interrupt vectors, screen encoding, palette, .BIN format, timing).
@@ -55,7 +58,7 @@ ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, ove
 `--no-smk`),
 `--hdd <img.hdi>` / `--hdd-b` / `--hdd-rw` / `--hdd-ctl auto|smk|samara` (IDE hard disk on
 the СМК-512 or the «Самара» controller, `docs/hdd.md`),
-`--machine bk10|bk11m` (`--bk10`, `--bk11m`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
+`--machine auto|bk10|bk11m` (`--bk10`, `--bk11m`; default auto), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--video <file.avi|.mp4>` / `--video-codec zmbv|h264` (default: by extension) / `--video-size 1024x768|512x256` /
 `--video-audio` / `--no-video-audio` (screen capture with sound, GUI and headless, `docs/video.md`),

@@ -222,6 +222,37 @@ int main(int argc, char** argv) {
               "instrInfo: BR, SOB, JSR @#, JMP a(PC), EMT, RTS — вид и цель");
     }
 
+    // ---- Выбор машины: auto — по программе, явный — без проверки программы ----
+    SECTION("Выбор машины")
+    {
+        const std::string dir = std::filesystem::temp_directory_path().string();
+        auto writeBin = [&](const char* name, std::initializer_list<uint16_t> words) {
+            const std::string path = dir + "/" + name;
+            std::ofstream f(path, std::ios::binary);
+            const uint16_t hdr[2] = {01000, static_cast<uint16_t>(2 * words.size())};
+            f.write(reinterpret_cast<const char*>(hdr), sizeof hdr);
+            for (uint16_t w : words) f.write(reinterpret_cast<const char*>(&w), 2);
+            return path;
+        };
+        const std::string b11 = writeBin("bk_choice_11.bin", {0012737, 047400, 0177662, 0000777});  // MOV #,@#177662
+        const std::string b10 = writeBin("bk_choice_10.bin", {0012700, 0123, 0000777});
+        MachineChoice c = MachineChoice::Bk0010;
+        const bool parsed = Board::parseMachineChoice("auto", c) && c == MachineChoice::Auto
+            && Board::parseMachineChoice("BK11M", c) && c == MachineChoice::Bk0011m
+            && Board::parseMachineChoice("bk0010", c) && c == MachineChoice::Bk0010
+            && !Board::parseMachineChoice("zx", c);
+        CHECK(parsed, "выбор машины: auto / bk10 / bk11m разбираются, прочее — нет");
+        CHECK(Board::machineFor(MachineChoice::Auto, b11) == Machine::Bk0011m
+              && Board::machineFor(MachineChoice::Auto, b10) == Machine::Bk0010
+              && Board::machineFor(MachineChoice::Auto) == Machine::Bk0011m,
+              "выбор машины auto: по программе, без программы — БК-0011М");
+        CHECK(Board::machineFor(MachineChoice::Bk0010, b11) == Machine::Bk0010
+              && Board::machineFor(MachineChoice::Bk0011m, b10) == Machine::Bk0011m,
+              "явный выбор машины программу не проверяет");
+        std::remove(b11.c_str());
+        std::remove(b10.c_str());
+    }
+
     // ---- Save / restore state round-trip ----
     SECTION("Save / restore state round-trip")
     {
