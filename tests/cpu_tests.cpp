@@ -1252,6 +1252,40 @@ int main(int argc, char** argv) {
         CHECK(b.cpu().pc() == 01000 && !b.cpu().halted(), "без вектора 4 «СТОП» просто гасится");
     }
 
+    // ---- Вектор 4: HALT и «СТОП» взводят разряд 2 регистра 177716, зависание — нет ----
+    // Микрокод входа ВМ1 в пультовый режим пишет в 177716, и внешняя схема БК ставит
+    // признак записи (БК-docs §4.7, §20.9). По нему обработчик вектора 4 отличает
+    // останов от зависания шины.
+    SECTION("Вектор 4: признак записи в 177716 у HALT и «СТОП»")
+    for (int mach = 0; mach < 2; ++mach) {
+        auto run = [&](uint16_t op, uint16_t arg, bool stop) {
+            Board b;
+            if (mach) { b.setMachine(Machine::Bk0011m); b.loadRoms(BK_DEFAULT_ROM_DIR); }
+            b.reset();
+            Memory& m = b.memory();
+            m.pokeWord(0004, 03000); m.pokeWord(0006, 0340);
+            loadProg(m, 03000, {0013737, 0177716, 004000,   // MOV @#177716,@#4000
+                                0000002});                  // RTI
+            loadProg(m, 01000, {0005737, 0177716,           // TST @#177716 — погасить признак
+                                op, arg, 0000777});         // проверяемая команда; BR .
+            m.pokeWord(004000, 0177777);
+            b.cpu().reset(01000, 0340);
+            b.cpu().r[6] = 02000;
+            b.runTicks(300);
+            if (stop) { b.pressStop(); b.runTicks(300); }
+            return m.peekWord(004000);
+        };
+        const char* who = mach ? " (11М)" : " (БК-0010)";
+        const uint16_t halt = run(0000000, 0000240, false);     // HALT; NOP
+        const uint16_t stop = run(0000240, 0000240, true);      // NOP; NOP; «СТОП» в BR .
+        CHECK(halt != 0177777 && (halt & 4), (std::string("HALT: в обработчике вектора 4 разряд 2 177716 = 1") + who).c_str());
+        CHECK(stop != 0177777 && (stop & 4), (std::string("«СТОП»: в обработчике вектора 4 разряд 2 177716 = 1") + who).c_str());
+        if (!mach) {
+            const uint16_t hang = run(0005037, 0177662, false);   // CLR @#177662 — зависание на БК-0010
+            CHECK(hang != 0177777 && !(hang & 4), "зависание шины: разряд 2 177716 = 0 (БК-0010)");
+        }
+    }
+
     // ---- runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры ----
     SECTION("runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры")
     {

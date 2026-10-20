@@ -80,6 +80,9 @@ public:
     bool emulateCBug() const { return emulateCBug_; }
     // Команда RESET сбрасывает периферию — что именно, знает Board.
     void setResetHook(std::function<void()> h) { resetHook_ = std::move(h); }
+    // HALT — вход в пультовый режим: микрокод до сохранения PC/PSW пишет в 177716 (разряд 3,
+    // [ВМ1]). Что эта запись значит снаружи, знает Board.
+    void setHaltHook(std::function<void()> h) { haltHook_ = std::move(h); }
 
 private:
     Memory& mem_;
@@ -92,6 +95,7 @@ private:
     uint16_t tracePc_ = 0;
     std::function<bool()> emt36Hook_;  // EMT 36 intercept (true = handled, skip ROM)
     std::function<void()> resetHook_;  // RESET: сброс периферии
+    std::function<void()> haltHook_;   // HALT: запись микрокода в 177716
     bool emulateCBug_ = true;
     bool cBugArmed_  = false;   // предыдущая команда — MOVB/MFPS с приёмником-регистром
     bool cBugActive_ = false;   // текущая команда видит C сброшенным
