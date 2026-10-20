@@ -295,6 +295,7 @@ void Board::resetDevices() {
 Board::Board() {
     mem_.setIoBus(this);
     cpu_.setResetHook([this]() { resetDevices(); });
+    cpu_.setHaltHook([this]() { consoleEntry(); });
     // Feed the access heatmap (no-op unless the trace is enabled) and the
     // data watchpoints (no-op unless any are set).
     mem_.setBusErrorHook([this](uint16_t) { busErrorPending_ = true; });
@@ -1522,6 +1523,7 @@ int Board::tryDeliverInterrupts() {
     // «СТОП» разбирается ДО проверки маски: это внеприоритетное прерывание, разряды
     // приоритета его не запрещают. Идёт по вектору 4 — тому же, что HALT и зависание.
     if (stopPending_ || busErrorPending_) {
+        if (stopPending_) consoleEntry();   // «СТОП» — вход в пультовый режим, как HALT
         stopPending_ = busErrorPending_ = false;
         if (mem_.peekWord(Cpu::VEC_BUS_ERROR) != 0) {
             const int t = enterInterrupt(Cpu::VEC_BUS_ERROR, false);

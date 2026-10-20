@@ -856,6 +856,7 @@ int Cpu::step() {
         // it. Games use HALT this way; treating it as a hard stop hangs them.
         // Only stop for real if no handler is installed (avoids a HALT->0->HALT
         // loop).
+        if (haltHook_) haltHook_();
         if (mem_.peekWord(VEC_BUS_ERROR) != 0) service(VEC_BUS_ERROR);
         else halted_ = true;
         break;
