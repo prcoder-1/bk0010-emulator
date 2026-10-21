@@ -147,7 +147,8 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `{1,5,2,3,4,7,0,6}`), 0177716 writes (bit 11 = 1 memory map, 0 tape/speaker/STOP lock),
   0177662 writes (palette, screen page 5/6, bit 14 = 1 DISABLES the 0100 frame IRQ — on the
   0010 that write must stay a bus error, the СМК firmware relies on it), start address
-  0140000, ROM writes trap (vector 4) and empty ROM sockets trap on read, no EMT 36 intercept.
+  0140000, empty ROM sockets trap on read, no EMT 36 intercept. ROM writes trap (vector 4) on
+  BOTH machines (BK-docs §6, GID) — device probes (AZБК at 0177172) rely on it.
   `.BIN` on the 11M = what the BOS monitor does for «L», «R6/1000», «G»: power-on with a key
   held (BOS checks it at 0140376 and drops into its monitor), the file into the USER page map
   `040402` (014400) — NOT `0114`, which is BOS's copy of the write-only 0177716 and holds the

@@ -147,8 +147,11 @@ uint8_t Memory::readByte(uint16_t addr) {
     return (addr & 1) ? (v >> 8) : (v & 0xff);
 }
 
-// Запись в ПЗУ: на БК-0010 просто пропадает; на БК-0011М, как у GID (devemu/
-// Board.cpp:458-466), ПЗУ записи не подтверждает — зависание. Пустой блок — тоже.
+// Запись в ПЗУ: ПЗУ записи не подтверждает — зависание по вектору 4, на обеих машинах
+// (БК-docs §6: «Запись по адресам ПЗУ запрещена аппаратно и приводит к прерыванию по
+// вектору 4», монитор сообщает «ЗВ(адрес)»; так же GID devemu/Board.cpp:458-466).
+// Пустой блок 11М — тоже. Программы определяют устройства МПИ записью с перехватом
+// вектора 4 (AZБК — по 0177172 в области ПЗУ Бейсика БК-0010).
 void Memory::writeWord(uint16_t addr, uint16_t value) {
     const uint16_t raw = addr;
     addr &= ~1;
@@ -161,8 +164,8 @@ void Memory::writeWord(uint16_t addr, uint16_t value) {
         if (busError_) busError_(addr);
         return;
     }
-    if (isRom(addr)) {           // ПЗУ: запись просто пропадает
-        if (bk11_ && busError_) busError_(addr);
+    if (isRom(addr)) {
+        if (busError_) busError_(addr);
         return;
     }
     rawWord(addr, value);
@@ -177,7 +180,7 @@ void Memory::writeByte(uint16_t addr, uint8_t value) {
         return;
     }
     if (isRom(addr)) {
-        if (bk11_ && busError_) busError_(addr);
+        if (busError_) busError_(addr);
         return;
     }
     rawByte(addr, value);
