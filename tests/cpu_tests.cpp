@@ -24,6 +24,7 @@ extern "C" {
 #endif
 #include <zlib.h>
 #include <fstream>
+#include <tuple>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -1286,6 +1287,31 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- Запись в ПЗУ — зависание по вектору 4 на обеих машинах ----
+    // БК-docs §6: запись по адресам ПЗУ запрещена аппаратно и даёт прерывание по вектору 4.
+    // На этом стоят пробы устройств МПИ: AZБК ищут записью в 0177172 (у БК-0010 там ПЗУ
+    // Бейсика), и тихо пропавшая запись давала ложное «AZБК есть».
+    SECTION("Запись в ПЗУ — зависание (вектор 4)")
+    for (int mach = 0; mach < 2; ++mach) {
+        const char* who = mach ? " (11М)" : " (БК-0010)";
+        // ПЗУ: монитор БК-0010 (0100000) или БОС 11М (0140000); 0177172 — на 11М пусто
+        for (const auto& [op, addr, what] : {std::tuple{0005037, mach ? 0140000 : 0100000, mach ? "CLR @#140000" : "CLR @#100000"},
+                                              std::tuple{0105037, 0177172, "CLRB @#177172"}}) {
+            Board b;
+            if (mach) { b.setMachine(Machine::Bk0011m); b.loadRoms(BK_DEFAULT_ROM_DIR); }
+            else b.loadRoms(BK_DEFAULT_ROM_DIR);
+            b.reset();
+            Memory& m = b.memory();
+            m.pokeWord(0004, 03000); m.pokeWord(0006, 0340);
+            m.pokeWord(03000, 0000777);                              // BR .
+            loadProg(m, 01000, {static_cast<uint16_t>(op), static_cast<uint16_t>(addr), 0000777});
+            b.cpu().reset(01000, 0340);
+            b.cpu().r[6] = 02000;
+            b.stepInstruction(); b.stepInstruction();
+            CHECK(b.cpu().pc() == 03000, (std::string(what) + ": вектор 4" + who).c_str());
+        }
+    }
+
     // ---- runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры ----
     SECTION("runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры")
     {
@@ -1798,9 +1824,10 @@ int main(int argc, char** argv) {
 
             // Зеркальная проверка: без платы тест обязан споткнуться на первом же
             // сегменте — иначе он не проверяет ничего и «успех» выше ничего не стоит.
+            // Его запись в ПЗУ Бейсика даёт зависание (вектор 4), как на настоящей
+            // БК-0010, и тест выпадает в монитор, не дойдя до «Все ОК!».
             const std::string noBoard = runTest(false);
-            CHECK(noBoard.find("ОШИБКА") != std::string::npos,
-                  "СМК/SMKTEST: без платы тест сообщает об ошибке");
+            CHECK(!reportedOk(noBoard), "СМК/SMKTEST: без платы тест не доходит до «Все ОК!»");
         }
     }
 
