@@ -4,6 +4,7 @@
 namespace bk {
 
 // Громкость YM2149: 32 ступени (emu2149 m_voltbl[1]), доля от максимума одного канала.
+// AY-3-8910: 16 ступеней, каждая — на два индекса (emu2149 m_voltbl[0]).
 // Стерео по схеме ABC с панорамой GID (devemu/Config.h: AY_LEFT_PAN_DEFAULT = 95,
 // AY_CENTER_PAN_DEFAULT = 50; emu2149.cpp: k(n) = n/100 − 0,25·((n−50)²/10000 − 1) —
 // квадратичная поправка, чтобы центр не казался тихим): A — 95 % влево, B — центр,
@@ -15,6 +16,11 @@ static const uint16_t kVolYm[32] = {
     0x0000, 0x0000, 0x00EF, 0x01D0, 0x0290, 0x032A, 0x03EE, 0x04D2, 0x0611, 0x0782, 0x0912, 0x0A36,
     0x0C31, 0x0EB6, 0x1130, 0x13A0, 0x1751, 0x1BF5, 0x20E2, 0x2594, 0x2CA1, 0x357F, 0x3E45, 0x475E,
     0x5502, 0x6620, 0x7730, 0x8844, 0xA1D2, 0xC102, 0xE0A2, 0xFFFF};
+
+static const uint16_t kVolAy[32] = {
+    0x0000, 0x0000, 0x0340, 0x0340, 0x04C0, 0x04C0, 0x06F2, 0x06F2, 0x0A44, 0x0A44, 0x0F13, 0x0F13,
+    0x1510, 0x1510, 0x227E, 0x227E, 0x289F, 0x289F, 0x414E, 0x414E, 0x5B21, 0x5B21, 0x7258, 0x7258,
+    0x905E, 0x905E, 0xB550, 0xB550, 0xD7A0, 0xD7A0, 0xFFFF, 0xFFFF};
 
 void Ay8910::reset() {
     std::memset(reg_, 0, sizeof reg_);
@@ -95,7 +101,7 @@ void Ay8910::output(double& mono, double& left, double& right) const {
         // держится воспроизведение оцифровок через регистр громкости.
         const bool silent = (c.toggle && c.toneOn) || (noise && c.noiseOn);
         if (silent) continue;
-        const double v = kVolYm[c.env ? envPtr_ : c.vol] / 65535.0 / 3.0;
+        const double v = (ym_ ? kVolYm : kVolAy)[c.env ? envPtr_ : c.vol] / 65535.0 / 3.0;
         sum += v;
         l += v * kPanL[i];
         r += v * kPanR[i];

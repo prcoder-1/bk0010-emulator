@@ -49,6 +49,8 @@ public:
 
     // Связь с платой.
     std::function<void(int chip, bool address, uint8_t v)> ayWrite;
+    // Модель обоих AY: 0177212, разряд 3 — AY-3-8910 вместо YM2149 (Setup, «AY Emulation»).
+    std::function<void(bool ym)> ayModel;
     std::function<void(double l, double r)> sound;   // ЦАП AZ: Covox + DMA, -1..1
     std::function<void()> irq2;                      // кадровое прерывание AZ (60 Гц)
     std::function<void()> irqVector;                 // контроллер, вектор 0174
@@ -82,6 +84,7 @@ public:
     bool timer48() const;                            // кадровый таймер AZ «48 Гц» (по кадру БК)
     void ar2Lat();                                   // АР2+ЛАТ: 512/256 точек в старых режимах
     bool legacyCovoxOff() const { return (cvxCsr_ & 2) != 0; }
+    bool ym() const { return !(cvxCsr_ & 010); }     // AY платы — YM2149 (иначе AY-3-8910)
     // 177662 на БК-0010 отвечает плата (эмуляция 11М): адрес и значение — у неё.
     bool emu11() const { return (mmu_ & (MMU_BK11EMU | MMU_BRDTYPE)) == (MMU_BK11EMU | MMU_BRDTYPE); }
 

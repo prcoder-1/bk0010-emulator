@@ -320,6 +320,7 @@ Board::Board() {
         if (address) ay.writeAddress(static_cast<uint8_t>(v & 017)); else ay.writeData(v);
         if (chip && !ay2Seen_) { ay2Seen_ = true; syncSound(); }
     };
+    az_.ayModel = [this](bool ym) { ay_.setYm(ym); ay2_.setYm(ym); };
     az_.sound = [this](double l, double r) { sound_.setAzLevel(l, r); };
     az_.irq2 = [this]() { irqFramePending_ = true; };
     az_.irqVector = [this]() { azIrqPending_ = true; };
@@ -1150,6 +1151,7 @@ bool Board::setAzbk(bool on, const Azbk::Config& cfg, std::string* err) {
     }
     const bool ok = on;
     azOn_ = on;
+    if (!on) { ay_.setYm(true); ay2_.setYm(true); }   // без платы — YM2149, как было
     azResetPending_ = azIrqPending_ = false;
     mem_.setBasicOff(on);
     sound_.setAzbk(on);
@@ -1459,7 +1461,12 @@ void Board::loadStateExt(const std::vector<uint8_t>& in, size_t off) {
     }
     const uint8_t* q = in.data() + off;
     if (!az_.loadState(q, in.data() + off + n)) std::fprintf(stderr, "AZБК: снимок платы повреждён\n");
-    if (!az_.on()) { azOn_ = false; mem_.setBasicOff(false); sound_.setAzbk(false); updateMpi(); return; }
+    if (!az_.on()) {
+        azOn_ = false; mem_.setBasicOff(false); sound_.setAzbk(false);
+        ay_.setYm(true); ay2_.setYm(true);
+        updateMpi();
+        return;
+    }
     azVga_ = vga != 0;
     azIrqPending_ = pend & 1; azResetPending_ = pend & 2;
 }

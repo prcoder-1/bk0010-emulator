@@ -3631,6 +3631,40 @@ int main(int argc, char** argv) {
               "AZ/DMA: декодер IMA ADPCM — стандартные шаги");
     }
 
+    SECTION("AZБК: переключатель AY-3-8910 / YM2149 (0177212, разряд 3)")
+    {
+        // Тон и шум выключены — канал даёт постоянный уровень громкости 1 (индекс 3):
+        // у YM2149 это 0x01D0, у AY-3-8910 — 0x0340 (таблицы emu2149).
+        auto level = [](bool ym) {
+            Ay8910 ay;
+            ay.setYm(ym);
+            ay.writeReg(7, 077);
+            ay.writeReg(8, 1);
+            ay.advance(0.001);
+            return ay.takeSample() * 3.0 * 65535.0;
+        };
+        CHECK(std::lround(level(true)) == 0x01D0 && std::lround(level(false)) == 0x0340,
+              "AZ/AY: громкость 1 — у YM2149 и AY-3-8910 своя ступень");
+        azSetup();
+        Board b;
+        b.setMachine(Machine::Bk0011m);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.setAzbk(true, azCfg());
+        b.reset();
+        CHECK(b.ayChip(0).ym() && b.ayChip(1).ym(), "AZ/AY: после включения платы — YM2149");
+        b.memory().writeWord(0177212, 011);
+        CHECK(!b.ayChip(0).ym() && !b.ayChip(1).ym() && b.az().reg(0177212) == 011,
+              "AZ/AY: разряд 3 в 0177212 — оба чипа AY-3-8910");
+        std::vector<uint8_t> st;
+        b.saveStateMem(st);
+        b.memory().writeWord(0177212, 1);
+        CHECK(b.ayChip(0).ym(), "AZ/AY: разряд 3 снят — снова YM2149");
+        b.loadStateMem(st);
+        CHECK(!b.ayChip(0).ym(), "AZ/AY: модель чипа восстанавливается из снимка");
+        b.setAzbk(false);
+        CHECK(b.ayChip(0).ym() && b.ayChip(1).ym(), "AZ/AY: без платы — YM2149");
+    }
+
     SECTION("AZБК: снимок состояния с платой")
     {
         azSetup();
