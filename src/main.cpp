@@ -5,6 +5,8 @@
 #include <QImage>
 #include <QPainter>
 #include <QPixmap>
+#include <QStandardPaths>
+#include <map>
 #include <cstdio>
 #include <csignal>
 #include <vector>
@@ -80,6 +82,12 @@ struct CliOptions {
     bk::Machine machine = bk::Machine::Bk0011m;
     int  ay = -1, ay2 = -1, covox = -1;   // звук на 0177714
     int  smk = -1;                        // блок расширения памяти СМК-512
+    // Контроллер AZБК: -1 — не задан (GUI — настройка, иначе нет), карта SD (по умолчанию
+    // <ПЗУ>/azbk), диски AZn поверх AZ.INI, запись в образы, доработка 037 (БК-0010).
+    int  az = -1;
+    QString azSd;
+    std::map<int, QString> azUnits;
+    bool azRw = false, az037 = false;
     int  aspect34 = -1;                   // GUI: неквадратный пиксель БК
     bool mstd = false;                    // блок МСТД (ПЗУ 330) в окне 0160000 БК-0011М
     // Арбитраж КР1801ВП1-037: доступ к ДОЗУ квантован окном процессора (раз в 4 такта),
@@ -116,7 +124,17 @@ struct CliOptions {
         st.mstd = mstd; st.arb037 = arb037; st.cpuPhase = cpuPhase;
         st.diskRom = diskRom.toStdString();
         st.hddCtl = hddCtl;
+        st.az = az > 0;
+        st.azCfg = azConfig();
         return st;
+    }
+    bk::Azbk::Config azConfig() const {
+        bk::Azbk::Config c;
+        c.sdDir = (azSd.isEmpty() ? romDir + "/azbk" : azSd).toStdString();
+        c.writeDir = MainWindow::azWriteDir(QString::fromStdString(c.sdDir), azRw).toStdString();
+        c.rw = azRw; c.mod037 = az037;
+        for (const auto& kv : azUnits) c.units[kv.first] = kv.second.toStdString();
+        return c;
     }
     bk::Board::Media media() const {
         bk::Board::Media m;
@@ -171,6 +189,21 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
         else if (a == "--no-2ay") o.ay2 = 0;
         else if (a == "--covox") o.covox = 1;
         else if (a == "--no-covox") o.covox = 0;
+        else if (a == "--az") o.az = 1;
+        else if (a == "--no-az") o.az = 0;
+        else if (a == "--az-sd" && hasVal) o.azSd = args[++i];
+        else if (a == "--az-rw") o.azRw = true;
+        else if (a == "--az-037") o.az037 = true;
+        else if (a == "--az-unit" && hasVal) {
+            // N=образ; без «N=» — диск 0.
+            const QString v = args[++i];
+            const int eq = v.indexOf('=');
+            bool okN = true;
+            const int n = eq > 0 ? v.left(eq).toInt(&okN) : 0;
+            if (!okN || n < 0 || n > 31) return fail("--az-unit: ожидается N=образ, N от 0 до 31");
+            o.azUnits[n] = eq > 0 ? v.mid(eq + 1) : v;
+            if (o.az < 0) o.az = 1;
+        }
         else if (a == "--smk") o.smk = 1;
         else if (a == "--no-smk") o.smk = 0;
         else if (a == "--mstd") o.mstd = true;
@@ -244,6 +277,31 @@ static int resolveOptions(CliOptions& o) {
             ? ".BIN: программа для БК-0011М (палитра 0177662 или вызовы БОС) — машина БК-0011М\n"
             : ".BIN: машина БК-0010-01 (явно — ключ --machine bk10|bk11m)\n");
     const int effMachine = o.machine == bk::Machine::Bk0011m ? 1 : 0;
+    // AZБК: GUI — по настройке (если ключом не задано), образ дискеты становится диском AZ0.
+    // Плата только из настройки не мешает запуску .BIN и винчестера — на этот запуск её нет.
+    const bool azExplicit = o.az > 0;
+    if (o.az < 0 && gui) o.az = MainWindow::savedAzbk(effMachine == 1) ? 1 : -1;
+    if (o.az > 0 && !azExplicit && (!o.bin.isEmpty() || !o.hdd.isEmpty() || !o.hddB.isEmpty())) {
+        std::fprintf(stderr, "AZБК: на этот запуск снят (программа .BIN или винчестер)\n");
+        o.az = 0;
+    }
+    if (o.az > 0) {
+        if (!o.hdd.isEmpty() || !o.hddB.isEmpty()) {
+            std::fprintf(stderr, "AZБК: винчестеры СМК и «Самары» с ним не работают — диски AZ (--az-unit)\n");
+            return 2;
+        }
+        if (o.smk == 1) {
+            std::fprintf(stderr, "AZБК сам эмулирует СМК-512 — уберите --smk\n");
+            return 2;
+        }
+        if (!o.bin.isEmpty()) {
+            std::fprintf(stderr, "AZБК: программа .BIN не загружается — AZ грузится со своих дисков (--az-unit)\n");
+            return 2;
+        }
+        if (!o.disk.isEmpty()) { o.azUnits[0] = o.disk; o.disk.clear(); }
+        if (!o.diskB.isEmpty()) { o.azUnits[1] = o.diskB; o.diskB.clear(); }
+        o.smk = 0;
+    }
     // Дискета почти всегда подразумевает и блок расширения памяти: у голой БК-0010-01
     // под ядро остаётся около 16 Кбайт ОЗУ, и большинство систем без платы просто
     // некуда грузить. Плата стоит по умолчанию, но в GUI могла быть снята
@@ -346,7 +404,10 @@ static int runHeadless(const CliOptions& o) {
             board.sound().setCapture(true);       // отвод звука — с начала первого кадра записи
         }
         std::string err;
-        if (!video.start(o.video.toStdString(), vo, bk::Screen::TEX_W, bk::Screen::TEX_H,
+        // С AZБК кадр — VGA платы 1024x768.
+        const bool vga = board.azbk();
+        if (!video.start(o.video.toStdString(), vo, vga ? bk::Azbk::VGA_W : bk::Screen::TEX_W,
+                         vga ? bk::Azbk::VGA_H : bk::Screen::TEX_H,
                          static_cast<uint32_t>(board.cpuFreqHz()), static_cast<uint32_t>(board.ticksPerFrame()), &err)) {
             std::fprintf(stderr, "headless: видео %s не открыто: %s\n", qPrintable(o.video), err.c_str());
             return 8;
@@ -367,7 +428,7 @@ static int runHeadless(const CliOptions& o) {
         if (video.active()) {
             if (!board.scanlineRender()) board.screen().render(board.memory());
             board.sound().takeCaptured(videoAudio);
-            video.addFrame(board.screen().pixels(), videoAudio.data(), videoAudio.size() / 2);
+            video.addFrame(board.azbk() ? board.az().frame() : board.screen().pixels(), videoAudio.data(), videoAudio.size() / 2);
         }
     }
     board.sound().setCapture(false);
@@ -381,8 +442,8 @@ static int runHeadless(const CliOptions& o) {
     }
     if (!board.scanlineRender()) board.screen().render(board.memory());
 
-    QImage img(reinterpret_cast<const uchar*>(board.screen().pixels()),
-               bk::Screen::TEX_W, bk::Screen::TEX_H, QImage::Format_ARGB32);
+    const bk::Board::Frame fr = board.displayFrame();
+    QImage img(reinterpret_cast<const uchar*>(fr.px), fr.w, fr.h, QImage::Format_ARGB32);
     QImage out = img.copy(); // detach from the board's buffer
     if (!shot.isEmpty()) {
         if (!out.save(shot)) { std::fprintf(stderr, "headless: cannot save %s\n", qPrintable(shot)); return 4; }
@@ -610,6 +671,19 @@ static void printHelp(const char* prog) {
         "  --covox, --no-covox    Covox — ЦАП на порту 0177714 (то же по умолчанию)\n"
         "  --smk, --no-smk        блок расширения памяти СМК-512 (512 Кбайт; по умолчанию вкл)\n"
         "  --mstd                 БК-0011М: вставить тестовый блок МСТД в окно 0160000\n"
+        "\n"
+        "Контроллер AZБК (MAXIOL; VGA 1024x768, маппер 32 Мбайт, блиттер, звук, диски с SD):\n"
+        "  --az, --no-az          установить контроллер (GUI — по умолчанию по настройке).\n"
+        "                         С ним ПЗУ БК, СМК-512, КНГМД и винчестеры сняты; машина\n"
+        "                         стартует с его ПЗУ (AZBOOT), экран — VGA платы\n"
+        "  --az-sd <каталог>      «карта SD» с AZ.INI (по умолчанию <каталог ПЗУ>/azbk —\n"
+        "                         прошивка 00019 без дисков)\n"
+        "  --az-unit N=<образ>    диск AZn поверх [DISKS] из AZ.INI (без «N=» — AZ0);\n"
+        "                         включает --az. Образ дискеты позиционным аргументом — AZ0\n"
+        "  --az-rw                образы на запись и запись БК (EEPROM, файлы) — прямо на\n"
+        "                         карту; иначе изменения дисков в памяти, остальное — в\n"
+        "                         каталоге данных эмулятора\n"
+        "  --az-037               БК-0010: доработка 037 (эмуляция БК-0011М, быстрая память)\n"
         "  --roms <каталог>       каталог ПЗУ (иначе BK_ROM_DIR или каталог при сборке)\n"
         "\n"
         "Дисковод:\n"
@@ -651,7 +725,7 @@ static void printHelp(const char* prog) {
         "Безголовый режим (без окна). Включается ключами --frames, --dbgshot, --memvis,\n"
         "профилировщиков, --type или --keys; --shot, --key и --keyframe работают вместе с ними:\n"
         "  --frames N             прогнать N кадров\n"
-        "  --shot <файл.png>      снимок экрана 512x256 после прогона\n"
+        "  --shot <файл.png>      снимок экрана 512x256 после прогона (с AZБК — VGA 1024x768)\n"
         "  --dbgshot <файл.png>   снимок с отладчиком Soft-ICE\n"
         "  --memvis <файл.png>    визуализация памяти\n"
         "  --hotpath, --callgraph, --flame, --flamechart, --hotchart <файл.png>\n"
@@ -672,6 +746,7 @@ static void printHelp(const char* prog) {
         "Примеры:\n"
         "  bk0010-emulator game.bin\n"
         "  bk0010-emulator --machine bk11m INSULT.IMG\n"
+        "  bk0010-emulator --az --az-unit 0=ANDOS330.IMG\n"
         "  QT_QPA_PLATFORM=offscreen bk0010-emulator --frames 200 --shot out.png game.bin\n",
         stdout);
 }
@@ -733,7 +808,9 @@ int main(int argc, char** argv) {
     if (const int rc = resolveOptions(o)) return rc;
     if (o.headless) return runHeadless(o);
 
-    MainWindow w(o.romDir, o.machineChoice, o.machine, o.smk, o.aspect34, o.ay, o.ay2, o.covox);
+    MainWindow::AzOptions azo;
+    azo.on = o.az; azo.sd = o.azSd; azo.units = o.azUnits; azo.rw = o.azRw; azo.mod037 = o.az037 ? 1 : -1;
+    MainWindow w(o.romDir, o.machineChoice, o.machine, o.smk, o.aspect34, o.ay, o.ay2, o.covox, azo);
     w.setScanlineOverride(o.scanline);
     w.setMstd(o.mstd);
     w.setArbitration(o.arb037);

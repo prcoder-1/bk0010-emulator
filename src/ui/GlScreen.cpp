@@ -17,7 +17,6 @@ void main() { fragColor = texture(tex, vUv); }
 )";
 
 GlScreen::GlScreen(QWidget* parent) : QOpenGLWidget(parent) {
-    std::memset(frame_, 0, sizeof(frame_));
     // Минимум одинаков в обоих режимах, иначе переключение пропорций дёргало бы окно.
     setMinimumSize(W, H);
 }
@@ -32,8 +31,14 @@ GlScreen::~GlScreen() {
     }
 }
 
-void GlScreen::setFrame(const uint32_t* pixels) {
-    std::memcpy(frame_, pixels, sizeof(frame_));
+void GlScreen::setFrame(const uint32_t* pixels, int w, int h) {
+    if (w != fw_ || h != fh_) {
+        const bool grow = w > fw_;
+        fw_ = w; fh_ = h;
+        frame_.assign(size_t(w) * h, 0);
+        if (grow) updateGeometry();
+    }
+    std::memcpy(frame_.data(), pixels, frame_.size() * sizeof(uint32_t));
     frameDirty_ = true;
     update();
 }
@@ -46,6 +51,7 @@ void GlScreen::setPixelAspect34(bool on) {
 }
 
 QSize GlScreen::preferredSize() const {
+    if (vga()) return QSize(fw_, fh_);
     return aspect34_ ? QSize(BASE_W, BASE_H) : QSize(W * 2, H * 2);
 }
 
@@ -83,7 +89,8 @@ void GlScreen::initializeGL() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_BGRA, GL_UNSIGNED_BYTE, frame_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fw_, fh_, 0, GL_BGRA, GL_UNSIGNED_BYTE, frame_.data());
+    texW_ = fw_; texH_ = fh_;
 }
 
 // Прямоугольник вывода внутри виджета. Считается на каждый paintGL, а не в resizeGL:
@@ -91,7 +98,7 @@ void GlScreen::initializeGL() {
 void GlScreen::applyViewport() {
     const float dpr = devicePixelRatioF();
     const int pw = int(width() * dpr), ph = int(height() * dpr);
-    const int bw = aspect34_ ? BASE_W : W, bh = aspect34_ ? BASE_H : H;
+    const int bw = vga() ? fw_ : aspect34_ ? BASE_W : W, bh = vga() ? fh_ : aspect34_ ? BASE_H : H;
     int vw, vh;
     const int k = std::min(pw / bw, ph / bh);
     if (k >= 1) {
@@ -110,7 +117,12 @@ void GlScreen::paintGL() {
     applyViewport();
     if (frameDirty_) {
         glBindTexture(GL_TEXTURE_2D, texture_);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, W, H, GL_BGRA, GL_UNSIGNED_BYTE, frame_);
+        if (texW_ != fw_ || texH_ != fh_) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fw_, fh_, 0, GL_BGRA, GL_UNSIGNED_BYTE, frame_.data());
+            texW_ = fw_; texH_ = fh_;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fw_, fh_, GL_BGRA, GL_UNSIGNED_BYTE, frame_.data());
+        }
         frameDirty_ = false;
     }
     program_.bind();

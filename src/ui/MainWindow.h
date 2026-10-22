@@ -5,6 +5,7 @@
 #include <set>
 #include <vector>
 #include <utility>
+#include <map>
 #include "Board.h"
 #include "BkKeymap.h"
 #include "Gamepad.h"
@@ -31,9 +32,20 @@ class QLabel;
 
 // Main application window: hosts the GL screen, drives the emulation at 50 Hz
 // and provides the File/Emulation menus (load .BIN, reset, screen mode).
+// Контроллер AZБК из командной строки: on (-1 — настройка машины), карта SD (пусто —
+// настройка, иначе <ПЗУ>/azbk), диски AZn, запись в образы, доработка 037 (-1 — настройка).
+struct AzCliOptions {
+    int on = -1;
+    QString sd;
+    std::map<int, QString> units;
+    bool rw = false;
+    int mod037 = -1;
+};
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
+    using AzOptions = AzCliOptions;
     // smkOverride: 1 — включить блок СМК-512, 0 — выключить, -1 — взять
     // сохранённую настройку (ключ командной строки перекрывает её, но не
     // перезаписывает: настройка меняется только переключателем в меню).
@@ -45,9 +57,13 @@ public:
     explicit MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Machine machine,
                         int smkOverride = -1, int aspectOverride = -1,
                         int ayOverride = -1, int ay2Override = -1, int covoxOverride = -1,
-                        QWidget* parent = nullptr);
+                        const AzOptions& az = AzOptions(), QWidget* parent = nullptr);
     // Выбор машины из настроек (меню «Машина»), по умолчанию — auto.
     static bk::MachineChoice savedMachineChoice();
+    // AZБК: стоит ли плата по настройке (своя у каждой машины) и куда пишет БК (EEPROM,
+    // файлы): с --az-rw — на саму карту, иначе в каталог данных эмулятора.
+    static bool savedAzbk(bool bk11);
+    static QString azWriteDir(const QString& sdDir, bool rw);
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
@@ -76,6 +92,8 @@ public:
     void setArbitration(bool on) { if (board_) board_->setArbitration(on); }
     void setCpuPhase(int p) { if (board_) board_->setCpuPhase(p); }
     void setSmk512(bool on);            // подключить/снять плату и перезапустить машину
+    void setAzbk(bool on);              // контроллер AZБК: установить/снять, перезапуск
+    void setAzVga(bool on);             // показывать VGA платы (иначе — экран БК)
     void setPixelAspect34(bool on);     // пиксель БК блоком 4x3 точек хоста
     // Выбор машины в меню (сохраняется между запусками): явная машина включается сразу,
     // auto — машину выбирает загруженная программа.
@@ -105,6 +123,7 @@ private slots:
     void openMemVis();
     void openSmkRam();
     void openBkRam();
+    void openAzRam();
     void openHotPath();
     void openCallGraph();
     void openFlame();
@@ -143,6 +162,7 @@ private:
     MemVisWidget* memvis_ = nullptr;
     SmkRamWidget* smkram_ = nullptr;
     BkRamWidget* bkram_ = nullptr;
+    class AzRamWidget* azram_ = nullptr;
     HotPathWidget* hotpath_ = nullptr;
     CallGraphWidget* callgraph_ = nullptr;
     FlameWidget* flame_ = nullptr;
@@ -170,6 +190,18 @@ private:
     // Ключ настройки «плата СМК-512 стоит» — свой у каждой машины.
     QString smkKey() const { return (board_ && board_->bk11()) ? "smk512_11m" : "smk512"; }
     void applyScanline();
+    // AZБК: настройка «плата стоит» своя у каждой машины; карта SD, диск AZ0 и доработка
+    // 037 — общие. Ключи командной строки перекрывают их на запуск.
+    QString azKey() const { return (board_ && board_->bk11()) ? "azbk_11m" : "azbk"; }
+    bk::Azbk::Config azConfig() const;
+    bool applyAz(bool on);              // поставить/снять плату (без сброса); false — нет карты SD
+    void chooseAzSd();
+    void chooseAzUnit0();
+    AzOptions azCli_;
+    QString romDir_;
+    QAction* azAction_ = nullptr;          // галка «AZБК»
+    QAction* az037Action_ = nullptr;       // галка «доработка 037» (БК-0010)
+    QAction* azVgaAction_ = nullptr;       // галка «экран VGA AZБК»
     void syncMachineMenu();                // галки меню — по состоянию платы (без сигналов)
     QAction* aspectAction_ = nullptr;   // галка «Пиксели 3:4»
     QString lastBin_;
@@ -188,6 +220,7 @@ private:
     bool frameDone_ = false;          // за этот круг слайсов досчитан кадр БК
     bool frameRec_ = false;           // кадр начат при идущей записи — он попадёт в видео
     std::vector<int16_t> videoAudio_; // звук кадра для записи
+    std::vector<uint32_t> vgaFrame_;  // экран БК, растянутый до кадра VGA (запись с AZБК)
     static inline volatile std::sig_atomic_t quitRequested_ = 0;   // запрос закрытия из обработчика сигнала
     void updateVideoLabel();
     void openHdd(int unit);

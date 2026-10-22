@@ -4,6 +4,8 @@
 #include "DebuggerOverlay.h"
 #include "MemVisWidget.h"
 #include "SmkRamWidget.h"
+#include "AzRamWidget.h"
+#include "AzPaths.h"
 #include "BkRamWidget.h"
 #include "HotPathWidget.h"
 #include "CallGraphWidget.h"
@@ -43,6 +45,12 @@
 #include <QProxyStyle>
 #include <cstdio>
 
+bool MainWindow::savedAzbk(bool bk11) {
+    return QSettings().value(bk11 ? "azbk_11m" : "azbk", false).toBool();
+}
+
+QString MainWindow::azWriteDir(const QString& sdDir, bool rw) { return azWriteDirFor(sdDir, rw); }
+
 bk::MachineChoice MainWindow::savedMachineChoice() {
     bk::MachineChoice c = bk::MachineChoice::Auto;
     bk::Board::parseMachineChoice(QSettings().value("machineMode", "auto").toString().toStdString(), c);
@@ -51,8 +59,9 @@ bk::MachineChoice MainWindow::savedMachineChoice() {
 
 MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Machine machine,
                        int smkOverride, int aspectOverride,
-                       int ayOverride, int ay2Override, int covoxOverride, QWidget* parent)
-    : QMainWindow(parent), machineChoice_(choice) {
+                       int ayOverride, int ay2Override, int covoxOverride, const AzOptions& az,
+                       QWidget* parent)
+    : QMainWindow(parent), machineChoice_(choice), azCli_(az), romDir_(romDir) {
     board_ = std::make_unique<bk::Board>();
     // Выбор машины запоминается между запусками (меню), --machine перекрывает его.
     board_->setMachine(machine);
@@ -77,6 +86,8 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
                     ? "bk11m_324_bos.rom (и bk11m_325_ext, bk11m_327..329_basic*.rom)"
                     : "monit10.rom (и basic10.rom)"));
     }
+    // Контроллер AZБК: настройка своя у каждой машины, ключ --az/--no-az её перекрывает.
+    if (azCli_.on >= 0 ? azCli_.on > 0 : QSettings().value(azKey(), false).toBool()) applyAz(true);
     board_->reset();
 
     screen_ = new GlScreen(this);
@@ -144,6 +155,13 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     aspectAction_->setChecked(aspect34);
     aspectAction_->setShortcut(QKeySequence("F11"));
     connect(aspectAction_, &QAction::toggled, this, &MainWindow::setPixelAspect34);
+    // С AZБК на экране — его VGA; переключатель показывает экран самой БК (её ТВ-выход).
+    azVgaAction_ = emu->addAction("Экран &VGA платы AZБК (иначе — экран БК)");
+    azVgaAction_->setCheckable(true);
+    azVgaAction_->setChecked(QSettings().value("azbk/vga", true).toBool());
+    azVgaAction_->setShortcut(QKeySequence("Ctrl+E"));
+    board_->setAzVga(azVgaAction_->isChecked());
+    connect(azVgaAction_, &QAction::toggled, this, &MainWindow::setAzVga);
     emu->addAction("&Пауза", this, [this]{ setSuspended(!suspended_); }, QKeySequence(Qt::Key_Pause));
     emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_); }, QKeySequence("F12"));
 
@@ -170,6 +188,27 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     smkAction_->setCheckable(true);
     smkAction_->setChecked(board_->smk512());
     connect(smkAction_, &QAction::toggled, this, [this](bool on) { setSmk512(on); });
+    // Контроллер AZБК (MAXIOL): маппер 32 Мбайт, VGA, блиттер, звук, диски с карты SD.
+    // Он сам эмулирует СМК-512, поэтому пока он стоит, галка СМК недоступна.
+    QMenu* azMenu = mach->addMenu("Контроллер A&ZБК");
+    azAction_ = azMenu->addAction("&Установлен");
+    azAction_->setCheckable(true);
+    connect(azAction_, &QAction::toggled, this, [this](bool on) { setAzbk(on); });
+    azMenu->addAction("&Каталог карты SD…", this, &MainWindow::chooseAzSd);
+    azMenu->addAction("&Диск AZ0…", this, &MainWindow::chooseAzUnit0);
+    azMenu->addAction("Убрать диск AZ0 (как в AZ.INI)", this, [this] {
+        QSettings().remove("azbk/unit0");
+        azCli_.units.erase(0);
+        if (board_->azbk()) { applyAz(true); resetMachine(); }
+        status_->setText("Диск AZ0 — по AZ.INI");
+    });
+    az037Action_ = azMenu->addAction("Доработка &037 (БК-0010: эмуляция БК-0011М)");
+    az037Action_->setCheckable(true);
+    connect(az037Action_, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue("azbk/mod037", on);
+        azCli_.mod037 = -1;
+        if (board_->azbk()) { applyAz(true); resetMachine(); }
+    });
     ayAction_ = mach->addAction("Звуковой сопроцессор &AY-3-8910 / YM2149 (порт 0177714)");
     ayAction_->setCheckable(true);
     connect(ayAction_, &QAction::toggled, this, [this](bool on) { setAy(on); });
@@ -242,6 +281,7 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
     dbg->addAction("&ДОЗУ СМК-512 по страницам…", this, &MainWindow::openSmkRam, QKeySequence("Ctrl+D"));
     dbg->addAction("Память &БК по страницам…", this, &MainWindow::openBkRam, QKeySequence("Ctrl+P"));
+    dbg->addAction("Память &AZБК по страницам…", this, &MainWindow::openAzRam, QKeySequence("Ctrl+J"));
     dbg->addAction("Горячий &путь…", this, &MainWindow::openHotPath, QKeySequence("Ctrl+G"));
     dbg->addAction("Граф &вызовов…", this, &MainWindow::openCallGraph, QKeySequence("Ctrl+K"));
     dbg->addAction("&Пламенный граф…", this, &MainWindow::openFlame, QKeySequence("Ctrl+F"));
@@ -365,7 +405,9 @@ bool MainWindow::startVideo(const QString& path, const QString& codec, int aspec
     frameRec_ = false;
     if (!video_) video_ = std::make_unique<bk::VideoCapture>();
     std::string err;
-    if (!video_->start(file.toStdString(), o, bk::Screen::TEX_W, bk::Screen::TEX_H,
+    // С AZБК кадр — его VGA 1024x768 (экран БК в это время растягивается до того же размера).
+    const bool vga = board_->azbk();
+    if (!video_->start(file.toStdString(), o, vga ? bk::Azbk::VGA_W : bk::Screen::TEX_W, vga ? bk::Azbk::VGA_H : bk::Screen::TEX_H,
                        static_cast<uint32_t>(board_->cpuFreqHz()), static_cast<uint32_t>(board_->ticksPerFrame()), &err)) {
         status_->setText(QString("Видео не записывается: %1 — %2").arg(file, QString::fromStdString(err)));
         videoAction_->setChecked(false);
@@ -456,7 +498,17 @@ void MainWindow::runOneSlice(int kSlices) {
     renderScreen();
     if (frameDone_ && video_ && video_->active()) {
         if (video_->hasAudio()) board_->sound().takeCaptured(videoAudio_);
-        video_->addFrame(board_->screen().pixels(), videoAudio_.data(), video_->hasAudio() ? videoAudio_.size() / 2 : 0);
+        // Кадр — того размера, с каким запись начата: AZБК ставят и снимают на ходу.
+        const bk::Board::Frame fr = board_->displayFrame();
+        const uint32_t* px = fr.px;
+        if (video_->srcWidth() == bk::Azbk::VGA_W && fr.w != bk::Azbk::VGA_W) {
+            vgaFrame_.resize(size_t(bk::Azbk::VGA_W) * bk::Azbk::VGA_H);
+            bk::VideoCapture::toVga(fr.px, vgaFrame_.data());
+            px = vgaFrame_.data();
+        } else if (video_->srcWidth() == bk::Screen::TEX_W && fr.w != bk::Screen::TEX_W) {
+            px = board_->screen().pixels();
+        }
+        video_->addFrame(px, videoAudio_.data(), video_->hasAudio() ? videoAudio_.size() / 2 : 0);
         if (!video_->error().empty()) stopVideo();
         else if (video_->frames() % 25 == 0) updateVideoLabel();
     }
@@ -465,6 +517,7 @@ void MainWindow::runOneSlice(int kSlices) {
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
     if (smkram_ && smkram_->isVisible()) smkram_->refresh();
     if (bkram_ && bkram_->isVisible()) bkram_->refresh();
+    if (azram_ && azram_->isVisible()) azram_->refresh();
     for (ProfilerView* p : profilers_)
         if (p->isVisible()) p->refresh();
 }
@@ -472,7 +525,8 @@ void MainWindow::runOneSlice(int kSlices) {
 void MainWindow::renderScreen() {
     board_->screen().setColorMode(colorMode_);
     if (!board_->scanlineRender()) board_->screen().render(board_->memory());
-    screen_->setFrame(board_->screen().pixels());
+    const bk::Board::Frame fr = board_->displayFrame();
+    screen_->setFrame(fr.px, fr.w, fr.h);
 }
 
 void MainWindow::setPaused(bool paused) {
@@ -714,6 +768,10 @@ void MainWindow::openBin() {
 
 bool MainWindow::loadBinFromPath(const QString& path) {
     uint16_t addr = 0, len = 0;
+    if (board_->azbk()) {
+        status_->setText("С контроллером AZБК программа .BIN не загружается — AZ грузится со своих дисков");
+        return false;
+    }
     if (path != lastBin_) forgetBin();
     // В режиме auto машину выбирает программа (Board::binTargetsBk11): палитра 0177662 или
     // вызовы БОС — БК-0011М, иначе БК-0010-01. Явно выбранная машина остаётся какой есть.
@@ -788,6 +846,77 @@ void MainWindow::setSmk512(bool on) {
                         : "СМК-512 снят, машина перезапущена");
 }
 
+bk::Azbk::Config MainWindow::azConfig() const {
+    QSettings st;
+    bk::Azbk::Config c;
+    const QString sd = !azCli_.sd.isEmpty() ? azCli_.sd : st.value("azbk/sd", romDir_ + "/azbk").toString();
+    c.sdDir = sd.toStdString();
+    c.rw = azCli_.rw;
+    c.writeDir = azWriteDir(sd, c.rw).toStdString();
+    c.mod037 = azCli_.mod037 >= 0 ? azCli_.mod037 > 0 : st.value("azbk/mod037", false).toBool();
+    const QString u0 = st.value("azbk/unit0").toString();
+    if (!u0.isEmpty()) c.units[0] = u0.toStdString();
+    for (const auto& kv : azCli_.units) c.units[kv.first] = kv.second.toStdString();
+    return c;
+}
+
+bool MainWindow::applyAz(bool on) {
+    std::string err;
+    if (on) saveDisks();
+    const bool ok = board_->setAzbk(on, azConfig(), &err);
+    if (!ok && status_) status_->setText(QString("AZБК не установлен: %1").arg(QString::fromStdString(err)));
+    else if (!ok) std::fprintf(stderr, "AZБК: %s\n", err.c_str());
+    if (on && ok) forgetBin();
+    syncMachineMenu();
+    updateTitle();
+    return ok;
+}
+
+// Плату ставят при выключенном питании: машина перезапускается и грузится с AZBOOT.
+void MainWindow::setAzbk(bool on) {
+    QSettings().setValue(azKey(), on);
+    azCli_.on = -1;
+    const bool ok = applyAz(on);
+    resetMachine();
+    if (ok) status_->setText(on ? "Контроллер AZБК установлен, машина перезапущена" : "Контроллер AZБК снят, машина перезапущена");
+}
+
+void MainWindow::setAzVga(bool on) {
+    board_->setAzVga(on);
+    QSettings().setValue("azbk/vga", on);
+    renderScreen();
+    status_->setText(on ? "Экран: VGA платы AZБК" : "Экран: сама БК (ТВ)");
+}
+
+void MainWindow::chooseAzSd() {
+    const QString cur = QString::fromStdString(azConfig().sdDir);
+    const QString dir = QFileDialog::getExistingDirectory(this, "Каталог карты SD AZБК (с AZ.INI)", cur);
+    if (dir.isEmpty()) return;
+    QSettings().setValue("azbk/sd", dir);
+    azCli_.sd.clear();
+    if (board_->azbk() && applyAz(true)) resetMachine();
+    status_->setText("Карта SD AZБК: " + dir);
+}
+
+void MainWindow::chooseAzUnit0() {
+    const QString path = QFileDialog::getOpenFileName(this, "Диск AZ0 (загрузочный)",
+        QSettings().value("azbk/unit0", QString::fromStdString(azConfig().sdDir)).toString(),
+        "Образы дисков (*.img *.IMG *.bkd *.BKD *.dsk *.DSK);;Все файлы (*)");
+    if (path.isEmpty()) return;
+    QSettings().setValue("azbk/unit0", path);
+    azCli_.units.erase(0);
+    if (!board_->azbk()) { setAzbk(true); return; }
+    if (applyAz(true)) resetMachine();
+    status_->setText("Диск AZ0: " + QFileInfo(path).fileName());
+}
+
+void MainWindow::openAzRam() {
+    if (!azram_) azram_ = new AzRamWidget(board_.get());
+    azram_->show();
+    azram_->raise();
+    if (!board_->azbk()) status_->setText("AZБК не установлен: окно памяти пустое");
+}
+
 void MainWindow::applyScanline() {
     board_->setScanlineRender(scanlineOverride_ >= 0 ? scanlineOverride_ > 0 : board_->bk11());
 }
@@ -807,6 +936,13 @@ void MainWindow::syncMachineMenu() {
     ay2Action_->setChecked(board_->ay2());
     covoxAction_->setChecked(board_->covox());
     smkAction_->setChecked(board_->smk512());
+    smkAction_->setEnabled(!board_->azbk());
+    if (azAction_) {
+        QSignalBlocker ba(azAction_), bb(az037Action_);
+        azAction_->setChecked(board_->azbk());
+        az037Action_->setEnabled(!board_->bk11());
+        az037Action_->setChecked(azConfig().mod037);
+    }
 }
 
 void MainWindow::setMachineChoice(bk::MachineChoice c) {
@@ -832,6 +968,7 @@ void MainWindow::switchMachine(bk::Machine m) {
     applySoundSettings();
     // Плата — своя настройка у каждой машины (на БК-0011М её ставят реже).
     board_->setSmk512(QSettings().value(smkKey(), true).toBool());
+    applyAz(QSettings().value(azKey(), false).toBool());
     applyScanline();
     forgetBin();                       // .BIN другой машины перезапускать нельзя
     syncMachineMenu();
@@ -1027,6 +1164,14 @@ void MainWindow::saveDisks() {
 }
 
 bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
+    // С AZБК дискеты нет: образ становится его диском AZ0/AZ1 на этот запуск.
+    if (board_->azbk()) {
+        azCli_.units[drive] = path;
+        if (!applyAz(true)) return false;
+        if (drive == 0) resetMachine();
+        status_->setText(QString("Диск AZ%1: %2").arg(drive).arg(QFileInfo(path).fileName()));
+        return true;
+    }
     saveDisks();
     if (!board_->attachDisk(drive, path.toStdString(), !diskRw_)) {
         status_->setText("Не удалось вставить образ — нет roms/disk326.rom или файл не читается");
@@ -1070,6 +1215,10 @@ void MainWindow::setHddController(bk::Board::HddController c) {
 }
 
 bool MainWindow::attachHdd(const QString& path, int unit, bool boot) {
+    if (board_->azbk()) {
+        status_->setText("С контроллером AZБК винчестеры СМК и «Самары» не подключаются");
+        return false;
+    }
     // Винчестер СМК — узел платы СМК-512; «Самаре» плата не нужна.
     if (board_->resolveHddController(path.toStdString()) == bk::Board::HddController::Smk
         && !board_->smk512()) {
@@ -1197,6 +1346,7 @@ void MainWindow::loadState() {
 void MainWindow::updateTitle() {
     QString t = QString("%1%2 — эмулятор-отладчик").arg(QString::fromUtf8(bk::Board::machineName(board_->machine())))
                     .arg(machineChoice_ == bk::MachineChoice::Auto ? " (авто)" : "");
+    if (board_->azbk()) t += " + AZБК";
     if (!lastBin_.isEmpty()) t += " — " + QFileInfo(lastBin_).fileName();
     setWindowTitle(t);
 }

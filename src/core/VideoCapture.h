@@ -38,7 +38,8 @@ public:
     VideoCapture();
     ~VideoCapture();
 
-    // srcW x srcH — размер буфера экрана (512x256), fpsNum/fpsDen — частота кадров.
+    // srcW x srcH — размер кадра: буфер экрана БК 512x256 или VGA AZБК 1024x768;
+    // fpsNum/fpsDen — частота кадров.
     bool start(const std::string& path, const Options& opt, int srcW, int srcH,
                uint32_t fpsNum, uint32_t fpsDen, std::string* err = nullptr);
     // Один кадр БК в ARGB и звук, набранный за этот кадр: frames стерео-кадров (L, R).
@@ -53,6 +54,10 @@ public:
     std::string currentFile() const;
     const std::string& codec() const { return opt_.codec; }
     int outWidth() const { return outW_; }
+    int srcWidth() const { return srcW_; }   // ширина кадра, который ждёт addFrame
+    // Буфер экрана БК 512x256 -> кадр 1024x768 (точка — блоком 2x3), чтобы запись с AZБК
+    // шла одним размером кадра, что бы ни было на экране.
+    static void toVga(const uint32_t* src512x256, uint32_t* dst1024x768);
     int outHeight() const { return outH_; }
 
 private:
@@ -63,6 +68,7 @@ private:
     Options opt_;
     std::string path_;
     int srcW_ = 0, srcH_ = 0, outW_ = 0, outH_ = 0;
+    bool scale_ = false;            // растягивать кадр 2x3
     uint32_t fpsNum_ = 0, fpsDen_ = 1;
     bool active_ = false;
     uint64_t queued_ = 0;

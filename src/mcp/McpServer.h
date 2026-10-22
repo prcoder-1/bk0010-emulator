@@ -46,6 +46,7 @@ private:
     std::string romDir_;
     bool        romsOk_ = false;
     bk::MachineChoice choice_ = bk::MachineChoice::Auto;   // выбор машины: auto — по программе
+    bk::Azbk::Config azCfg_;            // AZБК: карта SD, диски, запись — для bk_reset
     QString     lastBin_;     // загруженная программа (пусто — после включения питания её нет)
     // Свои имена (bk_symbols), а за ними — имена ПЗУ контроллера дисковода (roms/*.sym).
     const std::string* symAt(uint16_t a) const;

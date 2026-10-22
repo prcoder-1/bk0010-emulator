@@ -26,7 +26,7 @@ bool VideoCapture::openPart(std::string* err) {
     p.width = outW_; p.height = outH_;
     p.fpsNum = fpsNum_; p.fpsDen = fpsDen_;
     // 512x256 показывается 4:3: точка БК 2:3; 1024x768 уже 4:3 сам.
-    if (!opt_.aspect43) { p.sarNum = 2; p.sarDen = 3; }
+    if (!scale_ && srcW_ * 2 <= 1024) { p.sarNum = 2; p.sarDen = 3; }
     p.audioRate = opt_.audioRate;
     if (!sink_->open(name, p, err)) { sink_.reset(); return false; }
     std::lock_guard<std::mutex> l(m_);
@@ -45,8 +45,10 @@ bool VideoCapture::start(const std::string& path, const Options& opt, int srcW, 
     // не учесть, и 512x256 показалось бы сплюснутым.
     if (sink_->squarePixelsOnly()) opt_.aspect43 = true;
     srcW_ = srcW; srcH_ = srcH;
-    outW_ = opt_.aspect43 ? srcW * 2 : srcW;
-    outH_ = opt_.aspect43 ? srcH * 3 : srcH;
+    // Растягивается только буфер БК (512x256); кадр VGA AZБК (1024x768) уже 4:3.
+    scale_ = opt_.aspect43 && srcW * 2 <= 1024;
+    outW_ = scale_ ? srcW * 2 : srcW;
+    outH_ = scale_ ? srcH * 3 : srcH;
     const uint32_t g = std::gcd(fpsNum, fpsDen);
     fpsNum_ = fpsNum / (g ? g : 1); fpsDen_ = fpsDen / (g ? g : 1);
     part_ = 1;
@@ -57,6 +59,15 @@ bool VideoCapture::start(const std::string& path, const Options& opt, int srcW, 
     active_ = true;
     thread_ = std::thread(&VideoCapture::worker, this);
     return true;
+}
+
+void VideoCapture::toVga(const uint32_t* src, uint32_t* dst) {
+    for (int y = 0; y < 256; ++y) {
+        uint32_t* d = dst + static_cast<size_t>(y) * 3 * 1024;
+        for (int x = 0; x < 512; ++x) d[2 * x] = d[2 * x + 1] = src[y * 512 + x];
+        std::copy(d, d + 1024, d + 1024);
+        std::copy(d, d + 1024, d + 2048);
+    }
 }
 
 void VideoCapture::addFrame(const uint32_t* argb, const int16_t* audio, size_t frames) {
@@ -90,7 +101,7 @@ void VideoCapture::worker() {
         }
         const std::vector<uint32_t>& src = item.frame;
         const uint32_t* frame = src.data();
-        if (opt_.aspect43) {
+        if (scale_) {
             scaled.resize(static_cast<size_t>(outW_) * outH_);
             for (int y = 0; y < srcH_; ++y) {
                 const uint32_t* s = src.data() + static_cast<size_t>(y) * srcW_;

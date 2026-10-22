@@ -58,7 +58,8 @@ ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, ove
 `--no-smk`),
 `--hdd <img.hdi>` / `--hdd-b` / `--hdd-rw` / `--hdd-ctl auto|smk|samara` (IDE hard disk on
 the СМК-512 or the «Самара» controller, `docs/hdd.md`),
-`--machine auto|bk10|bk11m` (`--bk10`, `--bk11m`; default auto), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
+`--machine auto|bk10|bk11m` (`--bk10`, `--bk11m`; default auto), `--az` / `--az-sd <dir>` /
+`--az-unit N=<img>` / `--az-rw` / `--az-037` (AZБК controller, `docs/azbk.md`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--video <file.avi|.mp4>` / `--video-codec zmbv|h264` (default: by extension) / `--video-size 1024x768|512x256` /
 `--video-audio` / `--no-video-audio` (screen capture with sound, GUI and headless, `docs/video.md`),
@@ -397,6 +398,21 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `McpServer::symAt/symAddrOf` (its own `bk_symbols` maps first, then `Board::romSymbols()`).
   The labels were bound to the ROM images by instruction-pattern matching against the
   commented sources (see `docs/floppy.md`) — regenerate the same way if a ROM changes.
+- **AZБК controller** (`src/core/Az*.{h,cpp}`, `docs/azbk.md`): an `MpiDevice` with
+  `fullBus()` — `Memory` asks it for EVERY address, not only A15=1. Active window answers
+  instead of the BK, shadow window copies BK writes, an unclaimed window is the BK itself
+  (its RAM and ROM; BK-0010 BASIC is blocked from 0120000) — do NOT switch the BK ROMs off
+  like GID does: BOS then jumps into an empty window 1 after the BIOS. While it is on it is
+  the only MPI device (СМК/КНГМД/HDD off). Start address 0170000 on every reset; every
+  reset is the board's ResetCold + MCU reboot (AZ.INI again), command 037 resets the
+  machine at the next `beginFrame`. Controller = firmware 00019 semantics
+  (`RE_ARM/decompiled/src/io11.c`), not GID: streams via explicit commands, DR outside a
+  stream = last status, IRQ 0174 after a long command with IE. SMK-mode table is GID's
+  except window 14 in Std10/Std11 = slot 8 (AZ337) — GID's «page 0» broke leCSIcon.
+  `--az`, `--az-sd`, `--az-unit N=img`, `--az-rw`, `--az-037`; SD template `roms/azbk`
+  (firmware 00019, no disks); BK writes (EEPROM, AZ.INI from Setup, files) go to a per-card
+  dir AppDataLocation/azbk/<card>-<hash> (`src/ui/AzPaths.h`), read before the card, unless `--az-rw`.
+  `Board::displayFrame()` is the VGA 1024x768 (or the BK screen); state is appended to BKX1.
 - **Video capture** (`src/core/VideoCapture`, `Zmbv`, `AviWriter`; core links zlib + threads):
   one AVI frame per EMULATED BK frame, rate/scale = cpuFreqHz/ticksPerFrame reduced (3125/64 on
   both machines) — never wall-clock. The GUI feeds a frame only when the LAST slice of a frame

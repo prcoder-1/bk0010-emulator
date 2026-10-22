@@ -150,6 +150,8 @@ void Board::beginFrameRaster(int over) {
 // переносится в следующий кадр; если граница прошла давно или ещё не наступила (шаг в
 // отладчике, пауза, снимок, останов в загрузчике) — кадр начинается заново.
 void Board::beginFrame() {
+    // Команда 037 контроллера AZБК: перезапуск машины — на границе кадра, вне команды.
+    if (azResetPending_) reset();
     const uint64_t T = static_cast<uint64_t>(ticksPerFrame());
     uint64_t start = frameEnd_;
     if (totalTicks_ < frameEnd_ || totalTicks_ - frameEnd_ >= T) {
@@ -312,6 +314,17 @@ Board::Board() {
     smk_.setModeHook([this]() { syncSmk11(); });
     // Intercept EMT 36 (tape/disk file I/O) and serve it from the host CWD.
     cpu_.setEmt36Hook([this]() { return handleEmt36(); });
+    // AZБК: его AY — те же два чипа, что на порту 0177714 (у GID тоже), ЦАП — свой канал.
+    az_.ayWrite = [this](int chip, bool address, uint8_t v) {
+        Ay8910& ay = chip ? ay2_ : ay_;
+        if (address) ay.writeAddress(static_cast<uint8_t>(v & 017)); else ay.writeData(v);
+        if (chip && !ay2Seen_) { ay2Seen_ = true; syncSound(); }
+    };
+    az_.sound = [this](double l, double r) { sound_.setAzLevel(l, r); };
+    az_.irq2 = [this]() { irqFramePending_ = true; };
+    az_.irqVector = [this]() { azIrqPending_ = true; };
+    az_.resetMachine = [this]() { azResetPending_ = true; };
+    az_.busError = [this]() { busErrorPending_ = true; };
 }
 
 // Кто отвечает на обмен. ДОЗУ БК (A15=0, оба банка) обслуживает 037 через своё
@@ -320,6 +333,8 @@ Board::Board() {
 // tests/hw/ROMIO.BIN на реальной БК-0010-01 в фазе 1 показал, что чтение из ПЗУ
 // на окно 037 медленнее чтения из В-В (docs/slow-memory-timing.md).
 uint8_t Board::busClass(uint16_t addr, bool write) const {
+    // Обмен, который обслужил AZБК (его окно или регистр), — быстрый, как ОЗУ СМК.
+    if (azOn_ && az_.serves(addr, write)) return BusFast;
     if (bk11()) {
         // БК-0011М: всё ОЗУ (и страницы в окне 1) — ДОЗУ за 037; ПЗУ и пустые розетки — ПЗУ;
         // ОЗУ СМК-512 отвечает сразу, как и на БК-0010.
@@ -358,6 +373,7 @@ void Board::advanceDevices(int t) {
     if (scanlineRender_) renderRasterTo(vp037_.fieldLine(), 0);
     totalTicks_ += static_cast<uint64_t>(t);
     sound_.feed(speaker_, t);
+    if (azOn_) az_.advance(t);
     // Вращение диска. Микросхема 1801ВП1-128 формирует слово за 64 мкс (192 такта
     // при 3 МГц), и драйвер обязан успевать за этим темпом по флагу TR. Крутим
     // ПОСЛЕ КАЖДОЙ команды, а не раз в кадр: опросный цикл драйвера — три-четыре
@@ -384,7 +400,7 @@ void Board::advanceDevices(int t) {
 // команды: клавиатура может разбудить процессор посреди кадра.
 int Board::idleTicks(int t) {
     advanceDevices(t);
-    if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_) {
+    if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_ || azIrqPending_) {
         const int it = tryDeliverInterrupts();
         if (it) { advanceDevices(it); t += it; }
     }
@@ -412,7 +428,7 @@ int Board::stepCore() {
     if (rasterPending_) applyRasterPending();   // запись в регистр экрана — в конце команды
     // Взведённые запросы разбираются после КАЖДОЙ команды, а не раз в кадр: иначе
     // программа, открывшая маску в середине кадра, ждала бы следующего кадра.
-    if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_) {
+    if (irqFramePending_ || keyIntPending_ || stopPending_ || busErrorPending_ || azIrqPending_) {
         const int it = tryDeliverInterrupts();
         if (it) { advanceDevices(it); t += it; }
     }
@@ -591,10 +607,12 @@ void Board::setMachine(Machine m) {
     busRespU_ = bk11() ? bus11Resp_ : 33;
     sound_.setCpuFreq(cpuFreqHz_);
     mem_.setBk11(bk11());
+    az_.setMachine(bk11(), cpuFreqHz_);
     syncSmk11();
     setAy(bk11());
     setAy2(bk11());           // БК-0011М по умолчанию — с платой на два AY и Covox
     setCovox(bk11());
+    if (azOn_) { setAy(true); setAy2(true); }   // у AZБК свои два AY
     if (!romDir_.empty()) loadRoms(romDir_);
 }
 
@@ -643,7 +661,11 @@ void Board::reset() {
     // Адрес начального пуска процессор берёт из ячейки 0177716. Обычно там ПЗУ БК
     // с адресом 0100000, но контроллер с собственной прошивкой зеркалит своё ПЗУ
     // на эту ячейку и уводит старт на себя (§17.9) — так грузится машина с СМК.
-    const uint16_t start = (diskOn_ && kngmd_.romStart()) ? kngmd_.romStart()
+    // С AZБК — его стартовое ПЗУ в окне 15 (0177716 отвечает 0170000 до первого чтения).
+    // Сброс БК — это и ResetCold платы, и перезапуск её микроконтроллера (AZ.INI заново).
+    if (azOn_) { az_.coldReset(true); azIrqPending_ = false; azResetPending_ = false; }
+    const uint16_t start = azOn_ ? Azbk::START_ADDRESS
+                         : (diskOn_ && kngmd_.romStart()) ? kngmd_.romStart()
                          : bk11() ? START_VECTOR11 : START_VECTOR;
     // Power-up: priority 7 (all interrupts masked). The monitor lowers the
     // priority itself once it has installed its interrupt vectors.
@@ -827,6 +849,11 @@ bool Board::MpiMux::mpiPoke(uint16_t raw, uint16_t value, bool isByte) {
 }
 
 void Board::updateMpi() {
+    if (azOn_) {
+        symbols_.setFallback(nullptr);
+        mem_.setMpi(&az_);
+        return;
+    }
     mux_.smk = smkOn_  ? &smk_   : nullptr;
     mux_.fdc = diskOn_ ? &kngmd_ : nullptr;
     mux_.ide = (ide_.any() && (samara_ ? diskOn_ : smkOn_)) ? &ide_ : nullptr;
@@ -1038,10 +1065,19 @@ bool Board::powerOn(const Setup& s, const std::string& romDir) {
     setArbitration(s.arb037);
     setCpuPhase(s.cpuPhase);
     setScanlineRender(s.scanline >= 0 ? s.scanline > 0 : bk11());
-    setSmk512(s.smk);
+    setSmk512(s.smk && !s.az);
     if (!s.diskRom.empty()) setDiskRom(s.diskRom);
     setHddController(s.hddCtl);
-    const bool ok = loadRoms(romDir);
+    bool ok = loadRoms(romDir);
+    if (s.az) {
+        std::string err;
+        if (!setAzbk(true, s.azCfg, &err)) {
+            std::fprintf(stderr, "AZБК: %s\n", err.c_str());
+            ok = false;
+        }
+    } else {
+        setAzbk(false);
+    }
     reset();
     return ok;
 }
@@ -1098,6 +1134,28 @@ void Board::setSmk512(bool on) {
     if (on) { smk_.powerOn(); smkStartMode(); } else smk_.release();
     syncSmk11();
     updateMpi();
+}
+
+bool Board::setAzbk(bool on, const Azbk::Config& cfg, std::string* err) {
+    const bool want = on;
+    if (on) {
+        setSmk512(false);
+        diskOn_ = false;                         // КНГМД и НЖМД — с шины (дискеты остаются в приводах)
+        if (!az_.powerOn(cfg, bk11(), cpuFreqHz_, err)) {
+            az_.release();
+            on = false;
+        }
+    } else if (azOn_) {
+        az_.release();
+    }
+    const bool ok = on;
+    azOn_ = on;
+    azResetPending_ = azIrqPending_ = false;
+    mem_.setBasicOff(on);
+    sound_.setAzbk(on);
+    if (on) { setAy(true); setAy2(true); }
+    updateMpi();
+    return ok == want;
 }
 
 // ---- Save / restore state ---------------------------------------------------
@@ -1326,6 +1384,18 @@ void Board::saveStateExt(std::vector<uint8_t>& out) const {
                            keyIntDeferAt_ > totalTicks_ ? keyIntDeferAt_ - totalTicks_ : 0,
                            totalTicks_ - timerStart_};
     put(t, sizeof t);
+    // AZБК: признак, «что на экране», и всё состояние платы (ОЗУ — ненулевыми страницами).
+    put8(azOn_ ? 1 : 0);
+    if (azOn_) {
+        put8(azVga_ ? 1 : 0);
+        const uint8_t pend = static_cast<uint8_t>((azIrqPending_ ? 1 : 0) | (azResetPending_ ? 2 : 0));
+        put8(pend);
+        std::vector<uint8_t> az;
+        az_.saveState(az);
+        const uint32_t n = static_cast<uint32_t>(az.size());
+        put(&n, 4);
+        p.insert(p.end(), az.begin(), az.end());
+    }
     const uint32_t len = static_cast<uint32_t>(p.size());
     out.insert(out.end(), kExtTag, kExtTag + 4);
     out.insert(out.end(), reinterpret_cast<const uint8_t*>(&len), reinterpret_cast<const uint8_t*>(&len) + 4);
@@ -1373,6 +1443,25 @@ void Board::loadStateExt(const std::vector<uint8_t>& in, size_t off) {
     kbdReadyClearAt_ = t[0] ? totalTicks_ + t[0] : 0;
     keyIntDeferAt_ = totalTicks_ + t[1];
     timerStart_ = totalTicks_ - t[2];   // по модулю 2^64: timerCheck считает разность
+    uint8_t az = 0;
+    if (!get(&az, 1) || !az) { if (azOn_) setAzbk(false); return; }
+    uint8_t vga = 1, pend = 0;
+    uint32_t n = 0;
+    if (!get(&vga, 1) || !get(&pend, 1) || !get(&n, 4) || off + n > end) return;
+    if (!azOn_) {
+        // Плату вставляем без включения питания: память и регистры придут из снимка.
+        azOn_ = true;
+        mem_.setBasicOff(true);
+        sound_.setAzbk(true);
+        setSmk512(false);
+        diskOn_ = false;
+        updateMpi();
+    }
+    const uint8_t* q = in.data() + off;
+    if (!az_.loadState(q, in.data() + off + n)) std::fprintf(stderr, "AZБК: снимок платы повреждён\n");
+    if (!az_.on()) { azOn_ = false; mem_.setBasicOff(false); sound_.setAzbk(false); updateMpi(); return; }
+    azVga_ = vga != 0;
+    azIrqPending_ = pend & 1; azResetPending_ = pend & 2;
 }
 
 bool Board::saveState(const std::string& path) {
@@ -1479,6 +1568,8 @@ void Board::pressKey(uint16_t bkCode) {
     // чтения». Отбрасывание нового кода при занятом регистре — неверно: игры вроде
     // PITON читают 0177662 только пока клавиша физически нажата (бит 6 0177716), а
     // LAND — только по событию нажатия; обе получали бы код ПРЕДЫДУЩЕЙ клавиши.
+    // АР2+ЛАТ на AZБК переключает старый экран БК между 512 и 256 точками (GID CatchAr2Lat).
+    if (azOn_ && bkCode == 0217) az_.ar2Lat();
     kbdData_ = bkCode & 0177;                 // 7-bit code -> 0177662
     kbdStatus_ |= 0200;                       // set "code ready"
     kbdReadyClearAt_ = 0;                     // новый код отменяет отложенный сброс флага
@@ -1501,7 +1592,8 @@ void Board::pressKey(uint16_t bkCode) {
 void Board::deliverFrameInterrupts() {
     // БК-0011М: бит 14 регистра 0177662 — «таймер выключен» (0 = прерывание идёт;
     // БК-docs §20.4, проверено по ПЗУ БОС .BTIM).
-    if (bk11() && (reg662_ & 040000)) return;
+    // Кадровый таймер AZБК «48 Гц» идёт по кадру БК (как у GID) — и при выключенном таймере 11М.
+    if (bk11() && (reg662_ & 040000) && !(azOn_ && az_.timer48())) return;
     irqFramePending_ = true;
     const int t = tryDeliverInterrupts();
     if (t) advanceDevices(t);
@@ -1561,6 +1653,13 @@ int Board::tryDeliverInterrupts() {
     if (irqFramePending_ && mem_.peekWord(Cpu::VEC_IRQ2) != 0) {
         irqFramePending_ = false;
         const int t = enterInterrupt(Cpu::VEC_IRQ2, false);   // 0100 (50 Hz)
+        trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
+        return t;
+    }
+    // Контроллер AZБК: векторное прерывание (IAKO) по 0174 после долгой команды.
+    if (azIrqPending_ && mem_.peekWord(0174) != 0) {
+        azIrqPending_ = false;
+        const int t = enterInterrupt(0174, true);
         trace_.profileInterrupt(cpu_.pc(), cpu_.sp());
         return t;
     }
@@ -2205,7 +2304,7 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // нечётному адресу приходит в старший байт, младший тогда 0 → данные 0377.
             ayWrite(value, wide, isByte);
         }
-        if (covoxOn_) covoxWrite(wide, isByte, (addrIn & 1) != 0);
+        if (covoxOn_ && !(azOn_ && az_.legacyCovoxOff())) covoxWrite(wide, isByte, (addrIn & 1) != 0);
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
     case REG_KBD_DATA:
