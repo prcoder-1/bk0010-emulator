@@ -13,6 +13,7 @@
 #include "Smk.h"
 #include "Kngmd.h"
 #include "Hdd.h"
+#include "Az.h"
 #include "Trace.h"
 #include "Symbols.h"
 
@@ -175,6 +176,25 @@ public:
     // 0160000 сначала пробует винчестер. false — нет образа, платы или прошивки.
     bool bootFromHdd();
 
+    // Контроллер AZБК (docs/azbk.md). Пока он стоит, он — единственное устройство МПИ:
+    // СМК-512 (её эмулирует сам AZ), КНГМД и НЖМД сняты. Его активные окна перекрывают
+    // память и ПЗУ БК; где окно не подключено, отвечает сама БК (на БК-0010 Бейсик
+    // заблокирован — плата управляет памятью с 0120000). Включение — как
+    // установка платы в выключенную машину: после него нужен reset(). false — нет карты SD
+    // (err — почему).
+    bool setAzbk(bool on, const Azbk::Config& cfg = {}, std::string* err = nullptr);
+    bool azbk() const { return azOn_; }
+    const Azbk& az() const { return az_; }
+    Azbk&       az()       { return az_; }
+    // Что показывать: VGA платы (1024×768) или экран самой БК (512×256).
+    void setAzVga(bool on) { azVga_ = on; }
+    bool azVga() const { return azVga_; }
+    struct Frame { const uint32_t* px; int w, h; };
+    Frame displayFrame() const {
+        if (azOn_ && azVga_) return {az_.frame(), Azbk::VGA_W, Azbk::VGA_H};
+        return {screen_.pixels(), Screen::TEX_W, Screen::TEX_H};
+    }
+
     // Конфигурация машины одним куском — общая для безголового режима и MCP-сервера
     // (GUI берёт её из своих настроек). -1 — по машине: AY, второй AY и Covox стоят на
     // БК-0011М, построчная отрисовка — тоже.
@@ -185,6 +205,8 @@ public:
         int  cpuPhase = 0;
         std::string diskRom;                         // пусто — прошивка по конфигурации
         HddController hddCtl = HddController::Auto;
+        bool az = false;                             // контроллер AZБК
+        Azbk::Config azCfg;
     };
     // Включить питание машины в этой конфигурации. false — не загрузились ПЗУ.
     bool powerOn(const Setup& s, const std::string& romDir);
@@ -534,6 +556,11 @@ private:
     };
     MpiMux mux_;
     void updateMpi();
+    Azbk   az_;                    // контроллер AZБК
+    bool   azOn_ = false;
+    bool   azVga_ = true;
+    bool   azResetPending_ = false;  // команда 037: сброс на границе кадра
+    bool   azIrqPending_ = false;    // запрос контроллера по вектору 0174
 
     bool arb037_ = true;           // моделировать арбитраж 037 (по умолчанию ВКЛ)
     bool scanlineRender_ = false;  // построчная отрисовка экрана

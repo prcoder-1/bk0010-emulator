@@ -3393,6 +3393,294 @@ int main(int argc, char** argv) {
 #endif
     }
 
+    // ---- Контроллер AZБК (src/core/Az*, docs/azbk.md) ----------------------------
+    // Временная «карта SD»: AZ.INI, крошечное стартовое ПЗУ (BR . по 0170000), образ
+    // диска на 4 блока с узором, EEPROM.
+    namespace fs = std::filesystem;
+    const fs::path azDir = fs::temp_directory_path() / ("bk_az_test_" + std::to_string(::getpid()));
+    const fs::path azWr = azDir / "write";
+    auto azSetup = [&]() {
+        fs::remove_all(azDir);
+        fs::create_directories(azDir / "ROM");
+        fs::create_directories(azDir / "DISKS");
+        std::ofstream(azDir / "AZ.INI") << "[ROM]\r\nR00=0:/rom/boot.rom\r\n[DISKS]\r\nD0=0:/disks/t.img\r\n[BOOT]\r\nD0\r\n";
+        { std::ofstream r(azDir / "ROM" / "BOOT.ROM", std::ios::binary); const uint8_t br[2] = {0377, 001}; r.write(reinterpret_cast<const char*>(br), 2); }
+        { std::ofstream d(azDir / "DISKS" / "T.IMG", std::ios::binary);
+          for (int i = 0; i < 4 * 256; ++i) { const uint16_t w = static_cast<uint16_t>(i * 3 + 1); d.write(reinterpret_cast<const char*>(&w), 2); } }
+        { std::ofstream e(azDir / "EEPROM.DAT", std::ios::binary);
+          for (int i = 0; i < 255; ++i) { const uint16_t w = static_cast<uint16_t>(0100 + i); e.write(reinterpret_cast<const char*>(&w), 2); } }
+    };
+    auto azCfg = [&]() { Azbk::Config c; c.sdDir = azDir.string(); c.writeDir = azWr.string(); return c; };
+    auto azW = [](Azbk& a, uint16_t addr, uint16_t v) { a.mpiWrite(addr, v, false); };
+    auto azR = [](Azbk& a, uint16_t addr) { uint16_t v = 0; a.mpiRead(addr, v); return v; };
+
+    SECTION("AZБК: маппер — окна, тень, 0177716 и 0177130, старт с 0170000")
+    {
+        azSetup();
+        Board b;
+        b.setMachine(Machine::Bk0011m);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        std::string err;
+        CHECK(b.setAzbk(true, azCfg(), &err), "AZ/маппер: плата ставится на временную карту SD");
+        b.reset();
+        Memory& m = b.memory();
+        CHECK(b.cpu().pc() == 0170000, "AZ/маппер: пуск с 0170000 (стартовое ПЗУ в окне 15)");
+        CHECK(m.peekWord(0170000) == 000777, "AZ/маппер: в окне 15 — слот ПЗУ 0 (страница 0100)");
+        CHECK((m.readWord(0177716) & 0177400) == 0140000, "AZ/маппер: 0177716 — ответ БК-0011М, сложенный с ответом платы");
+        // Окно 14 -> страница 0400, активно, на запись.
+        m.writeWord(0177334, 0400);
+        m.writeWord(0177340, static_cast<uint16_t>(m.readWord(0177340) | 040000));
+        m.writeWord(0160000, 012345);
+        CHECK(b.az().memWord(0400u << 12) == 012345, "AZ/маппер: запись в активное окно — в память платы");
+        CHECK(m.readWord(0160000) == 012345, "AZ/маппер: чтение активного окна — из памяти платы");
+        m.writeWord(0177342, 040000);                      // окно 14 — только чтение
+        m.writeWord(0160000, 054321);
+        CHECK(b.az().memWord(0400u << 12) == 012345, "AZ/маппер: окно «только чтение» запись не принимает");
+        // 0177716 с разрядом 11: карта БК-0011М -> окна 0–11, тень у ОЗУ.
+        m.writeWord(0177716, 016000);                      // окно 0 — код 1 (страница 5), окно 1 — код 6
+        CHECK(m.readWord(0177352) == 016000, "AZ/маппер: 0177352 — копия последней карты 0177716");
+        const Azbk::Window w4 = b.az().window(4), w0 = b.az().window(0);
+        CHECK(w4.page == 4 && w4.shadow && !w4.active, "AZ/маппер: окно 040000 — теневая страница кода 1 (4)");
+        CHECK(w0.page == 030 && w0.shadow, "AZ/маппер: окно 0 — страницы 030–033");
+        m.writeWord(040010, 0123456);
+        CHECK(m.peekWord(040010) == 0123456 && b.az().memWord(4u * 4096 + 010) == 0123456,
+              "AZ/маппер: тень — запись идёт в ОЗУ БК и копируется в плату");
+        // 0177130: строб 6, режим Std11 (0140) -> окно 15 — ОЗУ СМК 0207.
+        m.writeWord(0177130, 6);
+        m.writeWord(0177130, 0140);
+        CHECK(b.az().window(15).page == 0207 && b.az().window(15).active, "AZ/маппер: режим СМК Std11 — окно 15 в ОЗУ СМК");
+        CHECK(m.readWord(0177350) == 0140, "AZ/маппер: 0177350 — копия слова режима СМК");
+        m.writeWord(0177346, 0177777);
+        CHECK(m.readWord(0177346) == 0137774, "AZ/маппер: 0177346 — REVTYPE и разряды 1:0 не пишутся");
+        // Сброс по команде 037 — на границе кадра, разряды частоты (8:6) живут.
+        m.writeWord(0177346, 0700);
+        m.writeWord(0177220, 037);
+        b.runFrame(); b.runFrame();
+        CHECK(b.cpu().pc() == 0170000 || b.cpu().pc() == 0170000 + 0, "AZ/маппер: команда 037 перезапускает машину");
+        CHECK((b.az().mmu() & 0700) == 0700, "AZ/маппер: после 037 разряды 8:6 0177346 на месте");
+        CHECK(b.az().window(15).page == 0100, "AZ/маппер: после 037 в окне 15 снова стартовое ПЗУ");
+        b.setAzbk(false);
+        b.reset();
+        CHECK(b.cpu().pc() == 0140000, "AZ/маппер: без платы — обычный пуск БК-0011М");
+    }
+
+    SECTION("AZБК: видео — 256 цветов, палитра, слои, малый экран")
+    {
+        azSetup();
+        Azbk a;
+        a.powerOn(azCfg(), true, 4000000);
+        // 8 бит/точку, строка 128 слов, ×4 по X, ×3 по Y, рулон 49152 слова.
+        azW(a, 0177230, 062223);
+        azW(a, 0177232, 0400);
+        azW(a, 0177234, 1); azW(a, 0177236, 037 << 10);    // красный
+        azW(a, 0177234, 2); azW(a, 0177236, 037 << 5);     // зелёный
+        azW(a, 0177234, 1);
+        CHECK(azR(a, 0177236) == (037 << 10), "AZ/видео: ячейка палитры читается обратно");
+        a.setMemWord(0400u << 12, 0x0201);
+        a.advance(4000000 / 25);                             // два с лишним кадра VGA
+        const uint32_t* f = a.frame();
+        CHECK(f[0] == 0xffff0000u && f[3] == 0xffff0000u && f[4] == 0xff00ff00u && f[2 * 1024] == 0xffff0000u,
+              "AZ/видео: точка 8 бит — ×4 по X, ×3 по Y, цвета из палитры");
+        // Слои (режим 7): верхний прозрачен (0) — видна точка среднего слоя.
+        azW(a, 0177230, 062227);
+        azW(a, 0177240, 0500);
+        a.setMemWord(0400u << 12, 0);
+        a.setMemWord(0500u << 12, 0x0002);
+        a.advance(4000000 / 25);
+        CHECK(a.frame()[0] == 0xff00ff00u, "AZ/видео: слои — нуль прозрачен, виден средний слой");
+        // Старый экран БК 012201 и малый экран (0177664, разряд 9 = 0): строки за 192-й тёмные.
+        azW(a, 0177230, 012201);
+        azW(a, 0177232, 4);
+        for (uint32_t i = 0; i < 040000; i += 2) a.setMemWord(4u * 4096 + i, 0177777);
+        a.mpiWrite(0177664, 0330, false);
+        a.advance(4000000 / 25);
+        CHECK(a.frame()[0] != 0xff000000u && a.frame()[size_t(767) * 1024] == 0xff000000u,
+              "AZ/видео: малый экран БК — нижняя четверть гаснет");
+        a.mpiWrite(0177664, 01330, false);
+        a.advance(4000000 / 25);
+        CHECK(a.frame()[size_t(767) * 1024] != 0xff000000u, "AZ/видео: полный экран — все 256 строк");
+    }
+
+    SECTION("AZБК: блиттер — копия, заполнение, наложение, ручной пуск")
+    {
+        azSetup();
+        Azbk a;
+        a.powerOn(azCfg(), true, 4000000);
+        const uint32_t pk = 0300u << 11, src = 0x1000, dst = 0x2000;   // адреса слов
+        auto put = [&](uint32_t wa, uint16_t v) { a.setMemWord(wa * 2, v); };
+        auto get = [&](uint32_t wa) { return a.memWord(wa * 2); };
+        for (uint32_t i = 0; i < 6; ++i) put(src + i, static_cast<uint16_t>(0x1100 + i));
+        // Копия 2 строки по 3 слова, шаг строки 1 (строки подряд); затем заполнение 0x55.
+        const uint16_t cmds[16] = {0, uint16_t(src), uint16_t(dst), 011, uint16_t((2 << 8) | 2), 1, 0, 0,
+                                   0, 0, uint16_t(dst + 0x100), 0, uint16_t((1 << 8) | 3), 1, 0, 0x55};
+        for (int i = 0; i < 16; ++i) put(pk + i, cmds[i]);
+        azW(a, 0177272, 0300);
+        azW(a, 0177270, 2);                                   // автоматический пуск по концу кадра
+        a.advance(4000000 / 20);
+        bool copy = true;
+        for (uint32_t i = 0; i < 6; ++i) copy &= get(dst + i) == 0x1100 + i;
+        CHECK(copy, "AZ/блиттер: копирование SRC -> DST по строкам");
+        CHECK(get(dst + 0x100) == 0x5555 && get(dst + 0x103) == 0x5555 && get(dst + 0x104) == 0,
+              "AZ/блиттер: заполнение константой — ровно ширина спрайта");
+        // Наложение (021): байт SRC = 0 прозрачен. Ручной пуск: сначала разряд 14, потом 12.
+        put(src, 0x0042); put(dst + 0x200, 0x7777);
+        const uint16_t ovl[8] = {0, uint16_t(src), uint16_t(dst + 0x200), 021, uint16_t((1 << 8) | 0), 1, 0, 0};
+        for (int i = 0; i < 8; ++i) put(pk + i, ovl[i]);
+        azW(a, 0177270, 0);
+        azW(a, 0177270, 040001);
+        azW(a, 0177270, 050001);
+        a.advance(4000000 / 1000);
+        CHECK(get(dst + 0x200) == 0x7742, "AZ/блиттер: наложение — нулевой байт прозрачен, ручной пуск");
+        CHECK((azR(a, 0177270) & 0100000) == 0, "AZ/блиттер: по окончании разряд «занят» снят");
+    }
+
+    SECTION("AZБК: контроллер — диск, потоки DR, ошибки, вектор 0174, EEPROM, файлы")
+    {
+        azSetup();
+        Azbk a;
+        int irqs = 0;
+        a.irqVector = [&] { ++irqs; };
+        std::string err;
+        CHECK(a.powerOn(azCfg(), true, 4000000, &err), "AZ/контроллер: карта SD читается");
+        azW(a, 0177222, 0); azW(a, 0177220, 1);             // выбор AZ0
+        CHECK(azR(a, 0177220) == 0200, "AZ/контроллер: выбор диска — готово, без ошибки");
+        azW(a, 0177220, 7);
+        CHECK(azR(a, 0177222) == 4, "AZ/контроллер: 007 — размер диска в блоках");
+        azW(a, 0177222, 2); azW(a, 0177220, 2);             // блок 2
+        azW(a, 0177220, 0105);                               // чтение с IE
+        CHECK(irqs == 1, "AZ/контроллер: по окончании чтения с IE — прерывание по 0174");
+        azW(a, 0177220, 015);
+        bool same = true;
+        for (int i = 0; i < 256; ++i) same &= azR(a, 0177222) == static_cast<uint16_t>((512 + i) * 3 + 1);
+        CHECK(same, "AZ/контроллер: 015 — блок 256 словами через DR");
+        CHECK(!(azR(a, 0177220) & 0100000), "AZ/контроллер: поток прочитан ровно — без ошибки");
+        azR(a, 0177222);
+        CHECK((azR(a, 0177220) & 0100000) != 0, "AZ/контроллер: чтение за концом потока — разряд ошибки");
+        // Запись блока 1: в память поверх файла (образ только для чтения). Номер блока —
+        // до потока 016: пока поток открыт, слова DR идут в буфер (так у прошивки).
+        azW(a, 0177220, 0);
+        azW(a, 0177222, 1); azW(a, 0177220, 2);
+        azW(a, 0177220, 016);
+        for (int i = 0; i < 256; ++i) azW(a, 0177222, static_cast<uint16_t>(0170000 + i));
+        azW(a, 0177220, 6);
+        azW(a, 0177222, 1); azW(a, 0177220, 2); azW(a, 0177220, 5); azW(a, 0177220, 015);
+        CHECK(azR(a, 0177222) == 0170000, "AZ/контроллер: записанный блок читается обратно");
+        { std::ifstream d(azDir / "DISKS" / "T.IMG", std::ios::binary); d.seekg(512); uint16_t w = 0; d.read(reinterpret_cast<char*>(&w), 2);
+          CHECK(w == 256 * 3 + 1, "AZ/контроллер: файл образа не тронут (запись — в памяти)"); }
+        azW(a, 0177220, 0);                                  // сброс автоматов: DR — снова результат
+        azW(a, 0177222, 5); azW(a, 0177220, 1);             // AZ5 не смонтирован
+        CHECK((azR(a, 0177220) & 0100000) && azR(a, 0177222) == 0x8C00, "AZ/контроллер: нет диска — ошибка и код 0x8C00");
+        azW(a, 0177220, 027);
+        CHECK(azR(a, 0177222) == 0x1904 && azR(a, 0177222) == 0x1F, "AZ/контроллер: 027 — прошивка 19, плата 4, 31 диск");
+        // EEPROM: 021 читает в буфер за словом результата, 024 пишет буфер с начала.
+        azW(a, 0177220, 021); azW(a, 0177220, 022);
+        CHECK(azR(a, 0177222) == 0 && azR(a, 0177222) == 0100 && azR(a, 0177222) == 0101, "AZ/контроллер: EEPROM читается");
+        azW(a, 0177220, 023);
+        for (int i = 0; i < 255; ++i) azW(a, 0177222, static_cast<uint16_t>(07000 + i));
+        azW(a, 0177220, 024);
+        { std::ifstream e(azWr / "EEPROM.DAT", std::ios::binary); uint16_t w = 0; e.read(reinterpret_cast<char*>(&w), 2);
+          CHECK(e && w == 07000, "AZ/контроллер: EEPROM пишется в каталог записи, не на карту"); }
+        // Файлы: 053/054/023/055 — запись, 050/051/052/022 — чтение.
+        auto name = [&](const char* n) {
+            azW(a, 0177220, 023);
+            const size_t len = std::strlen(n) + 1;
+            for (size_t i = 0; i < 256; ++i) {
+                const uint8_t lo = 2 * i < len ? static_cast<uint8_t>(n[2 * i]) : 0, hi = 2 * i + 1 < len ? static_cast<uint8_t>(n[2 * i + 1]) : 0;
+                azW(a, 0177222, static_cast<uint16_t>(lo | (hi << 8)));
+            }
+        };
+        name("0:/TEST.TXT");
+        azW(a, 0177220, 053);
+        azW(a, 0177220, 054); azW(a, 0177222, 5); azW(a, 0177222, 0);
+        azW(a, 0177220, 023); azW(a, 0177222, 'H' | ('E' << 8)); azW(a, 0177222, 'L' | ('L' << 8)); azW(a, 0177222, 'O');
+        azW(a, 0177220, 055);
+        { std::ifstream t(azWr / "TEST.TXT"); std::string str; t >> str; CHECK(str == "HELLO", "AZ/контроллер: файл БК записан"); }
+        name("0:/test.txt");
+        azW(a, 0177220, 050); azW(a, 0177220, 051);
+        CHECK(azR(a, 0177222) == 5 && azR(a, 0177222) == 0, "AZ/контроллер: 051 — размер файла");
+        azW(a, 0177220, 052); azW(a, 0177220, 022);
+        CHECK(azR(a, 0177222) == ('H' | ('E' << 8)), "AZ/контроллер: 052 — содержимое файла (имя без учёта регистра)");
+        name("0:/../AZ.INI");
+        azW(a, 0177220, 050); azW(a, 0177220, 051);
+        CHECK(azR(a, 0177222) == 0, "AZ/контроллер: путь с «..» за пределы карты не открывается");
+        CHECK(azR(a, 0177226) == 0106447, "AZ/контроллер: BOOT2 — поток команд загрузчика (MTPS)");
+    }
+
+    SECTION("AZБК: DMA-звук — PCM, конец однократного проигрывания, IMA ADPCM")
+    {
+        azSetup();
+        Azbk a;
+        std::vector<double> lv;
+        a.sound = [&](double l, double) { lv.push_back(l); };
+        a.powerOn(azCfg(), true, 4000000);
+        for (int i = 0; i < 4; ++i) a.setMemWord((0500u << 12) + uint32_t(i) * 2, static_cast<uint16_t>(1000 * (i + 1)));
+        azW(a, 0177162, 0500); azW(a, 0177164, 0); azW(a, 0177166, 4);
+        lv.clear();
+        azW(a, 0177160, 3);                                  // пуск, однократно, PCM 16
+        a.advance(4000000 / 1000);
+        CHECK((azR(a, 0177160) & 010) != 0, "AZ/DMA: по концу данных — разряд «готово»");
+        bool pcm = lv.size() >= 4 && std::fabs(lv[0] - 1000 / 32768.0) < 1e-9 && std::fabs(lv[3] - 4000 / 32768.0) < 1e-9;
+        CHECK(pcm, "AZ/DMA: отсчёты PCM идут в ЦАП по порядку");
+        // IMA ADPCM моно: полубайты 7, 7 -> 11, 41 (шаги 7 и 16).
+        a.setMemWord(0500u << 12, 0x0077);
+        azW(a, 0177166, 1);
+        lv.clear();
+        azW(a, 0177160, (4 << 9) | 3);
+        a.advance(4000000 / 1000);
+        CHECK(lv.size() >= 2 && std::lround(lv[0] * 32768) == 11 && std::lround(lv[1] * 32768) == 41,
+              "AZ/DMA: декодер IMA ADPCM — стандартные шаги");
+    }
+
+    SECTION("AZБК: снимок состояния с платой")
+    {
+        azSetup();
+        Board b;
+        b.setMachine(Machine::Bk0011m);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.setAzbk(true, azCfg());
+        b.reset();
+        b.runFrame();
+        b.memory().writeWord(0177230, 062223);
+        b.az().setMemWord(0x123456, 04321);
+        std::vector<uint8_t> st;
+        b.saveStateMem(st);
+        b.az().setMemWord(0x123456, 0);
+        b.memory().writeWord(0177230, 0);
+        b.setAzbk(false);
+        CHECK(b.loadStateMem(st), "AZ/снимок: читается");
+        CHECK(b.azbk() && b.az().memWord(0x123456) == 04321, "AZ/снимок: плата и её память восстановлены");
+        CHECK(b.az().reg(0177230) == 062223, "AZ/снимок: регистры видео восстановлены");
+        Board c; c.setMachine(Machine::Bk0011m); c.loadRoms(BK_DEFAULT_ROM_DIR); c.reset();
+        std::vector<uint8_t> plain; c.saveStateMem(plain);
+        CHECK(b.loadStateMem(plain) && !b.azbk(), "AZ/снимок: снимок без платы её снимает");
+    }
+
+    SECTION("AZБК: прошивка 00019 (roms/azbk) — БК-0011М и БК-0010-01 доходят до BIOS")
+    {
+        const std::string sd = std::string(BK_DEFAULT_ROM_DIR) + "/azbk";
+        if (!fs::exists(sd + "/AZ.INI")) {
+            std::printf("SKIP: нет %s/AZ.INI\n", sd.c_str());
+        } else {
+            for (int mach = 1; mach >= 0; --mach) {
+                Board b;
+                b.setMachine(mach ? Machine::Bk0011m : Machine::Bk0010);
+                b.loadRoms(BK_DEFAULT_ROM_DIR);
+                Azbk::Config c; c.sdDir = sd; c.writeDir = azWr.string();
+                b.setAzbk(true, c);
+                b.reset();
+                for (int i = 0; i < 340; ++i) b.runFrame();
+                const uint16_t mmu = b.az().mmu();
+                char msg[160];
+                std::snprintf(msg, sizeof msg, "AZ/прошивка: %s — частота %d МГц в 0177346, тип машины", mach ? "БК-0011М" : "БК-0010",
+                              (mmu >> 6) & 7);
+                CHECK(((mmu >> 6) & 7) == (mach ? 4 : 3) && ((mmu & Azbk::MMU_BRDTYPE) != 0) == (mach == 0), msg);
+                CHECK((b.az().reg(0177230) & 7) == 2, "AZ/прошивка: экран BIOS — режим AZ, 16 цветов");
+                CHECK(b.az().ctrl().commands() > 20, "AZ/прошивка: BIOS работает с контроллером (EEPROM, часы, карта)");
+            }
+        }
+    }
+    fs::remove_all(azDir);
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;
 }

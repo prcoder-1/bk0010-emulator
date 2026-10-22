@@ -62,6 +62,8 @@ public:
     virtual bool mpiWrite(uint16_t addr, uint16_t value, bool isByte) = 0;
     // Отладочная запись: игнорирует ограничения «только чтение/только запись».
     virtual bool mpiPoke(uint16_t addr, uint16_t value, bool isByte) = 0;
+    // Плата слышит и нижнюю половину адресов (A15 = 0): маппер AZБК стоит на всей шине.
+    virtual bool fullBus() const { return false; }
 };
 
 // Access-trace hook: called on every CPU-side read/write so the debugger can
@@ -77,7 +79,7 @@ public:
     void reset();                       // clear RAM (keeps ROM)
     void setIoBus(IoBus* bus) { io_ = bus; }
     // Контроллер в разъёме МПИ; nullptr — разъём пуст (штатная БК).
-    void setMpi(MpiDevice* d) { mpi_ = d; }
+    void setMpi(MpiDevice* d) { mpi_ = d; mpiFull_ = d && d->fullBus(); }
     MpiDevice* mpi() const { return mpi_; }
     void setAccessHook(AccessHook h) { hook_ = std::move(h); }
     // «Зависание»: запись, которую никто не подтвердил — ни устройство МПИ, ни
@@ -145,6 +147,10 @@ public:
     bool loadRom11(int slot, const char* path);
     bool rom11Loaded(int slot) const { return slot >= 0 && slot < ROM11_SLOTS && romOk_[slot]; }
     void setMstd(bool on) { mstd_ = on; applyMap(); }  // блок МСТД в 0160000
+    // БК-0010: ПЗУ Бейсика (0120000–0177577) заблокировано платой в разъёме МПИ (AZБК
+    // управляет памятью с 0120000). Монитор остаётся. На БК-0011М ничего не делает.
+    void setBasicOff(bool off) { if (off != romsOff_) { romsOff_ = off; applyMap(); } }
+    bool basicOff() const { return romsOff_; }
     bool mstd() const { return mstd_; }
     void setPageMap(uint16_t reg);            // запись в 0177716 с битом 11
     uint16_t pageMap() const { return pageReg_; }
@@ -214,6 +220,9 @@ private:
     std::array<uint8_t, ROM11_BYTES> zero_{};   // заглушка для пустых блоков
     IoBus* io_ = nullptr;
     MpiDevice* mpi_ = nullptr;           // контроллер в разъёме МПИ (СМК-512)
+    bool     mpiFull_ = false;           // он отвечает и при A15 = 0 (AZБК)
+    bool     romsOff_ = false;           // БК-0010: Бейсик заблокирован
+    bool mpiAt(uint16_t a) const { return mpi_ && (a >= ADDR_RAM_END || mpiFull_); }
     AccessHook hook_;
     BusErrorHook busError_;
 };

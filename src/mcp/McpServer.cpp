@@ -10,6 +10,8 @@
 #include <QStringList>
 #include <QImage>
 #include <QBuffer>
+#include <QStandardPaths>
+#include "../ui/AzPaths.h"
 #include <tuple>
 #include <iostream>
 #include <string>
@@ -86,7 +88,7 @@ static bool parseNumber(const QJsonValue& v, long& out) {
 
 McpServer::McpServer(std::string romDir, const bk::Board::Setup& setup, const bk::Board::Media& media,
                      bk::MachineChoice choice)
-    : romDir_(std::move(romDir)), choice_(choice) {
+    : romDir_(std::move(romDir)), choice_(choice), azCfg_(setup.azCfg) {
     romsOk_ = board_.powerOn(setup, romDir_);
     board_.kngmd().fdd().setLog(true);    // сервер — инструмент отладки: журнал НГМД сразу
     std::string err;
@@ -151,6 +153,14 @@ QString McpServer::machineText() {
                      .arg(QString::fromStdString(board_.ide().drive(u).path()));
     if (!romsOk_) s += QString(" ⚠ ПЗУ %1 не загружены из %2.").arg(b11 ? "БК-0011М" : "БК-0010")
                            .arg(QString::fromStdString(romDir_));
+    if (board_.azbk()) {
+        s += QString(" Контроллер AZБК: карта SD %1%2, экран %3.")
+                 .arg(QString::fromStdString(board_.az().config().sdDir))
+                 .arg(board_.az().config().mod037 ? ", доработка 037" : "")
+                 .arg(board_.azVga() ? "VGA платы" : "ТВ БК");
+        for (const auto& u : board_.az().ctrl().units())
+            s += QString(" AZ%1: %2 (%3 блоков).").arg(u.unit).arg(QString::fromStdString(u.host.empty() ? u.name : u.host)).arg(u.blocks);
+    }
     return s;
 }
 
@@ -404,6 +414,12 @@ QJsonArray McpServer::toolDefs() const {
                 {"hdd", P("string", "Hard-disk image (.hdi) to attach as IDE master and boot; \"\" = detach (default: keep)")},
                 {"hdd_rw", P("boolean", "Attach the HDD image writable (default false: BK writes stay in memory)")},
                 {"hdd_ctl", P("string", "HDD controller: \"auto\" (by the image's layout), \"smk\" or \"samara\" (default: keep)")},
+                {"az", P("boolean", "AZБК controller on/off (VGA 1024x768, 32 MB mapper, blitter, sound, disks from an SD-card directory; replaces СМК/floppy/HDD; boots its AZBOOT ROM). Default: keep")},
+                {"az_sd", P("string", "AZБК SD-card directory with AZ.INI (default: <roms>/azbk, firmware 00019 without disks)")},
+                {"az_unit0", P("string", "Disk image for AZ0 on top of AZ.INI's [DISKS] (\"\" = as in AZ.INI); with `disk` while AZ is on, the same")},
+                {"az_rw", P("boolean", "AZ disk images and BK writes (EEPROM, files) go to the SD card itself (default false: disks in memory, the rest in the emulator's data dir)")},
+                {"az_037", P("boolean", "BK-0010: the 037 modification (BK-0011M emulation, fast memory)")},
+                {"az_vga", P("boolean", "Show (and screenshot) the AZ VGA picture (true, default) or the BK's own screen")},
                 {"frames", P("integer", "Run this many frames after reset/boot (default 0)")}})));
     t.append(tool("bk_machine", "Show or switch the emulated machine and the machine mode. Without `machine` "
                   "it reports the current model (БК-0010-01 or БК-0011М), the mode, CPU clock, frame length, "
@@ -440,7 +456,8 @@ QJsonArray McpServer::toolDefs() const {
         schema({{"name", P("string", "R0..R7 / SP / PC / PSW")}, {"value", P("string", "New value")}}, {"name", "value"})));
     t.append(tool("bk_read_mem", "Read memory as octal words (or bytes).",
         schema({{"addr", addrArg}, {"len", P("integer", "Number of bytes (default 32)")},
-                {"format", P("string", "words|bytes (default words)")}}, {"addr"})));
+                {"format", P("string", "words|bytes (default words)")},
+                {"az_addr", P("string", "Instead of addr: a byte address in the AZБК's 32 MB (page = addr >> 12), words only")}})));
     t.append(tool("bk_write_mem", "Write words or bytes to memory. Addresses in the I/O page "
                   "(>= 0177600) go THROUGH THE BUS by default, so the device actually sees the "
                   "write (e.g. poking 0177712 restarts the timer); ordinary memory is written "
@@ -448,7 +465,8 @@ QJsonArray McpServer::toolDefs() const {
         schema({{"addr", addrArg}, {"words", P("array", "Array of 16-bit words")},
                 {"bytes", P("array", "Array of bytes")},
                 {"bus", P("boolean", "Force writing through the bus (true) or straight into "
-                                     "memory (false); default: auto by address")}}, {"addr"})));
+                                     "memory (false); default: auto by address")},
+                {"az_addr", P("string", "Instead of addr: a byte address in the AZБК's 32 MB (`words` only)")}})));
     t.append(tool("bk_disasm", "Disassemble instructions.",
         schema({{"addr", P("string", "Address/symbol, or 'pc' for the current PC (default pc)")},
                 {"count", P("integer", "Instruction count (default 16)")}})));
@@ -503,7 +521,8 @@ QJsonArray McpServer::toolDefs() const {
                   "can see it directly); optionally run frames first and/or write it to a file.",
         schema({{"path", P("string", "Optional output PNG path")},
                 {"frames", P("integer", "Run this many 50 Hz frames before the shot (default 0)")},
-                {"mono", P("boolean", "512x256 monochrome (default false=colour)")}})));
+                {"mono", P("boolean", "512x256 monochrome (default false=colour)")},
+                {"tv", P("boolean", "With AZБК: the BK's own screen instead of the AZ VGA picture")}})));
     t.append(tool("bk_audio", "Capture the emulator's sound output (piezo 0177716, AY in ABC stereo — A left, "
                   "B centre, C right with GID's panning — and Covox, stereo on word writes as on the "
                   "Multizvuk card) as 44100 Hz STEREO PCM and report peak/RMS per channel, an ASCII "
@@ -628,7 +647,9 @@ QJsonArray McpServer::toolDefs() const {
                   "that also show branches not executed yet.",
         schema({{"addr", addrArg}}, {"addr"})));
     t.append(tool("bk_io_state", "Decode the current I/O-register state (keyboard, scroll, timer, "
-                  "joystick port decoded under the active layout, system/speaker) — a hardware snapshot.",
+                  "joystick port decoded under the active layout, system/speaker) — a hardware snapshot. "
+                  "With the AZБК controller: its mapper windows, 0177346, video mode and layers, blitter, "
+                  "DMA/Covox/AY, the disk controller and the mounted AZn images.",
         schema({})));
     t.append(tool("bk_io_log", "Log accesses to the I/O registers (0177600..0177776) with the PC of "
                   "the accessing instruction. enable=true starts capture (clears first), enable=false "
@@ -956,6 +977,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args) {
 
 QJsonObject McpServer::tool_bk_load(const QJsonObject& args) {
     if (!romsOk_) return fail("ROMs not loaded from " + QString::fromStdString(romDir_));
+    if (board_.azbk()) return fail("AZБК установлен: .BIN не загружается — AZ грузится со своих дисков (bk_reset az_unit0)");
     // Машину выбирает программа (запись в 0177662 или вызовы БОС — БК-0011М) только при
     // выборе auto; явно выбранная машина (аргумент machine или выбор сервера) не меняется.
     const QString path = args.value("path").toString();
@@ -1088,11 +1110,40 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
         board_.setSmk512(false);
         board_.setSmk512(args.value("smk").toBool());
     }
+    // AZБК: карта SD, диск AZ0 (с AZ и `disk` — тоже он), запись, доработка 037. Изменение
+    // любой настройки при стоящей плате — переустановка (память платы с нуля).
+    bool azChanged = false;
+    if (args.contains("az_sd")) {
+        const QString d = args.value("az_sd").toString();
+        azCfg_.sdDir = (d.isEmpty() ? QString::fromStdString(romDir_) + "/azbk" : d).toStdString();
+        azChanged = true;
+    }
+    const bool azWanted = args.contains("az") ? args.value("az").toBool() : board_.azbk();
+    QString unit0;
+    bool unit0Given = args.contains("az_unit0");
+    if (unit0Given) unit0 = args.value("az_unit0").toString();
+    else if (azWanted && args.contains("disk")) { unit0 = args.value("disk").toString(); unit0Given = true; }
+    if (unit0Given) {
+        if (unit0.isEmpty()) azCfg_.units.erase(0); else azCfg_.units[0] = unit0.toStdString();
+        azChanged = true;
+    }
+    if (args.contains("az_rw")) {
+        azCfg_.rw = args.value("az_rw").toBool();
+        azChanged = true;
+    }
+    if (args.contains("az_037")) { azCfg_.mod037 = args.value("az_037").toBool(); azChanged = true; }
+    if (azChanged || args.contains("az")) {
+        azCfg_.writeDir = azWriteDirFor(QString::fromStdString(azCfg_.sdDir), azCfg_.rw).toStdString();
+        std::string err;
+        if (azWanted) board_.setAzbk(false);
+        if (!board_.setAzbk(azWanted, azCfg_, &err)) return fail("AZБК: " + QString::fromStdString(err));
+    }
+    if (args.contains("az_vga")) board_.setAzVga(args.value("az_vga").toBool());
     board_.reset();
     cyrState_ = false;
     lastBin_.clear();
     QString extra;
-    if (args.contains("disk")) {
+    if (args.contains("disk") && !board_.azbk()) {
         const QString path = args.value("disk").toString();
         board_.detachDisk(0);
         if (!path.isEmpty()) {
@@ -1112,6 +1163,7 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
             return fail("hdd_ctl: expected auto, smk or samara");
         board_.setHddController(c);
     }
+    if (args.contains("hdd") && board_.azbk()) return fail("hdd: с контроллером AZБК винчестеры СМК и «Самары» не подключаются");
     if (args.contains("hdd")) {
         const QString path = args.value("hdd").toString();
         board_.detachHdd(0);
@@ -1134,6 +1186,12 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
         }
     }
     if (board_.smk512()) extra += " СМК-512 on.";
+    if (board_.azbk()) {
+        extra += " AZБК on (SD " + QString::fromStdString(board_.az().config().sdDir) + ")";
+        for (const auto& u : board_.az().ctrl().units())
+            extra += QString(", AZ%1=%2").arg(u.unit).arg(QString::fromStdString(u.host.empty() ? u.name : u.host));
+        extra += ".";
+    }
     extra = QString(" %1%2.").arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
                 .arg(board_.ay() ? ", AY on" : "") + extra;
     RunOutcome r;
@@ -1193,6 +1251,22 @@ QJsonObject McpServer::tool_bk_set_reg(const QJsonObject& args) {
 }
 
 QJsonObject McpServer::tool_bk_read_mem(const QJsonObject& args) {
+    if (args.contains("az_addr")) {
+        // Физическая память AZБК: байтовый адрес в 32 Мбайт.
+        if (!board_.azbk()) return fail("AZБК не установлен");
+        long base;
+        if (!parseNumber(args.value("az_addr"), base) || base < 0 || base >= long(bk::Azbk::MEM_BYTES))
+            return fail("az_addr: байтовый адрес 0..0177777777");
+        const int len = args.value("len").toInt(32);
+        QString out;
+        for (int i = 0; i < (len + 1) / 2; i += 8) {
+            const uint32_t at = static_cast<uint32_t>(base) + uint32_t(i) * 2;
+            QString line = QString("%1 (стр %2):").arg(at, 9, 8, QChar('0')).arg(at >> 12, 5, 8, QChar('0'));
+            for (int j = 0; j < 8 && i + j < (len + 1) / 2; ++j) line += " " + oct6(board_.az().memWord(at + uint32_t(j) * 2));
+            out += line + "\n";
+        }
+        return textContent(out);
+    }
     uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
     int len = args.value("len").toInt(32);
     bool bytes = args.value("format").toString() == "bytes";
@@ -1217,6 +1291,21 @@ QJsonObject McpServer::tool_bk_read_mem(const QJsonObject& args) {
 }
 
 QJsonObject McpServer::tool_bk_write_mem(const QJsonObject& args) {
+    if (args.contains("az_addr")) {
+        if (!board_.azbk()) return fail("AZБК не установлен");
+        long base;
+        if (!parseNumber(args.value("az_addr"), base) || base < 0 || base >= long(bk::Azbk::MEM_BYTES))
+            return fail("az_addr: байтовый адрес 0..0177777777");
+        std::vector<long> vals;
+        for (const auto& v : args.value("words").toArray()) {
+            long x;
+            if (!parseNumber(v, x)) return fail("bad word value — nothing written");
+            vals.push_back(x);
+        }
+        for (size_t i = 0; i < vals.size(); ++i)
+            board_.az().setMemWord(static_cast<uint32_t>(base) + uint32_t(i) * 2, static_cast<uint16_t>(vals[i]));
+        return textContent(QString("Wrote %1 words into AZ memory at %2.").arg(vals.size()).arg(base, 0, 8));
+    }
     uint16_t a; QString err; if (!resolveAddr(args, "addr", a, err)) return fail(err);
     // Страницу В-В пишем ЧЕРЕЗ ШИНУ, чтобы устройство увидело запись (иначе
     // правка 0177712 не перезапустила бы таймер, а 0177664 — не сдвинула экран).
@@ -1422,9 +1511,12 @@ QJsonObject McpServer::tool_bk_screenshot(const QJsonObject& args) {
         board_.screen().setColorMode(!mono);
         board_.screen().render(board_.memory());
     }
-    QImage img = QImage(reinterpret_cast<const uchar*>(board_.screen().pixels()),
-                        bk::Screen::TEX_W, bk::Screen::TEX_H, QImage::Format_ARGB32).copy();
-    QString path = args.value("path").toString(), note = "BK screen";
+    // С AZБК — его VGA 1024x768, если не попросили экран самой БК (tv).
+    const bool vga = board_.azbk() && board_.azVga() && !args.value("tv").toBool(false);
+    const uint32_t* px = vga ? board_.az().frame() : board_.screen().pixels();
+    const int w = vga ? bk::Azbk::VGA_W : bk::Screen::TEX_W, h = vga ? bk::Azbk::VGA_H : bk::Screen::TEX_H;
+    QImage img = QImage(reinterpret_cast<const uchar*>(px), w, h, QImage::Format_ARGB32).copy();
+    QString path = args.value("path").toString(), note = vga ? "AZБК VGA 1024x768" : "BK screen";
     if (!path.isEmpty()) { if (!img.save(path)) return fail("cannot write " + path); note += " (also written to " + path + ")"; }
     QByteArray png; QBuffer buf(&png); buf.open(QIODevice::WriteOnly); img.save(&buf, "PNG"); buf.close();
     QJsonObject txt{{"type", "text"}, {"text", note}};
@@ -2194,7 +2286,8 @@ QJsonObject McpServer::tool_bk_io_state(const QJsonObject& args) {
     + (board_.diskControllerOn() ? fddState() : QString())
     + (board_.ide().any() ? hddState() : QString())
     + ((board_.diskControllerOn() && args.value("fdd_log").toBool())
-           ? fddLog(std::max(4, args.value("fdd_log_count").toInt(40))) : QString()));
+           ? fddLog(std::max(4, args.value("fdd_log_count").toInt(40))) : QString())
+    + (board_.azbk() ? "\nКонтроллер AZБК:\n" + QString::fromStdString(board_.az().details()) : QString()));
 }
 
 QJsonObject McpServer::tool_bk_io_log(const QJsonObject& args) {

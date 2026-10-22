@@ -52,6 +52,7 @@ void Memory::setPageMap(uint16_t reg) {
 void Memory::applyMap() {
     if (!bk11_) {
         for (int i = 0; i < 8; ++i) { blk_[i] = mem_.data() + i * ROM11_BYTES; attr_[i] = Ram; }
+        if (romsOff_) for (int i = 5; i < 8; ++i) { blk_[i] = zero_.data(); attr_[i] = Absent; }
         return;
     }
     auto ramBlk = [&](int i, int page, int half) {
@@ -114,7 +115,7 @@ bool Memory::loadRomFile(uint16_t addr, const char* path, size_t expectedLen) {
 uint16_t Memory::busRead(uint16_t raw) {
     const uint16_t addr = raw & ~1;
     const bool io = addr >= ADDR_IO_PAGE && io_;
-    if (mpi_ && addr >= ADDR_RAM_END && !(addr >= 0177700 && addr <= 0177712)) {
+    if (mpiAt(addr) && !(addr >= 0177700 && addr <= 0177712)) {
         uint16_t v = 0;
         if (mpi_->mpiRead(raw, v)) {
             uint16_t r = 0;
@@ -142,7 +143,7 @@ uint16_t Memory::readWord(uint16_t addr) {
 
 uint8_t Memory::readByte(uint16_t addr) {
     if (hook_) hook_(addr, false, true);
-    if (addr < ADDR_RAM_END && attr_[addr >> 13] == Ram) return *at(addr);
+    if (addr < ADDR_RAM_END && !mpiFull_ && attr_[addr >> 13] == Ram) return *at(addr);
     const uint16_t v = busRead(addr);
     return (addr & 1) ? (v >> 8) : (v & 0xff);
 }
@@ -156,7 +157,7 @@ void Memory::writeWord(uint16_t addr, uint16_t value) {
     const uint16_t raw = addr;
     addr &= ~1;
     if (hook_) hook_(addr, true, false);
-    if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiWrite(raw, value, false)) return;
+    if (mpiAt(addr) && mpi_->mpiWrite(raw, value, false)) return;
     if (addr >= ADDR_IO_PAGE && io_) {
         if (io_->ioWrite(addr, value, false)) return;
         // Регистр есть, но запись в него не принимается (0177662 доступен только по
@@ -173,7 +174,7 @@ void Memory::writeWord(uint16_t addr, uint16_t value) {
 
 void Memory::writeByte(uint16_t addr, uint8_t value) {
     if (hook_) hook_(addr, true, true);
-    if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiWrite(addr, value, true)) return;
+    if (mpiAt(addr) && mpi_->mpiWrite(addr, value, true)) return;
     if (addr >= ADDR_IO_PAGE && io_) {
         if (io_->ioWrite(addr, value, true)) return;   // адрес не выровнен: нужен IoBus для 11М
         if (busError_) busError_(addr);
@@ -193,7 +194,7 @@ void Memory::writeByte(uint16_t addr, uint8_t value) {
 
 uint16_t Memory::peekWord(uint16_t addr) const {
     addr &= ~1;
-    if (mpi_ && addr >= ADDR_RAM_END) {
+    if (mpiAt(addr)) {
         uint16_t v = 0;
         if (mpi_->mpiPeek(addr, v)) return v;
     }
@@ -202,7 +203,7 @@ uint16_t Memory::peekWord(uint16_t addr) const {
 }
 
 uint8_t Memory::peekByte(uint16_t addr) const {
-    if (mpi_ && addr >= ADDR_RAM_END) {
+    if (mpiAt(addr)) {
         uint16_t v = 0;
         if (mpi_->mpiPeek(addr, v)) return (addr & 1) ? (v >> 8) : (v & 0xff);
     }
@@ -211,12 +212,12 @@ uint8_t Memory::peekByte(uint16_t addr) const {
 
 void Memory::pokeWord(uint16_t addr, uint16_t value) {
     addr &= ~1;
-    if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiPoke(addr, value, false)) return;
+    if (mpiAt(addr) && mpi_->mpiPoke(addr, value, false)) return;
     rawWord(addr, value);
 }
 
 void Memory::pokeByte(uint16_t addr, uint8_t value) {
-    if (mpi_ && addr >= ADDR_RAM_END && mpi_->mpiPoke(addr, value, true)) return;
+    if (mpiAt(addr) && mpi_->mpiPoke(addr, value, true)) return;
     rawByte(addr, value);
 }
 

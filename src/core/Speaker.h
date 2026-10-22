@@ -32,6 +32,10 @@ public:
     }
     void setCovoxLevel(double left, double right) { covoxL_ = left; covoxR_ = right; }
     void setCovoxLevel(double v) { setCovoxLevel(v, v); }
+    // ЦАП платы AZБК (Covox 16 бит и DMA-звук): уровни -1..1 держатся до следующей смены,
+    // как у Covox, со своими DC-блокерами.
+    void setAzbk(bool on) { az_ = on; azL_ = azR_ = azAccL_ = azAccR_ = azDcL_ = azDcR_ = 0.0; }
+    void setAzLevel(double left, double right) { azL_ = left; azR_ = right; }
 
     // Advance by `ticks` CPU ticks with the speaker driven to `level` (0..7).
     // Пьезодинамик БК слышит сумму ТРЁХ бит регистра 0177716 (маска 0144): бит 6 —
@@ -72,6 +76,8 @@ private:
     double ayDcL_ = 0.0, ayDcR_ = 0.0;   // DC-трекеры выхода AY (выход однополярный)
     bool covox_ = false;
     double covoxL_ = 0.0, covoxR_ = 0.0, covoxAccL_ = 0.0, covoxAccR_ = 0.0, covoxDcL_ = 0.0, covoxDcR_ = 0.0;
+    bool az_ = false;
+    double azL_ = 0.0, azR_ = 0.0, azAccL_ = 0.0, azAccR_ = 0.0, azDcL_ = 0.0, azDcR_ = 0.0;
     std::deque<int16_t> buf_;   // FIFO кадров, L/R чередуются (O(1) push/pop at both ends)
     bool capture_ = false;
     std::vector<int16_t> cap_;  // отвод для записи видео

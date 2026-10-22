@@ -32,6 +32,11 @@ add_library(bkcore STATIC
     src/core/Hdd.cpp
     src/core/Kngmd.cpp
     src/core/Board.cpp
+    src/core/Az.cpp
+    src/core/AzVideo.cpp
+    src/core/AzSound.cpp
+    src/core/AzBlitter.cpp
+    src/core/AzCtrl.cpp
     src/core/Vm1Timing.cpp
     src/core/AviWriter.cpp
     src/core/Zmbv.cpp
@@ -65,6 +70,7 @@ set(APP_SOURCES
     src/ui/SmkRamWidget.cpp
     src/ui/HexPageView.cpp
     src/ui/BkRamWidget.cpp
+    src/ui/AzRamWidget.cpp
     src/ui/HotPathWidget.cpp
     src/ui/CallGraphWidget.cpp
     src/ui/FlameWidget.cpp

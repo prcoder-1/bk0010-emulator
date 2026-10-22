@@ -46,6 +46,7 @@ void Speaker::feed(int level, int ticks) {
         if (ay_) ay_->advance(take / sampleRate_);
         if (ay_ && ay2_) ay2_->advance(take / sampleRate_);
         if (covox_) { covoxAccL_ += covoxL_ * take; covoxAccR_ += covoxR_ * take; }
+        if (az_) { azAccL_ += azL_ * take; azAccR_ += azR_ * take; }
         acc_  += take;
         span  -= take;
         if (acc_ < 1.0) break;                            // отсчёт ещё не набран
@@ -80,6 +81,14 @@ void Speaker::feed(int level, int ticks) {
             covoxDcR_ += (cr - covoxDcR_) * dcRc;
             l += cl - covoxDcL_;
             r += cr - covoxDcR_;
+        }
+        if (az_) {
+            const double cl = azAccL_ * 16000.0, cr = azAccR_ * 16000.0;
+            azAccL_ = azAccR_ = 0.0;
+            azDcL_ += (cl - azDcL_) * dcRc;
+            azDcR_ += (cr - azDcR_) * dcRc;
+            l += cl - azDcL_;
+            r += cr - azDcR_;
         }
         auto clip = [](double v) { return static_cast<int16_t>(v > 32767.0 ? 32767.0 : v < -32767.0 ? -32767.0 : v); };
         const int16_t sl = clip(l), sr = clip(r);

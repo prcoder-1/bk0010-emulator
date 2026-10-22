@@ -437,7 +437,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     // заголовка, строка «луч + шапка колонок» и 9 регистров. С установленным
     // блоком СМК-512 там же появляется строка режима — панель растёт на строку,
     // стек ровно на столько же сжимается. ----
-    int sregH = (11 + (board_->smk512() ? 1 : 0)
+    int sregH = (11 + (board_->smk512() ? 1 : 0) + (board_->azbk() ? 1 : 0)
                     + (board_->diskControllerOn() ? 1 : 0)
                     + (board_->bk11() ? 1 : 0) + (board_->ay() ? 1 : 0)) * lineH_ + 8;
     QRect stkRect(mx, memRect.bottom() + margin, mw,
@@ -528,6 +528,16 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
             p.setPen(chg);
             p.drawText(srx + cw * static_cast<int>(s.size()) + cw, gy, QString::fromUtf8("строб"));
         }
+        gy += lineH_;
+    }
+    // Контроллер AZБК: управление маппером, какие окна у платы, видеорежим.
+    if (board_->azbk()) {
+        const bk::Azbk& az = board_->az();
+        uint16_t act = 0;
+        for (int w = 0; w < 16; ++w) if (az.window(w).active) act |= static_cast<uint16_t>(1 << w);
+        p.setPen(fg);
+        p.drawText(srx, gy, QString::fromUtf8("AZ 177346=%1 окна=%2 видео=%3")
+                                .arg(oct6(az.mmu())).arg(oct6(act)).arg(oct6(az.reg(0177230))));
         gy += lineH_;
     }
     // БК-0011М: какие страницы стоят в окнах, палитра, видимый буфер, кадровый
