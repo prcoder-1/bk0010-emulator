@@ -20,6 +20,11 @@ public:
 
     Ay8910() { reset(); }
     void setClock(int hz) { clock_ = hz > 0 ? hz : DEFAULT_CLOCK; }
+    // Модель чипа: YM2149 (по умолчанию) — 32 ступени громкости, AY-3-8910 — 16 (ступень
+    // повторена дважды, огибающая тоже идёт 16 ступенями). Таблицы — emu2149 GID.
+    // Сброс чипа модель не меняет.
+    void setYm(bool ym) { ym_ = ym; }
+    bool ym() const { return ym_; }
     int  clock() const { return clock_; }
     void reset();
 
@@ -42,6 +47,7 @@ private:
     void output(double& mono, double& left, double& right) const;
 
     int clock_ = DEFAULT_CLOCK;
+    bool ym_ = true;
     uint8_t reg_[16] = {0};
     uint8_t addr_ = 0;
     struct Chan { int count = 0, freq = 1, vol = 0; bool env = false, toggle = false, toneOn = false, noiseOn = false; };

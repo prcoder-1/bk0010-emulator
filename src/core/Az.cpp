@@ -51,6 +51,7 @@ bool Azbk::powerOn(const Config& c, bool bk11, int cpuHz, std::string* err) {
     if (ctrl_.logoLoaded()) { pageL0_ = 040; setMode(063223); }
     coldReset(false);
     soundOut();
+    if (ayModel) ayModel(ym());
     return ok;
 }
 
@@ -416,7 +417,10 @@ bool Azbk::regWrite(uint16_t addr, uint16_t value, bool isByte) {
         else { cvxL_ = static_cast<uint16_t>((value & 0377) << 8); cvxR_ = value & 0177400; }
         soundOut();
         return true;
-    case 0177212: cvxCsr_ = value & 017; return true;
+    case 0177212:
+        cvxCsr_ = value & 017;
+        if (ayModel) ayModel(ym());
+        return true;
     case 0177220: case 0177222: case 0177224: case 0177226:
         ctrl_.write((a - 0177220) >> 1, value);
         return true;
@@ -505,9 +509,9 @@ std::string Azbk::details() const {
     std::snprintf(b, sizeof b, "Блиттер 177270=%06o стр %o, запусков %llu\n", blt_.readCtrl(), blt_.page(),
                   static_cast<unsigned long long>(blt_.runs()));
     s += b;
-    std::snprintf(b, sizeof b, "DMA 177160=%06o стр %o длина %u %s; Covox L=%06o R=%06o 177212=%o; AY1 %o/%o AY2 %o/%o\n",
+    std::snprintf(b, sizeof b, "DMA 177160=%06o стр %o длина %u %s; Covox L=%06o R=%06o 177212=%o; AY (%s) 1: %o/%o 2: %o/%o\n",
                   dmaCsr_, dmaPage_, dmaLen_, dmaPlaying_ ? "играет" : "стоит", cvxL_, cvxR_, cvxCsr_,
-                  ay1a_, ay1d_, ay2a_, ay2d_);
+                  ym() ? "YM2149" : "AY-3-8910", ay1a_, ay1d_, ay2a_, ay2d_);
     s += b;
     s += "Контроллер: " + ctrl_.summary() + "\n";
     s += "Карта SD: " + cfg_.sdDir + (cfg_.rw ? " (запись в образы)" : "") + "\n";
@@ -617,6 +621,7 @@ bool Azbk::loadState(const uint8_t*& p, const uint8_t* e) {
         if (!get(&pg, 4) || pg >= MEM_BYTES / 4096 || !get(mem_.data() + pg * 4096, 4096)) return false;
     }
     soundOut();
+    if (ayModel) ayModel(ym());
     return true;
 }
 
