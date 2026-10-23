@@ -482,14 +482,6 @@ void MainWindow::runOneSlice(int kSlices) {
             board_->pressKey(keyFeed_.front());
             keyFeed_.pop_front();
         }
-        // Отпущенная активная клавиша — после паузы дребезга контроллер узнаёт ещё
-        // удерживаемую (последнюю нажатую) как новое нажатие.
-        if (phase_ == 0 && relatchFrames_ > 0 && --relatchFrames_ == 0 && !heldKeys_.empty()) {
-            const HeldKey k = heldKeys_.back();
-            activeKey_ = k.key;
-            board_->setKeyHeld(true);
-            if (k.code) board_->pressKey(k.code);
-        }
         // Запись видео: кадр попадает в файл, только если начался при идущей записи, —
         // тогда и звук для него набран с его первого такта.
         if (phase_ == 0 && video_ && video_->active()) {
@@ -1089,18 +1081,6 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     // key buffer (they'd otherwise be replayed on resume).
     if (suspended_ && !paused_) { e->accept(); return; }
 
-    // Track the physical key-down state (ignoring auto-repeat) so 0177716 bit 6
-    // stays low while a key is held — games poll it to detect input.
-    // АР2 (Alt) вне матрицы, сама по себе нажатия не даёт.
-    if (!paused_ && !e->isAutoRepeat() && e->key() != Qt::Key_Alt) {
-        heldKeys_.erase(std::remove_if(heldKeys_.begin(), heldKeys_.end(),
-                                       [&](const HeldKey& k) { return k.key == e->key(); }), heldKeys_.end());
-        heldKeys_.push_back({e->key(), 0});
-        activeKey_ = e->key();
-        relatchFrames_ = 0;
-        board_->setKeyHeld(true);
-    }
-
     if (paused_) {
         // Идёт правка значения на месте — все клавиши уходят в поле ввода,
         // иначе цифры и Enter разошлись бы по командам отладчика.
@@ -1151,10 +1131,15 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     // встают в очередь ВПЕРЕДИ только что нажатой — и игра, читающая код по биту
     // «клавиша нажата» (PITON), срабатывает по коду предыдущей клавиши.
     if (e->isAutoRepeat()) { e->accept(); return; }
+    const BkKeymap keymapWas = keymap_;
     std::vector<uint16_t> codes = keymap_.translate(e);
-    if (!codes.empty() && !heldKeys_.empty() && heldKeys_.back().key == e->key())
-        heldKeys_.back().code = codes.back();          // для повторного распознавания
     if (!codes.empty()) {
+        // Клавиша матрицы: разряд 6 0177716 — «нажата». Если уже нажата другая,
+        // 014 новую не видит: ни кода, ни прерывания (и РУС/ЛАТ не переключаем).
+        const bool busy = !heldKeys_.empty();
+        heldKeys_.insert(e->key());
+        board_->setKeyHeld(true);
+        if (busy) { keymap_ = keymapWas; e->accept(); return; }
         // Одиночный код при пустой очереди защёлкиваем НЕМЕДЛЕННО — атомарно с
         // битом «клавиша нажата» (setKeyHeld выше): эмуляция однопоточная, между
         // ними не исполняется ни одной инструкции БК. Если отложить код до подачи
@@ -1181,23 +1166,14 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
 
 void MainWindow::releaseAllKeys() {
     heldKeys_.clear();
-    activeKey_ = 0;
-    relatchFrames_ = 0;
     board_->setKeyHeld(false);
 }
 
 void MainWindow::keyReleaseEvent(QKeyEvent* e) {
     // Release the physical key-held state (0177716 bit 6) when the last game key
     // is lifted. Auto-repeat generates spurious release events — ignore those.
-    if (!e->isAutoRepeat()) {
-        heldKeys_.erase(std::remove_if(heldKeys_.begin(), heldKeys_.end(),
-                                       [&](const HeldKey& k) { return k.key == e->key(); }), heldKeys_.end());
-        if (e->key() == activeKey_ || heldKeys_.empty()) {
-            activeKey_ = 0;
-            board_->setKeyHeld(false);
-            relatchFrames_ = heldKeys_.empty() ? 0 : kRelatchFrames;
-        }
-    }
+    if (!e->isAutoRepeat() && heldKeys_.erase(e->key()) && heldKeys_.empty())
+        board_->setKeyHeld(false);
     QMainWindow::keyReleaseEvent(e);
 }
 

@@ -232,18 +232,12 @@ private:
     // (e.g. a РУС/ЛАТ switch + the character). Because the BK register holds only
     // one code at a time, we feed codes one per frame as the register frees up.
     std::deque<uint16_t> keyFeed_;
-    // Клавиши ПК, физически нажатые (без автоповтора), в порядке нажатия, с их кодом БК.
-    // Контроллер БК (1801ВП1-014) различает одну клавишу: разряд 6 0177716 («нажата»)
-    // следует за той, чей код защёлкнут (activeKey_). Отпустили её, а другая ещё
-    // держится — контроллер узнаёт ту заново только после подавления дребезга
-    // (≈60 мс, BK-docs §10.7): relatchFrames_ кадров «не нажата», затем новый код.
-    // Иначе игра видела бы непрерывно нажатую клавишу с кодом уже отпущенной
-    // (Dangerous Dave: стрелка + пробел — прыжок «зависал» в воздухе).
-    struct HeldKey { int key; uint16_t code; };
-    std::vector<HeldKey> heldKeys_;
-    int activeKey_ = 0;
-    int relatchFrames_ = 0;
-    static constexpr int kRelatchFrames = 3;
+    // Клавиши матрицы (дающие код БК), физически нажатые — без автоповтора. Как у
+    // 1801ВП1-014 (gate netlist, OneChipBook sim/ref014): разряд 6 0177716 «нажата»,
+    // пока замкнута ЛЮБАЯ из них; новая клавиша при уже нажатой кода не даёт, и когда
+    // первую отпускают, вторую контроллер заново не узнаёт. Модификаторы (АР2, СУ…)
+    // и СТОП — не клавиши матрицы.
+    std::set<int> heldKeys_;
     void releaseAllKeys();
     bool colorMode_ = true;
     bool sizeFitted_ = false;   // окно уже подогнано под целый масштаб экрана
