@@ -374,7 +374,9 @@ QJsonArray McpServer::toolDefs() const {
                   "An explicit mode (bk10/bk11m, or `machine` here) keeps that machine and does not "
                   "check the program. On bk11m the load "
                   "goes like the BOS monitor's L / R6/1000 / G: power-on with a key held (BOS drops into "
-                  "its monitor), the file into the user memory map, SP=01000, PSW from the monitor.",
+                  "its monitor), the file into the user memory map, SP=01000, PSW from the monitor. "
+                  "With the AZБК board on, the file goes into the RUNNING system (boot a DOS from AZ0 "
+                  "first), as a DOS would load it: no reset, no machine switch, through the mapper windows.",
         schema({{"path", P("string", "Path to the .BIN file")},
                 {"machine", P("string", "\"auto\", \"bk10\" or \"bk11m\" for this load (default: the server's machine mode)")},
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
@@ -977,7 +979,26 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& args) {
 
 QJsonObject McpServer::tool_bk_load(const QJsonObject& args) {
     if (!romsOk_) return fail("ROMs not loaded from " + QString::fromStdString(romDir_));
-    if (board_.azbk()) return fail("AZБК установлен: .BIN не загружается — AZ грузится со своих дисков (bk_reset az_unit0)");
+    // С AZБК — в уже работающую систему (загрузите ДОС с AZ0 и дождитесь её), как файл с
+    // диска: без сброса, без смены машины и подъёма монитора.
+    if (board_.azbk()) {
+        if (args.contains("machine") || args.value("reset").toBool(false))
+            return fail("AZБК установлен: machine и reset не применяются — .BIN кладётся в работающую систему");
+        uint16_t a = 0, l = 0;
+        const bool run = args.value("run").toBool(true);
+        if (!board_.loadBin(args.value("path").toString().toStdString(), run, &a, &l))
+            return fail("cannot load " + args.value("path").toString());
+        lastBin_ = args.value("path").toString();
+        const uint16_t entry = board_.cpu().pc();
+        RunOutcome r;
+        const int frames = args.value("frames").toInt(0);
+        if (frames > 0) r = runFrames(frames);
+        return textContent(QString("AZБК: %1 положен в работающую систему: addr=%2 len=%3 (octal)%4.%5\n%6")
+            .arg(lastBin_).arg(oct6(a)).arg(oct6(l))
+            .arg(run ? QString(", пуск с %1, SP=001000").arg(oct6(entry)) : QString())
+            .arg(frames > 0 ? "\n" + runText(r) : QString())
+            .arg(regsText()));
+    }
     // Машину выбирает программа (запись в 0177662 или вызовы БОС — БК-0011М) только при
     // выборе auto; явно выбранная машина (аргумент machine или выбор сервера) не меняется.
     const QString path = args.value("path").toString();

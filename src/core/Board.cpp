@@ -1642,9 +1642,11 @@ void Board::deliverFrameInterrupts() {
     // БК-docs §20.4, проверено по ПЗУ БОС .BTIM).
     // Кадровый таймер AZБК «48 Гц» идёт по кадру БК (как у GID) — и при выключенном таймере 11М.
     if (bk11() && (reg662_ & 040000) && !(azOn_ && az_.timer48())) return;
-    // БК-0010 с эмуляцией 11М: у самой БК кадрового прерывания нет, его даёт плата
-    // (таймер 48 Гц по 177662 или IRQ 60 Гц VGA).
-    if (!bk11() && azOn_ && az_.emu11() && !az_.timer48()) return;
+    // БК-0010 с AZБК: собственного кадрового прерывания нет (у БК-0010 вектор 100 —
+    // прерывание пользователя, БК-docs §1.8, §5.10; у GID на БК-0010 IRQ2 тоже нет), его
+    // дают таймеры платы: 48 Гц — по кадру БК, 60 Гц — от VGA. Иначе 60 Гц платы и кадр
+    // БК складываются, и программа с таймером 60 Гц (AZVIDT24) идёт почти вдвое быстрее.
+    if (!bk11() && azOn_ && !az_.timer48()) return;
     irqFramePending_ = true;
     const int t = tryDeliverInterrupts();
     if (t) advanceDevices(t);
@@ -1897,7 +1899,9 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
     std::vector<uint8_t> data;
     if (!readBin(path, addr, data)) return false;
     const size_t got = data.size();
-    if (bk11()) return loadBin11(addr, data, run, outAddr, outLen);
+    // С AZБК файл кладётся в работающую систему (так его грузит ДОС с диска AZ): через
+    // окна маппера, без монитора БОС.
+    if (bk11() && !azOn_) return loadBin11(addr, data, run, outAddr, outLen);
     for (size_t i = 0; i < got; ++i)
         mem_.pokeByte(static_cast<uint16_t>(addr + i), data[i]);
     if (outAddr) *outAddr = addr;
