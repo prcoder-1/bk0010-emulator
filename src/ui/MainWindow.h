@@ -232,9 +232,19 @@ private:
     // (e.g. a РУС/ЛАТ switch + the character). Because the BK register holds only
     // one code at a time, we feed codes one per frame as the register frees up.
     std::deque<uint16_t> keyFeed_;
-    // Qt key codes physically held down (auto-repeat ignored), so 0177716 bit 6
-    // stays low while any game key is held — polled by games like Digger.
-    std::set<int> heldKeys_;
+    // Клавиши ПК, физически нажатые (без автоповтора), в порядке нажатия, с их кодом БК.
+    // Контроллер БК (1801ВП1-014) различает одну клавишу: разряд 6 0177716 («нажата»)
+    // следует за той, чей код защёлкнут (activeKey_). Отпустили её, а другая ещё
+    // держится — контроллер узнаёт ту заново только после подавления дребезга
+    // (≈60 мс, BK-docs §10.7): relatchFrames_ кадров «не нажата», затем новый код.
+    // Иначе игра видела бы непрерывно нажатую клавишу с кодом уже отпущенной
+    // (Dangerous Dave: стрелка + пробел — прыжок «зависал» в воздухе).
+    struct HeldKey { int key; uint16_t code; };
+    std::vector<HeldKey> heldKeys_;
+    int activeKey_ = 0;
+    int relatchFrames_ = 0;
+    static constexpr int kRelatchFrames = 3;
+    void releaseAllKeys();
     bool colorMode_ = true;
     bool sizeFitted_ = false;   // окно уже подогнано под целый масштаб экрана
     bool paused_ = false;       // Soft-ICE debugger overlay active
