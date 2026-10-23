@@ -3743,7 +3743,9 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 5; ++i) b.runFrame();
             return m.peekWord(03000);
         };
-        CHECK(frames(Azbk::MMU_BRDTYPE) >= 4, "AZ/ревью: БК-0010 с AZ — своё кадровое прерывание идёт");
+        CHECK(frames(Azbk::MMU_BRDTYPE) == 0, "AZ/ревью: БК-0010 с AZ — своего кадрового прерывания нет");
+        { const uint16_t n = frames(Azbk::MMU_BRDTYPE | Azbk::MMU_V100);
+          CHECK(n >= 5 && n <= 7, "AZ/ревью: таймер AZ 60 Гц — 6±1 за 5 кадров БК (кадр БК не добавляется)"); }
         CHECK(frames(Azbk::MMU_BRDTYPE | Azbk::MMU_BK11EMU) == 0, "AZ/ревью: эмуляция 11М — у БК-0010 своего прерывания нет");
         CHECK(frames(Azbk::MMU_BRDTYPE | Azbk::MMU_BK11EMU | Azbk::MMU_V100 | Azbk::MMU_50HZ) >= 4, "AZ/ревью: эмуляция 11М — таймер AZ 48 Гц");
         m.writeWord(0177346, Azbk::MMU_BRDTYPE | Azbk::MMU_BK11EMU | Azbk::MMU_037_OFF);
