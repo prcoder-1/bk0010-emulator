@@ -755,7 +755,8 @@ int main(int argc, char** argv) {
         {
             Board b; setup(b);
             const uint64_t t0 = b.totalTicks();
-            b.runUntil(01000, 1);                       // IRQ2 на входе, затем RTI
+            b.requestIrq2();                            // внешний импульс (УП B1), затем RTI
+            b.runUntil(01000, 1);
             const int t = static_cast<int>(b.totalTicks() - t0);
             if (t != 105) std::printf("  IRQ2 + RTI = %d\n", t);
             CHECK(t == 105, "прерывание: вход в IRQ2 + RTI по шине");
@@ -1106,13 +1107,14 @@ int main(int argc, char** argv) {
         b.memory().pokeWord(01004, 0000775); // BR 01000 (смещение -3 слова)
         b.cpu().reset(01000, 0);             // маска открыта
         b.cpu().r[6] = 02000;
-        for (int i = 0; i < 5; ++i) b.runFrame();
+        // У БК-0010 кадрового прерывания нет — импульсы внешнего устройства раз в кадр.
+        for (int i = 0; i < 5; ++i) { b.requestIrq2(); b.runFrame(); }
         CHECK(b.cpu().r[1] >= 4, "ISR вызывается каждый кадр");
         CHECK(b.cpu().r[0] >= 4, "код ПОСЛЕ WAIT выполняется (нет зацикливания)");
     }
 
     // ---- Кадровое прерывание защёлкивается, а не теряется при закрытой маске ----
-    SECTION("Кадровое прерывание защёлкивается, а не теряется при закрытой маске")
+    SECTION("Запрос IRQ2 защёлкивается, а не теряется при закрытой маске")
     {
         Board b; b.reset();
         b.memory().pokeWord(0100, 03000);
@@ -1122,6 +1124,7 @@ int main(int argc, char** argv) {
         b.memory().pokeWord(01000, 0000777); // BR . — критическая секция
         b.cpu().reset(01000, 0340);          // приоритет 7 — прерывания закрыты
         b.cpu().r[6] = 02000;
+        b.requestIrq2();
         b.runFrame();
         CHECK(b.cpu().r[1] == 0, "при закрытой маске прерывание не выдаётся");
         b.cpu().psw = 0;                     // открыли маску
@@ -1315,7 +1318,9 @@ int main(int argc, char** argv) {
     // ---- runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры ----
     SECTION("runUntil («шаг с обходом», «до адреса») продолжает выдавать кадры")
     {
-        Board b; b.reset();
+        // Кадровое прерывание есть только у БК-0011М (разрешено битом 14 0177662 = 0).
+        Board b; b.setMachine(Machine::Bk0011m); b.loadRoms(BK_DEFAULT_ROM_DIR); b.reset();
+        b.memory().writeWord(0177662, 0);
         b.memory().pokeWord(0100, 03000);    // ISR
         b.memory().pokeWord(0102, 0);
         b.memory().pokeWord(03000, 0000002); // RTI
@@ -2903,6 +2908,7 @@ int main(int argc, char** argv) {
             z.cpu().reset(01000, 0);
             z.runTicks(400);
             const uint64_t t0 = z.totalTicks();
+            if (!b11) z.requestIrq2();                        // БК-0010: импульс внешнего устройства
             for (int n = 0; z.cpu().pc() != 03000 && n < 100000; ++n) z.runFrameSlice(n ? 1 : 0, 1000000);
             return static_cast<int>(z.totalTicks() - t0);
         };

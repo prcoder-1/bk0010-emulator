@@ -160,9 +160,12 @@ Key cross-cutting facts to know before editing the CPU or screen:
   firmware would, and the floppy controller stays on the bus even with no disks — BOS probes
   it with a write to 0177130, which the SMK accepts, then calls 0160000. On the 11M `IoBus::ioWrite` gets the UNALIGNED address for
   byte writes (the odd byte goes to the high half, as in GID).
-- **The emulator frame starts at the frame IRQ** (`Vp037::syncToLine`): on the BK-0010 at the
+- **The BK-0010 has NO frame interrupt**: its vector 0100 (IRQ2) is an external device (УП pin
+  B1 / МПИ A5; `Board::requestIrq2`), BK-docs §1.8/§5.10, GID (177662out = 047400). Only the 11M
+  (bit 14 of 0177662 = 0) and AZБК's timers raise IRQ2 per frame (`Board::deliverFrameInterrupts`).
+- **The emulator frame boundary** (`Vp037::syncToLine`): on the BK-0010 the
   037 nVSYNC pulse, line 277 (21st blanking line, RTL `va_037.v:239-241`), 43 lines before the
-  field; on the BK-0011M at VGATE + 452 CLKIN = line 256, CLKIN 324 (`Vp037::IRQ11_LINE`,
+  field — no interrupt; on the BK-0011M the frame IRQ at VGATE + 452 CLKIN = line 256, CLKIN 324 (`Vp037::IRQ11_LINE`,
   `IRQ11_CLKIN`; VGATE rises at line 255 word 32) — the board's WTI/SYNCO missing-pulse detector,
   traced and measured on the 037 netlist in OneChipBook (`src/peripheral/bk_evnt.sv`). Babylona
   (mid-line palette, self-calibrating screen) needs it to the word; Prince of Persia's SOB-timed
@@ -291,7 +294,7 @@ Key cross-cutting facts to know before editing the CPU or screen:
   «СБРОС» of the УП connector, GID does the same, and programs rely on it (INSULT's music-off
   routine 035204 starts with RESET). Details in `docs/sound.md`.
 - **Interrupt gating**: reset PSW is `0340` (priority 7, masked) so the monitor ROM
-  can install its vectors before the 50 Hz IRQ fires — do not reset to 0, games will
+  can install its vectors before an IRQ fires — do not reset to 0, games will
   jump to an unset vector and HALT. `Board::deliverFrameInterrupts` also refuses to
   deliver if the vector word is 0.
 - **Running a game** requires the monitor ROM to boot first. The GUI does this via

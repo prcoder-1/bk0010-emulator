@@ -381,7 +381,7 @@ QJsonArray McpServer::toolDefs() const {
                 {"machine", P("string", "\"auto\", \"bk10\" or \"bk11m\" for this load (default: the server's machine mode)")},
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
                 {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
-                {"frames", P("integer", "Run this many 50 Hz frames after loading (default 0)")}}, {"path"})));
+                {"frames", P("integer", "Run this many frames after loading (default 0)")}}, {"path"})));
     t.append(tool("bk_fdd_wlog", "Dump the floppy write log (every word the controller put on the disk: "
                   "M/W marker flag, value, track, side, head byte position, CPU PC) to a text file.",
         schema({{"path", P("string", "Output text file")},
@@ -439,11 +439,11 @@ QJsonArray McpServer::toolDefs() const {
                 {"ay2", P("boolean", "Second AY (\"2AY\") on/off (default: the machine's default when switching, else keep)")},
                 {"covox", P("boolean", "Covox DAC on 0177714 on/off (default: the machine's default when switching, else keep)")},
                 {"frames", P("integer", "Run this many frames after switching (default 0)")}})));
-    t.append(tool("bk_run", "Run frames (with 50 Hz interrupts) until a breakpoint, HALT, or the frame "
+    t.append(tool("bk_run", "Run frames (with the frame interrupt on bk11m) until a breakpoint, HALT, or the frame "
                   "limit. `input` scripts keyboard/joystick over time, so a whole control sequence "
                   "is reproducible in ONE call — e.g. "
                   "[{\"frame\":0,\"joy\":\"right\"},{\"frame\":25,\"joy\":\"right+fire1\"},{\"frame\":40,\"release_joy\":true}].",
-        schema({{"max_frames", P("integer", "Max 50 Hz frames to run (default 200 = ~4 s)")},
+        schema({{"max_frames", P("integer", "Max frames to run (default 200 = ~4 s)")},
                 {"input", P("array", "Input timeline: objects {frame, key|code, release_key, "
                                      "joy|joy_bits, release_joy}; frame is 0-based from the start of this run")}})));
     t.append(tool("bk_run_until", "Run until PC reaches an address/symbol (or a breakpoint / tick limit).",
@@ -495,13 +495,13 @@ QJsonArray McpServer::toolDefs() const {
                                      "\"031\"=right, \"010\"=left, \"032\"=up, \"033\"=down); a bare "
                                      "JSON integer is DECIMAL (12 means 000014 = СБР, not Enter)")},
                 {"hold", P("boolean", "Keep the key physically down afterwards (default false)")},
-                {"frames", P("integer", "Hold and run this many 50 Hz frames, then release (default 0 = do not run)")},
+                {"frames", P("integer", "Hold and run this many frames, then release (default 0 = do not run)")},
                 {"release_frames", P("integer", "Extra frames to run after releasing (default 0)")}}, {})));
     t.append(tool("bk_joystick", "Drive the joystick on the parallel port 0177714 (active high). "
                   "Buttons are named per the selected layout, which is STICKY (set it once). "
                   "Layouts: standard (Джойвокс/gid, default) | breakhouse | swcorp | klad2. "
                   "The value stays set until changed (like a physically held stick), because games "
-                  "sample the port once per THEIR frame, which is longer than a 50 Hz frame — use "
+                  "sample the port once per THEIR frame, which is longer than an emulator frame — use "
                   "frames=N to hold it for N frames and auto-release, or release=true to clear it.",
         schema({{"layout", P("string", "standard|breakhouse|swcorp|klad2 — sticky for later calls")},
                 {"buttons", P("string", "e.g. \"up+fire1\", \"вправо\", or bit0..bit15 for raw bits "
@@ -522,7 +522,7 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_screenshot", "Render the BK screen and return it as an inline PNG image (so you "
                   "can see it directly); optionally run frames first and/or write it to a file.",
         schema({{"path", P("string", "Optional output PNG path")},
-                {"frames", P("integer", "Run this many 50 Hz frames before the shot (default 0)")},
+                {"frames", P("integer", "Run this many frames before the shot (default 0)")},
                 {"mono", P("boolean", "512x256 monochrome (default false=colour)")},
                 {"tv", P("boolean", "With AZБК: the BK's own screen instead of the AZ VGA picture")}})));
     t.append(tool("bk_audio", "Capture the emulator's sound output (piezo 0177716, AY in ABC stereo — A left, "
@@ -533,7 +533,7 @@ QJsonArray McpServer::toolDefs() const {
                   "content when the client protocol supports it; `path` also writes it to disk, `raw_ms` "
                   "dumps raw int16 L/R pairs.",
         schema({{"path", P("string", "Optional output WAV path")},
-                {"frames", P("integer", "50 Hz frames to run while capturing (default 100 = 2 s)")},
+                {"frames", P("integer", "frames to run while capturing (default 100 = 2 s)")},
                 {"run", P("boolean", "false = do not run, just drain what is already buffered (~250 ms)")},
                 {"input", P("array", "Input timeline while capturing, same format as bk_run")},
                 {"raw_start_ms", P("integer", "Start of the raw-sample dump window")},
@@ -625,7 +625,7 @@ QJsonArray McpServer::toolDefs() const {
                   "offset of the text grid. A game with its OWN font: point font_addr at its glyph "
                   "table. Unusual cell widths: set cell_w / glyph_w / cell_h.",
         schema({{"mode", P("string", "auto (default) | narrow (64 cols) | wide (32 cols)")},
-                {"frames", P("integer", "Run this many 50 Hz frames before reading (default 0)")},
+                {"frames", P("integer", "Run this many frames before reading (default 0)")},
                 {"x", P("integer", "Left edge of the character grid in screen pixels (default 0)")},
                 {"y", P("integer", "Top edge in scanlines; omit to auto-detect (monitor text starts "
                                    "at 16, below the 16-line service row)")},
