@@ -186,6 +186,9 @@ public:
     bool setAzbk(bool on, const Azbk::Config& cfg = {}, std::string* err = nullptr);
     // Сменить образ AZn на ходу (пусто — убрать); сброса нет, это дело вызывающего.
     bool setAzUnit(int unit, const std::string& host);
+    // Импульс внешнего устройства на IRQ2 (вектор 100): контакт B1 разъёма УП или A5 МПИ.
+    // Запрос защёлкивается и выдаётся, как только откроется маска.
+    void requestIrq2();
     bool azbk() const { return azOn_; }
     const Azbk& az() const { return az_; }
     Azbk&       az()       { return az_; }
@@ -383,7 +386,7 @@ public:
     // (or a breakpoint) was reached.
     bool runUntil(uint16_t addr, int maxTicks);
 
-    // Run (with 50 Hz interrupts) until the call stack becomes shallower than
+    // Run (with frame interrupts) until the call stack becomes shallower than
     // `targetDepth` (i.e. the current subroutine returns), a breakpoint, HALT, or
     // the tick limit. For "step out". Needs the flame/CCT tracker enabled.
     bool runUntilReturn(size_t targetDepth, int maxTicks);
@@ -668,7 +671,7 @@ private:
     // игры, которые РАЗРЕШАЮТ прерывание клавиатуры и при этом сами опрашивают
     // регистр (SOKOBAN), должны успеть прочитать код раньше ISR монитора.
     uint64_t keyIntDeferAt_ = 0;        // такт, с которого IRQ клавиатуры выдавать можно
-    bool     irqFramePending_ = false;  // взведённый запрос кадрового прерывания 0100
+    bool     irqFramePending_ = false;  // взведённый запрос IRQ2 (0100): кадр 11М, таймер AZ, внешний
     bool     stopPending_ = false;      // нажата клавиша «СТОП» (вектор 4, вне приоритета)
     bool     busErrorPending_ = false;  // обращение, которое шина не подтвердила («зависание»)
     bool     keyHeld_ = false;   // physical key down (0177716 bit 6, active-low)
@@ -751,7 +754,7 @@ private:
         return !breakpoints_.empty() && breakpoints_.count(pc) && breakAllows(pc);
     }
     void endFrame() { trace_.tick(); ++framesSinceReset_; }   // кадр досчитан
-    void deliverFrameInterrupts(); // взвести кадровый запрос 50 Гц и попробовать выдать
+    void deliverFrameInterrupts(); // взвести кадровый запрос (11М, таймер AZ) и попробовать выдать
     int  tryDeliverInterrupts();   // выдать взведённые запросы; возвращает такты входа
     int  stepCore();               // one instruction + sound/trace bookkeeping
     void advanceDevices(int t);    // время для периферии: луч, звук, диск, клавиатура
