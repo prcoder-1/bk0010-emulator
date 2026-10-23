@@ -167,12 +167,14 @@ struct SmkMode { bool wnd1; struct { uint16_t page; Bank mode; } bank[8]; };
 // разрядам 6:4 слова режима. ПЗУ платы в окне 0160000 в режимах Std10 и Std11 — слот 8
 // (AZ337, загрузчик дисков), как в SYS и как у retro-tang-bk: у GID там «страница 0», и
 // программа, оставившая Std11 (демо leCSIcon проверяет СМК и уходит в него), звала по
-// 0160004 тень ОЗУ вместо драйвера диска.
+// 0160004 тень ОЗУ вместо драйвера диска. Std10, окна 0120000/0130000 — страницы 4, 5 по
+// порядку: у GID для AZ они переставлены (5, 4), а его же FDD_SMK512.cpp, Табл. 1 СМК,
+// наш Smk.cpp (SMKTEST) и OneChipBook/BkEmu дают 4, 5.
 const SmkMode kSmkModes[8] = {
     {false, {{0, Bank::Off}, {0, Bank::Off}, {0, Bank::Off}, {0, Bank::Off}, {4, Bank::Ram}, {5, Bank::Ram}, {6, Bank::Ram}, {7, Bank::Ram}}},       // HLT11
     {true,  {{4, Bank::Ram}, {5, Bank::Ram}, {6, Bank::Ram}, {7, Bank::Ram}, {0, Bank::Ram}, {1, Bank::Ram}, {2, Bank::Ram}, {3, Bank::Ram}}},       // ALL
     {false, {{0, Bank::Off}, {0, Bank::Off}, {0, Bank::Off}, {0, Bank::Off}, {4, Bank::Ram}, {5, Bank::Ram}, {6, Bank::Ram}, {7, Bank::Ram}}},       // ОЗУ11
-    {true,  {{0, Bank::Off}, {0, Bank::Off}, {2, Bank::Ram}, {3, Bank::Ram}, {5, Bank::Ram}, {4, Bank::Ram}, {0110, Bank::Rom}, {7, Bank::Ram}}},    // STD10
+    {true,  {{0, Bank::Off}, {0, Bank::Off}, {2, Bank::Ram}, {3, Bank::Ram}, {4, Bank::Ram}, {5, Bank::Ram}, {0110, Bank::Rom}, {7, Bank::Ram}}},    // STD10
     {true,  {{0, Bank::Ram}, {1, Bank::Ram}, {2, Bank::Ram}, {3, Bank::Ram}, {4, Bank::Ram}, {5, Bank::Ram}, {6, Bank::Ram}, {7, Bank::Ram}}},       // HLT10
     {true,  {{0, Bank::Ram}, {1, Bank::Ram}, {2, Bank::Ram}, {3, Bank::Ram}, {4, Bank::Ram}, {5, Bank::Ram}, {6, Bank::Ram}, {7, Bank::Ram}}},       // ОЗУ10
     {false, {{0, Bank::Off}, {0, Bank::Off}, {0, Bank::Off}, {0, Bank::Off}, {0, Bank::Off}, {0, Bank::Off}, {0110, Bank::Rom}, {7, Bank::Ram}}},    // STD11
@@ -290,10 +292,15 @@ bool Azbk::mpiWrite(uint16_t addr, uint16_t value, bool isByte) {
             }
             return emu;                                    // на БК-0010 регистр — платы
         }
-        case 0177664:
-            vscr_[0] = static_cast<uint16_t>((value & 0377) - 0330);
-            smallScreen_ = !(value & 01000);
+        case 0177664: {
+            // Байт меняет только свою половину: прежнее слово собирается из скролла и
+            // бита малого экрана (иначе MOVB в младший байт включала малый экран).
+            const uint16_t prev = static_cast<uint16_t>(((vscr_[0] + 0330) & 0377) | (smallScreen_ ? 0 : 01000));
+            const uint16_t v = isByte ? static_cast<uint16_t>((addr & 1) ? (prev & 0377) | wide : (prev & 0177400) | wide) : value;
+            vscr_[0] = static_cast<uint16_t>((v & 0377) - 0330);
+            smallScreen_ = !(v & 01000);
             return false;
+        }
         default:
             return false;
         }
