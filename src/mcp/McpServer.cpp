@@ -10,6 +10,7 @@
 #include <QStringList>
 #include <QImage>
 #include <QBuffer>
+#include <QElapsedTimer>
 #include <QStandardPaths>
 #include "../ui/AzPaths.h"
 #include <tuple>
@@ -445,7 +446,9 @@ QJsonArray McpServer::toolDefs() const {
                   "[{\"frame\":0,\"joy\":\"right\"},{\"frame\":25,\"joy\":\"right+fire1\"},{\"frame\":40,\"release_joy\":true}].",
         schema({{"max_frames", P("integer", "Max frames to run (default 200 = ~4 s)")},
                 {"input", P("array", "Input timeline: objects {frame, key|code, release_key, "
-                                     "joy|joy_bits, release_joy}; frame is 0-based from the start of this run")}})));
+                                     "joy|joy_bits, release_joy}; frame is 0-based from the start of this run")},
+                {"live_vga", P("boolean", "AZБК: draw the VGA frame line by line during this run, as the GUI "
+                                          "window does (default: on demand only) — for host-speed checks")}})));
     t.append(tool("bk_run_until", "Run until PC reaches an address/symbol (or a breakpoint / tick limit).",
         schema({{"addr", addrArg}, {"max_ticks", P("integer", "CPU-tick limit (default 20000000)")}}, {"addr"})));
     t.append(tool("bk_step", "Execute N single instructions.",
@@ -1230,9 +1233,31 @@ QJsonObject McpServer::tool_bk_run(const QJsonObject& args) {
     QString err;
     if (args.contains("input") && !parseInputScript(args.value("input").toArray(), script, err))
         return fail(err);
-    const RunOutcome r = runFrames(maxFrames, script);
-    return textContent(QString("%1\n%2\n%3")
-        .arg(runText(r)).arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
+    // Время хоста: сколько занял прогон и самый долгий кадр. live_vga — рисовать кадр
+    // AZБК построчно, как в окне GUI (иначе он рисуется только по запросу).
+    const bool liveWas = board_.azLive();
+    if (args.contains("live_vga")) board_.setAzLive(args.value("live_vga").toBool());
+    QElapsedTimer total, frame;
+    qint64 worst = 0;
+    int worstAt = -1, n = 0;
+    total.start(); frame.start();
+    const RunOutcome r = runFrames(maxFrames, script, [&] {
+        const qint64 ns = frame.nsecsElapsed();
+        if (ns > worst) { worst = ns; worstAt = n; }
+        ++n;
+        frame.restart();
+    });
+    const double hostMs = total.nsecsElapsed() / 1e6;
+    board_.setAzLive(liveWas);
+    const double realMs = r.frames * 1000.0 * board_.ticksPerFrame() / board_.cpuFreqHz();
+    const QString host = r.frames > 0
+        ? QString("\nHost: %1 ms for %2 ms of BK time (%3x real time); slowest frame %4 ms (#%5)%6.")
+              .arg(hostMs, 0, 'f', 1).arg(realMs, 0, 'f', 1).arg(realMs / std::max(hostMs, 1e-3), 0, 'f', 2)
+              .arg(worst / 1e6, 0, 'f', 2).arg(worstAt)
+              .arg(board_.azbk() ? (board_.azLive() || args.value("live_vga").toBool() ? ", VGA drawn per line" : ", VGA on demand") : "")
+        : QString();
+    return textContent(QString("%1%4\n%2\n%3")
+        .arg(runText(r)).arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)).arg(host));
 }
 
 QJsonObject McpServer::tool_bk_run_until(const QJsonObject& args) {
