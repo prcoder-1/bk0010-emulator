@@ -203,6 +203,7 @@ void Azbk::prepareScreenshot() {
 // (44100 Гц), точной дробью от тактов ЦП.
 void Azbk::advance(int ticks) {
     if (!on() || ticks <= 0) return;
+    ctrl_.advance(ticks, cpuHz_);
     lineAcc_ += uint64_t(ticks) * uint64_t(VGA_LINES * VGA_HZ);
     while (lineAcc_ >= uint64_t(cpuHz_)) { lineAcc_ -= uint64_t(cpuHz_); vgaLine(); }
     if (dmaPlaying_) {

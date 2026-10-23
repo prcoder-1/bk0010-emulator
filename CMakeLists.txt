@@ -37,6 +37,11 @@ add_library(bkcore STATIC
     src/core/AzSound.cpp
     src/core/AzBlitter.cpp
     src/core/AzCtrl.cpp
+    src/core/AzNet.cpp
+    src/core/AzNetApps.cpp
+    src/core/AzCrypto.cpp
+    src/core/McuFiber.cpp
+    src/core/NetPort.cpp
     src/core/Vm1Timing.cpp
     src/core/AviWriter.cpp
     src/core/Zmbv.cpp

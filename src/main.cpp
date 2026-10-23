@@ -88,6 +88,7 @@ struct CliOptions {
     QString azSd;
     std::map<int, QString> azUnits;
     bool azRw = false, az037 = false;
+    QString azNet;                        // кабель сетевой карты AZБК; «-» — снять (GUI)
     int  aspect34 = -1;                   // GUI: неквадратный пиксель БК
     bool mstd = false;                    // блок МСТД (ПЗУ 330) в окне 0160000 БК-0011М
     // Арбитраж КР1801ВП1-037: доступ к ДОЗУ квантован окном процессора (раз в 4 такта),
@@ -134,6 +135,7 @@ struct CliOptions {
         c.writeDir = MainWindow::azWriteDir(QString::fromStdString(c.sdDir), azRw).toStdString();
         c.rw = azRw; c.mod037 = az037;
         for (const auto& kv : azUnits) c.units[kv.first] = kv.second.toStdString();
+        if (azNet != "-") c.net = azNet.toStdString();
         return c;
     }
     bk::Board::Media media() const {
@@ -194,6 +196,7 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
         else if (a == "--az-sd" && hasVal) o.azSd = args[++i];
         else if (a == "--az-rw") o.azRw = true;
         else if (a == "--az-037") o.az037 = true;
+        else if (a == "--az-net" && hasVal) o.azNet = args[++i];
         else if (a == "--az-unit" && hasVal) {
             // N=образ; без «N=» — диск 0.
             const QString v = args[++i];
@@ -686,6 +689,10 @@ static void printHelp(const char* prog) {
         "                         карту; иначе изменения дисков в памяти, остальное — в\n"
         "                         каталоге данных эмулятора\n"
         "  --az-037               БК-0010: доработка 037 (эмуляция БК-0011М, быстрая память)\n"
+        "  --az-net <кабель>      сетевая карта платы (ENC28J60 и стек прошивки: DHCP, NTP,\n"
+        "                         ping, HTTP, landisk, HOF) — к сети хоста: tap:ИМЯ,\n"
+        "                         macvtap:ИМЯ или /dev/tapN («-» — без кабеля). MAC, DHCP и\n"
+        "                         адрес — из [NETWORK] в AZ.INI (Setup платы). docs/azbk.md\n"
         "  --roms <каталог>       каталог ПЗУ (иначе BK_ROM_DIR или каталог при сборке)\n"
         "\n"
         "Дисковод:\n"
@@ -812,6 +819,7 @@ int main(int argc, char** argv) {
 
     MainWindow::AzOptions azo;
     azo.on = o.az; azo.sd = o.azSd; azo.units = o.azUnits; azo.rw = o.azRw; azo.mod037 = o.az037 ? 1 : -1;
+    azo.net = o.azNet;
     MainWindow w(o.romDir, o.machineChoice, o.machine, o.smk, o.aspect34, o.ay, o.ay2, o.covox, azo);
     w.setScanlineOverride(o.scanline);
     w.setMstd(o.mstd);

@@ -59,7 +59,7 @@ ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, ove
 `--hdd <img.hdi>` / `--hdd-b` / `--hdd-rw` / `--hdd-ctl auto|smk|samara` (IDE hard disk on
 the СМК-512 or the «Самара» controller, `docs/hdd.md`),
 `--machine auto|bk10|bk11m` (`--bk10`, `--bk11m`; default auto), `--az` / `--az-sd <dir>` /
-`--az-unit N=<img>` / `--az-rw` / `--az-037` (AZБК controller, `docs/azbk.md`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
+`--az-unit N=<img>` / `--az-rw` / `--az-037` / `--az-net tap:IF|macvtap:IF|/dev/tapN` (AZБК controller, `docs/azbk.md`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--video <file.avi|.mp4>` / `--video-codec zmbv|h264` (default: by extension) / `--video-size 1024x768|512x256` /
 `--video-audio` / `--no-video-audio` (screen capture with sound, GUI and headless, `docs/video.md`),
@@ -419,6 +419,15 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `setAzLive(true)` (GUI VGA view, video capture), else rendered whole on demand. State is a
   separate «AZB1» tail after BKX1. `setAzbk` validates the card first (no change on failure);
   `setSmk512` under AZ only records, removing AZ restores СМК/КНГМД; `setAzUnit` swaps images live.
+  **Network** (`src/core/AzNet*`, `NetPort`, `McuFiber`, `AzCrypto`): ENC28J60 + the firmware's
+  own TCP/IP stack ported 1:1 from the 00019 RE (DHCP/DNS/NTP/ARP/ICMP/TCP, landisk, HOF, HTTP
+  GET/HEAD/OPTIONS; no WebDAV/SNMP); config = AZ.INI `[NETWORK]` (Setup edits it), cable =
+  `EthPort` (tap/macvtap, Linux). MCU time is EMULATED time; TIM6/uptime runs only while the
+  firmware enables it (boot..cmd 000, network ops, cmd 010+IE). Blocking firmware loops run in
+  `McuFiber` (a thread in strict hand-off with emulation — deterministic); while a network job
+  runs CSR reads 0 («busy»), a CSR write is latched (a write ends the 010 wait). Network disks
+  in AZ.INI hold the BK in reset during MCU boot (`Board::runLoop`, `Azbk::holdCpu`). End-to-end
+  test without root: `unshare -rn` + tap + dnsmasq (docs/azbk.md, «Сеть»).
 - **Video capture** (`src/core/VideoCapture`, `Zmbv`, `AviWriter`; core links zlib + threads):
   one AVI frame per EMULATED BK frame, rate/scale = cpuFreqHz/ticksPerFrame reduced (3125/64 on
   both machines) — never wall-clock. The GUI feeds a frame only when the LAST slice of a frame
