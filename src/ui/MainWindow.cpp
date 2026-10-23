@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include <algorithm>
 #include "QtFormat.h"
 #include "GlScreen.h"
 #include "DebuggerOverlay.h"
@@ -481,6 +482,14 @@ void MainWindow::runOneSlice(int kSlices) {
             board_->pressKey(keyFeed_.front());
             keyFeed_.pop_front();
         }
+        // Отпущенная активная клавиша — после паузы дребезга контроллер узнаёт ещё
+        // удерживаемую (последнюю нажатую) как новое нажатие.
+        if (phase_ == 0 && relatchFrames_ > 0 && --relatchFrames_ == 0 && !heldKeys_.empty()) {
+            const HeldKey k = heldKeys_.back();
+            activeKey_ = k.key;
+            board_->setKeyHeld(true);
+            if (k.code) board_->pressKey(k.code);
+        }
         // Запись видео: кадр попадает в файл, только если начался при идущей записи, —
         // тогда и звук для него набран с его первого такта.
         if (phase_ == 0 && video_ && video_->active()) {
@@ -552,8 +561,7 @@ void MainWindow::setPaused(bool paused) {
     }
     // Entering/leaving the debugger drops any held keys so a game doesn't see a
     // key stuck down across the pause.
-    heldKeys_.clear();
-    board_->setKeyHeld(false);
+    releaseAllKeys();
     renderScreen();
 }
 
@@ -563,9 +571,8 @@ void MainWindow::setSuspended(bool suspended) {
     suspended_ = suspended;
     phase_ = 0;                     // resume at a fresh frame boundary
     // Drop any held/buffered keys so nothing is stuck down or replayed on resume.
-    heldKeys_.clear();
+    releaseAllKeys();
     keyFeed_.clear();
-    board_->setKeyHeld(false);
     if (!paused_)  // don't fight the debugger for the status line
         status_->setText(suspended_ ? "ПАУЗА — нажмите Pause для продолжения"
                                      : "Выполнение");
@@ -811,8 +818,7 @@ void MainWindow::resetMachine() {
     board_->reset();
     keymap_.reset();
     keyFeed_.clear();
-    heldKeys_.clear();
-    board_->setKeyHeld(false);
+    releaseAllKeys();
     // Сброс повторяет последний пуск: программу, дискету в приводе A или винчестер.
     switch (boot_) {
     case Boot::Bin:
@@ -1087,7 +1093,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     // stays low while a key is held — games poll it to detect input.
     // АР2 (Alt) вне матрицы, сама по себе нажатия не даёт.
     if (!paused_ && !e->isAutoRepeat() && e->key() != Qt::Key_Alt) {
-        heldKeys_.insert(e->key());
+        heldKeys_.erase(std::remove_if(heldKeys_.begin(), heldKeys_.end(),
+                                       [&](const HeldKey& k) { return k.key == e->key(); }), heldKeys_.end());
+        heldKeys_.push_back({e->key(), 0});
+        activeKey_ = e->key();
+        relatchFrames_ = 0;
         board_->setKeyHeld(true);
     }
 
@@ -1142,6 +1152,8 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     // «клавиша нажата» (PITON), срабатывает по коду предыдущей клавиши.
     if (e->isAutoRepeat()) { e->accept(); return; }
     std::vector<uint16_t> codes = keymap_.translate(e);
+    if (!codes.empty() && !heldKeys_.empty() && heldKeys_.back().key == e->key())
+        heldKeys_.back().code = codes.back();          // для повторного распознавания
     if (!codes.empty()) {
         // Одиночный код при пустой очереди защёлкиваем НЕМЕДЛЕННО — атомарно с
         // битом «клавиша нажата» (setKeyHeld выше): эмуляция однопоточная, между
@@ -1167,12 +1179,24 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     QMainWindow::keyPressEvent(e);
 }
 
+void MainWindow::releaseAllKeys() {
+    heldKeys_.clear();
+    activeKey_ = 0;
+    relatchFrames_ = 0;
+    board_->setKeyHeld(false);
+}
+
 void MainWindow::keyReleaseEvent(QKeyEvent* e) {
     // Release the physical key-held state (0177716 bit 6) when the last game key
     // is lifted. Auto-repeat generates spurious release events — ignore those.
     if (!e->isAutoRepeat()) {
-        heldKeys_.erase(e->key());
-        if (heldKeys_.empty()) board_->setKeyHeld(false);
+        heldKeys_.erase(std::remove_if(heldKeys_.begin(), heldKeys_.end(),
+                                       [&](const HeldKey& k) { return k.key == e->key(); }), heldKeys_.end());
+        if (e->key() == activeKey_ || heldKeys_.empty()) {
+            activeKey_ = 0;
+            board_->setKeyHeld(false);
+            relatchFrames_ = heldKeys_.empty() ? 0 : kRelatchFrames;
+        }
     }
     QMainWindow::keyReleaseEvent(e);
 }
