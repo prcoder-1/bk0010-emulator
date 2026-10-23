@@ -1066,7 +1066,7 @@ bool Board::powerOn(const Setup& s, const std::string& romDir) {
     setArbitration(s.arb037);
     setCpuPhase(s.cpuPhase);
     setScanlineRender(s.scanline >= 0 ? s.scanline > 0 : bk11());
-    setSmk512(s.smk && !s.az);
+    setSmk512(s.smk);                                // при AZ лишь запомнится до снятия платы
     if (!s.diskRom.empty()) setDiskRom(s.diskRom);
     setHddController(s.hddCtl);
     bool ok = loadRoms(romDir);
@@ -1130,6 +1130,7 @@ void Board::smkStartMode() {
 }
 
 void Board::setSmk512(bool on) {
+    if (azOn_) { smkBeforeAz_ = on; return; }       // СМК эмулирует сама плата; вернётся без неё
     if (on == smkOn_) return;
     smkOn_ = on;
     if (on) { smk_.powerOn(); smkStartMode(); } else smk_.release();
@@ -1138,26 +1139,48 @@ void Board::setSmk512(bool on) {
 }
 
 bool Board::setAzbk(bool on, const Azbk::Config& cfg, std::string* err) {
-    const bool want = on;
+    // Негодная карта — отказ до любых изменений: машина остаётся, как была.
+    if (on && !Azbk::usable(cfg, err)) return false;
     if (on) {
-        setSmk512(false);
-        diskOn_ = false;                         // КНГМД и НЖМД — с шины (дискеты остаются в приводах)
-        if (!az_.powerOn(cfg, bk11(), cpuFreqHz_, err)) {
-            az_.release();
-            on = false;
+        if (!azOn_) {
+            smkBeforeAz_ = smkOn_;
+            setSmk512(false);
+            diskOn_ = false;                     // КНГМД и НЖМД — с шины (дискеты остаются в приводах)
         }
-    } else if (azOn_) {
+        azOn_ = true;
+        if (az_.powerOn(cfg, bk11(), cpuFreqHz_, err)) {
+            azResetPending_ = azIrqPending_ = false;
+            az_.setLiveRender(azLive_);
+            mem_.setBasicOff(true);
+            sound_.setAzbk(true);
+            setAy(true); setAy2(true);
+            updateMpi();
+            return true;
+        }
+        az_.release();
+    } else if (!azOn_) {
+        return true;
+    } else {
         az_.release();
     }
-    const bool ok = on;
-    azOn_ = on;
-    if (!on) { ay_.setYm(true); ay2_.setYm(true); }   // без платы — YM2149, как было
+    // Плату вынули (или она не включилась): вернуть СМК и контроллер НГМД, как были без неё.
+    azOn_ = false;
     azResetPending_ = azIrqPending_ = false;
-    mem_.setBasicOff(on);
-    sound_.setAzbk(on);
-    if (on) { setAy(true); setAy2(true); }
+    ay_.setYm(true); ay2_.setYm(true);               // без платы — YM2149, как было
+    mem_.setBasicOff(false);
+    sound_.setAzbk(false);
+    setSmk512(smkBeforeAz_);
+    bool floppy = false;
+    for (int d = 0; d < Fdd::DRIVES; ++d) floppy |= kngmd_.fdd().attached(d);
+    if (floppy || (bk11() && smkOn_)) controllerOn();
     updateMpi();
-    return ok == want;
+    return !on;
+}
+
+bool Board::setAzUnit(int unit, const std::string& host) {
+    if (unit < 0 || unit > 31) return false;
+    az_.setUnit(unit, host);
+    return true;
 }
 
 // ---- Save / restore state ---------------------------------------------------
@@ -1357,6 +1380,7 @@ bool Board::loadState11(const std::vector<uint8_t>& in) {
 // это — как после включения), а старые версии эмулятора его просто не дочитывают.
 namespace {
 constexpr char kExtTag[4] = {'B', 'K', 'X', '1'};
+constexpr char kAzTag[4]  = {'A', 'Z', 'B', '1'};
 enum : uint16_t {
     EXT_AY = 1, EXT_AY2 = 2, EXT_COVOX = 4, EXT_AY2_SEEN = 010, EXT_SYS_WRITE = 020,
     EXT_IRQ_FRAME = 040, EXT_STOP = 0100, EXT_BUS_ERROR = 0200, EXT_KEY_IRQ = 0400,
@@ -1386,30 +1410,71 @@ void Board::saveStateExt(std::vector<uint8_t>& out) const {
                            keyIntDeferAt_ > totalTicks_ ? keyIntDeferAt_ - totalTicks_ : 0,
                            totalTicks_ - timerStart_};
     put(t, sizeof t);
-    // AZБК: признак, «что на экране», и всё состояние платы (ОЗУ — ненулевыми страницами).
-    put8(azOn_ ? 1 : 0);
-    if (azOn_) {
-        put8(azVga_ ? 1 : 0);
-        const uint8_t pend = static_cast<uint8_t>((azIrqPending_ ? 1 : 0) | (azResetPending_ ? 2 : 0));
-        put8(pend);
-        std::vector<uint8_t> az;
-        az_.saveState(az);
-        const uint32_t n = static_cast<uint32_t>(az.size());
-        put(&n, 4);
-        p.insert(p.end(), az.begin(), az.end());
-    }
-    const uint32_t len = static_cast<uint32_t>(p.size());
-    out.insert(out.end(), kExtTag, kExtTag + 4);
-    out.insert(out.end(), reinterpret_cast<const uint8_t*>(&len), reinterpret_cast<const uint8_t*>(&len) + 4);
-    out.insert(out.end(), p.begin(), p.end());
+    auto tail = [&](const char* tag, const std::vector<uint8_t>& body) {
+        const uint32_t len = static_cast<uint32_t>(body.size());
+        out.insert(out.end(), tag, tag + 4);
+        out.insert(out.end(), reinterpret_cast<const uint8_t*>(&len), reinterpret_cast<const uint8_t*>(&len) + 4);
+        out.insert(out.end(), body.begin(), body.end());
+    };
+    tail(kExtTag, p);
+    if (!azOn_) return;
+    // «AZB1» — отдельный хвост за BKX1, чтобы новые поля BKX1 не зависели от платы:
+    // что на экране, отложенные запросы, СМК до AZ, затем всё состояние платы.
+    p.clear();
+    put8(azVga_ ? 1 : 0);
+    put8((azIrqPending_ ? 1 : 0) | (azResetPending_ ? 2 : 0));
+    put8(smkBeforeAz_ ? 1 : 0);
+    az_.saveState(p);
+    tail(kAzTag, p);
 }
 
 void Board::loadStateExt(const std::vector<uint8_t>& in, size_t off) {
-    uint32_t len = 0;
-    if (in.size() < off + 8 || std::memcmp(in.data() + off, kExtTag, 4) != 0) return;
-    std::memcpy(&len, in.data() + off + 4, 4);
-    off += 8;
-    const size_t end = std::min(in.size(), off + len);
+    // Хвосты по меткам: BKX1 (может не быть), за ним AZB1 (нет — платы в снимке нет).
+    auto tail = [&](const char* tag, size_t& at, size_t& end) {
+        uint32_t len = 0;
+        if (in.size() < at + 8 || std::memcmp(in.data() + at, tag, 4) != 0) return false;
+        std::memcpy(&len, in.data() + at + 4, 4);
+        at += 8;
+        end = std::min(in.size(), at + len);
+        return true;
+    };
+    size_t end = 0;
+    if (tail(kExtTag, off, end)) {
+        loadBkx1(in, off, end);
+        off = end;
+    }
+    size_t azEnd = 0;
+    if (!tail(kAzTag, off, azEnd)) { if (azOn_) setAzbk(false); return; }
+    loadAzTail(in, off, azEnd);
+}
+
+void Board::loadAzTail(const std::vector<uint8_t>& in, size_t off, size_t end) {
+    if (end < off + 3) { if (azOn_) setAzbk(false); return; }
+    const uint8_t vga = in[off], pend = in[off + 1], smkBefore = in[off + 2];
+    off += 3;
+    if (!azOn_) {
+        // Плату вставляем без включения питания: память и регистры придут из снимка.
+        setSmk512(false);
+        diskOn_ = false;
+        azOn_ = true;
+        mem_.setBasicOff(true);
+        sound_.setAzbk(true);
+        az_.setLiveRender(azLive_);
+        updateMpi();
+    }
+    smkBeforeAz_ = smkBefore & 1;
+    const uint8_t* q = in.data() + off;
+    if (!az_.loadState(q, in.data() + end) || !az_.on()) {
+        std::fprintf(stderr, "AZБК: снимок платы повреждён — плата снята\n");
+        az_.release();
+        setAzbk(false);
+        return;
+    }
+    azVga_ = vga != 0;
+    azIrqPending_ = pend & 1; azResetPending_ = pend & 2;
+}
+
+void Board::loadBkx1(const std::vector<uint8_t>& in, size_t off, size_t end) {
     auto get = [&](void* v, size_t n) {
         if (off + n > end) { std::memset(v, 0, n); return false; }
         std::memcpy(v, in.data() + off, n); off += n; return true;
@@ -1445,30 +1510,6 @@ void Board::loadStateExt(const std::vector<uint8_t>& in, size_t off) {
     kbdReadyClearAt_ = t[0] ? totalTicks_ + t[0] : 0;
     keyIntDeferAt_ = totalTicks_ + t[1];
     timerStart_ = totalTicks_ - t[2];   // по модулю 2^64: timerCheck считает разность
-    uint8_t az = 0;
-    if (!get(&az, 1) || !az) { if (azOn_) setAzbk(false); return; }
-    uint8_t vga = 1, pend = 0;
-    uint32_t n = 0;
-    if (!get(&vga, 1) || !get(&pend, 1) || !get(&n, 4) || off + n > end) return;
-    if (!azOn_) {
-        // Плату вставляем без включения питания: память и регистры придут из снимка.
-        azOn_ = true;
-        mem_.setBasicOff(true);
-        sound_.setAzbk(true);
-        setSmk512(false);
-        diskOn_ = false;
-        updateMpi();
-    }
-    const uint8_t* q = in.data() + off;
-    if (!az_.loadState(q, in.data() + off + n)) std::fprintf(stderr, "AZБК: снимок платы повреждён\n");
-    if (!az_.on()) {
-        azOn_ = false; mem_.setBasicOff(false); sound_.setAzbk(false);
-        ay_.setYm(true); ay2_.setYm(true);
-        updateMpi();
-        return;
-    }
-    azVga_ = vga != 0;
-    azIrqPending_ = pend & 1; azResetPending_ = pend & 2;
 }
 
 bool Board::saveState(const std::string& path) {
@@ -1601,6 +1642,9 @@ void Board::deliverFrameInterrupts() {
     // БК-docs §20.4, проверено по ПЗУ БОС .BTIM).
     // Кадровый таймер AZБК «48 Гц» идёт по кадру БК (как у GID) — и при выключенном таймере 11М.
     if (bk11() && (reg662_ & 040000) && !(azOn_ && az_.timer48())) return;
+    // БК-0010 с эмуляцией 11М: у самой БК кадрового прерывания нет, его даёт плата
+    // (таймер 48 Гц по 177662 или IRQ 60 Гц VGA).
+    if (!bk11() && azOn_ && az_.emu11() && !az_.timer48()) return;
     irqFramePending_ = true;
     const int t = tryDeliverInterrupts();
     if (t) advanceDevices(t);
@@ -2099,7 +2143,8 @@ bool Board::regValue(uint16_t addr, uint16_t& value) const {
         // ленты (у нас 0). Бит 2 — «была запись в системный регистр» (внешняя схема
         // ВР1, GID devemu/Board.cpp:1264-1268), гасится чтением.
         value = static_cast<uint16_t>((bk11() ? START_VECTOR11 : 0100000) | 0200
-                                      | (keyHeld_ ? 0 : 0100) | (sysWriteFlag_ ? 004 : 0));
+                                      | (keyHeld_ ? 0 : 0100) | (sysWriteFlag_ ? 004 : 0)
+                                      | (azOn_ ? az_.sel1() : 0));   // плата отвечает тоже (ИЛИ)
         return true;
     default:
         return false;

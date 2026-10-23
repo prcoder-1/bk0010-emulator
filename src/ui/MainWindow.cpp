@@ -199,7 +199,11 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     azMenu->addAction("Убрать диск AZ0 (как в AZ.INI)", this, [this] {
         QSettings().remove("azbk/unit0");
         azCli_.units.erase(0);
-        if (board_->azbk()) { applyAz(true); resetMachine(); }
+        if (board_->azbk()) {
+            const auto& u = azConfig().units;          // AZ.INI решит, если и в нём нет
+            board_->setAzUnit(0, u.count(0) ? u.at(0) : std::string());
+            resetMachine();
+        }
         status_->setText("Диск AZ0 — по AZ.INI");
     });
     az037Action_ = azMenu->addAction("Доработка &037 (БК-0010: эмуляция БК-0011М)");
@@ -523,6 +527,8 @@ void MainWindow::runOneSlice(int kSlices) {
 }
 
 void MainWindow::renderScreen() {
+    // Кадр VGA построчно — только пока его видно или пишут; иначе он рисуется целиком здесь.
+    board_->setAzLive(board_->azVga() || (video_ && video_->active()));
     board_->screen().setColorMode(colorMode_);
     if (!board_->scanlineRender()) board_->screen().render(board_->memory());
     const bk::Board::Frame fr = board_->displayFrame();
@@ -768,10 +774,6 @@ void MainWindow::openBin() {
 
 bool MainWindow::loadBinFromPath(const QString& path) {
     uint16_t addr = 0, len = 0;
-    if (board_->azbk()) {
-        status_->setText("С контроллером AZБК программа .BIN не загружается — AZ грузится со своих дисков");
-        return false;
-    }
     if (path != lastBin_) forgetBin();
     // В режиме auto машину выбирает программа (Board::binTargetsBk11): палитра 0177662 или
     // вызовы БОС — БК-0011М, иначе БК-0010-01. Явно выбранная машина остаётся какой есть.
@@ -779,6 +781,10 @@ bool MainWindow::loadBinFromPath(const QString& path) {
         const bk::Machine m = bk::Board::machineFor(machineChoice_, path.toStdString());
         if (m != board_->machine()) switchMachine(m);
     }
+    // AZБК грузится со своих дисков, монитору с .BIN он мешает: на этот запуск его нет
+    // (настройка остаётся, плата вернётся с переключением машины или галкой).
+    const bool azDropped = board_->azbk();
+    if (azDropped) { applyAz(false); board_->reset(); }
     // The monitor ROM must have initialised before a game is started; when a bin
     // is passed on the command line this happens before the 50 Hz timer has run
     // a single frame, so boot it here first. (На БК-0011М монитор БОС поднимает сам
@@ -792,10 +798,11 @@ bool MainWindow::loadBinFromPath(const QString& path) {
     lastBin_ = path;
     boot_ = Boot::Bin;
     if (fresh) loadAnnotations(annotationsPath());   // "<bin>.bkdb" — символы и комментарии
-    status_->setText(QString("Загружено %1: адрес %2, длина %3 (восьм.)")
+    status_->setText(QString("Загружено %1: адрес %2, длина %3 (восьм.)%4")
         .arg(QFileInfo(path).fileName())
         .arg(QString::number(addr, 8))
-        .arg(QString::number(len, 8)));
+        .arg(QString::number(len, 8))
+        .arg(azDropped ? " — AZБК на этот запуск снят" : ""));
     updateTitle();
     return true;
 }
@@ -862,6 +869,12 @@ bk::Azbk::Config MainWindow::azConfig() const {
 
 bool MainWindow::applyAz(bool on) {
     std::string err;
+    if (on && !bk::Azbk::usable(azConfig(), &err)) {
+        if (status_) status_->setText(QString("AZБК не установлен: %1").arg(QString::fromStdString(err)));
+        else std::fprintf(stderr, "AZБК: %s\n", err.c_str());
+        syncMachineMenu();
+        return false;
+    }
     if (on) saveDisks();
     const bool ok = board_->setAzbk(on, azConfig(), &err);
     if (!ok && status_) status_->setText(QString("AZБК не установлен: %1").arg(QString::fromStdString(err)));
@@ -874,11 +887,12 @@ bool MainWindow::applyAz(bool on) {
 
 // Плату ставят при выключенном питании: машина перезапускается и грузится с AZBOOT.
 void MainWindow::setAzbk(bool on) {
-    QSettings().setValue(azKey(), on);
     azCli_.on = -1;
-    const bool ok = applyAz(on);
+    if (!applyAz(on)) return;                         // машина не тронута, галка вернулась
+    QSettings().setValue(azKey(), on);
+    if (!on) board_->setSmk512(QSettings().value(smkKey(), true).toBool());
     resetMachine();
-    if (ok) status_->setText(on ? "Контроллер AZБК установлен, машина перезапущена" : "Контроллер AZБК снят, машина перезапущена");
+    status_->setText(on ? "Контроллер AZБК установлен, машина перезапущена" : "Контроллер AZБК снят, машина перезапущена");
 }
 
 void MainWindow::setAzVga(bool on) {
@@ -892,9 +906,27 @@ void MainWindow::chooseAzSd() {
     const QString cur = QString::fromStdString(azConfig().sdDir);
     const QString dir = QFileDialog::getExistingDirectory(this, "Каталог карты SD AZБК (с AZ.INI)", cur);
     if (dir.isEmpty()) return;
-    QSettings().setValue("azbk/sd", dir);
+    bk::Azbk::Config c = azConfig();
+    c.sdDir = dir.toStdString();
+    c.writeDir = azWriteDir(dir, c.rw).toStdString();
+    std::string err;
+    if (!bk::Azbk::usable(c, &err)) {
+        status_->setText(QString("Карта SD не подходит: %1").arg(QString::fromStdString(err)));
+        return;
+    }
+    const QString prevSd = azCli_.sd;
+    QSettings st;
+    const QVariant prev = st.value("azbk/sd");
+    st.setValue("azbk/sd", dir);
     azCli_.sd.clear();
-    if (board_->azbk() && applyAz(true)) resetMachine();
+    if (board_->azbk()) {
+        if (!applyAz(true)) {                          // не включилась — прежняя карта
+            if (prev.isValid()) st.setValue("azbk/sd", prev); else st.remove("azbk/sd");
+            azCli_.sd = prevSd;
+            return;
+        }
+        resetMachine();
+    }
     status_->setText("Карта SD AZБК: " + dir);
 }
 
@@ -906,7 +938,8 @@ void MainWindow::chooseAzUnit0() {
     QSettings().setValue("azbk/unit0", path);
     azCli_.units.erase(0);
     if (!board_->azbk()) { setAzbk(true); return; }
-    if (applyAz(true)) resetMachine();
+    board_->setAzUnit(0, path.toStdString());
+    resetMachine();
     status_->setText("Диск AZ0: " + QFileInfo(path).fileName());
 }
 
@@ -1167,7 +1200,7 @@ bool MainWindow::insertDiskAndBoot(const QString& path, int drive) {
     // С AZБК дискеты нет: образ становится его диском AZ0/AZ1 на этот запуск.
     if (board_->azbk()) {
         azCli_.units[drive] = path;
-        if (!applyAz(true)) return false;
+        board_->setAzUnit(drive, path.toStdString());   // AZ1 — на ходу, AZ0 — с загрузкой
         if (drive == 0) resetMachine();
         status_->setText(QString("Диск AZ%1: %2").arg(drive).arg(QFileInfo(path).fileName()));
         return true;

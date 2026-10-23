@@ -33,6 +33,12 @@ public:
     std::function<void()> resetMachine;        // команда 037
 
     bool init(const Config& c, std::string* err);   // AZ.INI: ПЗУ, логотип, диски
+    // Годится ли карта (каталог и AZ.INI на нём или в каталоге записи) — до того, как
+    // что-то менять в машине.
+    static bool usable(const Config& c, std::string* err);
+    // Диск AZn на ходу (пустой путь — снять, вернётся по AZ.INI при перезапуске МК).
+    // Остальное состояние платы не трогается.
+    void setUnit(int unit, const std::string& host);
     void reboot();                                   // 037: МК перезапускается, AZ.INI заново
     void close();
     const Config& config() const { return cfg_; }
@@ -135,7 +141,9 @@ private:
     uint32_t bootErrors_ = 0, bootUnit_ = 0x20;
     uint32_t bootAddr_ = 0;
     uint32_t sizeTmp_ = 0;                  // размер диска между двумя чтениями DR
-    std::vector<uint16_t> bootStream_;      // программа BOOT1/BOOT2: {адрес, n, слова}
+    // Программы потоков загрузки {адрес, n, слова}: BOOT1 (B4) и BOOT2 (B6), по умолчанию
+    // обе — встроенный bootB; [ALTBOOT] подменяет одну из них.
+    std::vector<uint16_t> bootB4_, bootB6_;
     uint32_t bootPos_ = 0;
     int lastCmd_ = -1;
     uint64_t ncmd_ = 0;
@@ -144,9 +152,14 @@ private:
     // Каталог (команды 003/013) и файлы (050–055).
     std::vector<std::string> dirList_;
     std::vector<std::string> dirHost_;
+    std::string dirPath_;                   // открытый каталог на хосте (для снимка)
     size_t dirPos_ = 0;
     bool dirOpen_ = false;
+    void listDir(const std::string& host);
     FILE* any_ = nullptr;
+    std::string anyHost_;                   // открытый файл (для снимка)
+    bool anyWrite_ = false;
+    bool reopenFile(int u, const std::string& host, bool rw);
     uint32_t anyPos_ = 0, anySize_ = 0;
     int64_t timeOffset_ = 0;                // часы AZ относительно хоста, с
 };

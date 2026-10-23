@@ -61,6 +61,10 @@ public:
     // Включить плату: память, регистры, AZ.INI (ПЗУ, заставка, диски). false — нет карты SD.
     bool powerOn(const Config& c, bool bk11, int cpuHz, std::string* err = nullptr);
     void release();                                  // вынуть плату (память освобождается)
+    // Годится ли конфигурация (карта SD с AZ.INI) — проверить, ничего не меняя.
+    static bool usable(const Config& c, std::string* err = nullptr);
+    // Диск AZn на ходу (пустой путь — как в AZ.INI); память и регистры платы не трогаются.
+    void setUnit(int unit, const std::string& host);
     bool on() const { return !mem_.empty(); }
     void setMachine(bool bk11, int cpuHz) { bk11_ = bk11; cpuHz_ = cpuHz; }
     const Config& config() const { return cfg_; }
@@ -88,8 +92,14 @@ public:
     // 177662 на БК-0010 отвечает плата (эмуляция 11М): адрес и значение — у неё.
     bool emu11() const { return (mmu_ & (MMU_BK11EMU | MMU_BRDTYPE)) == (MMU_BK11EMU | MMU_BRDTYPE); }
 
-    // Кадр VGA 1024×768 (0xAARRGGBB), последний досчитанный.
+    // Кадр VGA 1024×768 (0xAARRGGBB), последний досчитанный. Рисовать построчно по ходу
+    // растра (live) нужно, только когда кадр смотрят (окно, запись видео): это треть
+    // времени эмуляции. Иначе кадр рисуется целиком по запросу (renderNow) — текущими
+    // значениями регистров, без эффектов посреди кадра.
     const uint32_t* frame() const { return front_.data(); }
+    void setLiveRender(bool on) { live_ = on; }
+    bool liveRender() const { return live_; }
+    const uint32_t* renderNow();
     uint64_t frames() const { return frames_; }
 
     // Отладка, MCP, тесты.
@@ -175,6 +185,8 @@ private:
     int      srcLine_ = 0, rep_ = 0;                 // строка изображения, повтор строки
     struct FrameRegs { int mode, llen, xs, ys, lines; uint16_t vscr[3]; uint8_t hscr[3]; uint16_t page[3]; } fr_{};
     bool     sync_ = false;
+    bool     live_ = true;
+    void     latchFrame();                           // параметры кадра — в fr_ (строка 0)
     std::vector<uint32_t> back_, front_;
     uint32_t lineBuf_[VGA_W];
     uint64_t frames_ = 0;

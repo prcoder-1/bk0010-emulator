@@ -1,5 +1,6 @@
 #include "Az.h"
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
@@ -53,6 +54,17 @@ bool Azbk::powerOn(const Config& c, bool bk11, int cpuHz, std::string* err) {
     soundOut();
     if (ayModel) ayModel(ym());
     return ok;
+}
+
+bool Azbk::usable(const Config& c, std::string* err) {
+    AzCtrl::Config cc;
+    cc.sdDir = c.sdDir; cc.writeDir = c.writeDir;
+    return AzCtrl::usable(cc, err);
+}
+
+void Azbk::setUnit(int unit, const std::string& host) {
+    if (host.empty()) cfg_.units.erase(unit); else cfg_.units[unit] = host;
+    if (on()) ctrl_.setUnit(unit, host);
 }
 
 void Azbk::release() {
@@ -242,7 +254,10 @@ bool Azbk::mpiRead(uint16_t addr, uint16_t& v) {
 bool Azbk::mpiPeek(uint16_t addr, uint16_t& v) const {
     if (!on()) return false;
     const uint16_t a = addr & ~1;
-    if (a >= 0177600) return false;
+    if (a >= 0177600) {
+        if (a == 0177716) { v = sel1(); return true; }
+        return false;
+    }
     if (a >= 0177000) return const_cast<Azbk*>(this)->regRead(a, v, true);
     if (!active(a >> 12)) return false;
     v = memWord(phys(a));
@@ -469,57 +484,56 @@ uint16_t Azbk::reg(uint16_t addr) const {
 
 // ---- Сводки ------------------------------------------------------------------------
 
+// printf в std::string без ограничения длины (кириллица в UTF-8 — по два байта).
+static std::string strf(const char* f, ...) __attribute__((format(printf, 1, 2)));
+static std::string strf(const char* f, ...) {
+    va_list ap, ap2;
+    va_start(ap, f);
+    va_copy(ap2, ap);
+    const int n = std::vsnprintf(nullptr, 0, f, ap);
+    va_end(ap);
+    std::string s(n > 0 ? size_t(n) : 0, '\0');
+    if (n > 0) std::vsnprintf(&s[0], size_t(n) + 1, f, ap2);
+    va_end(ap2);
+    return s;
+}
+
 std::string Azbk::summary() const {
     if (!on()) return "AZБК: нет";
-    char b[200];
-    std::snprintf(b, sizeof b, "AZБК: 177346=%06o окна=%06o RO=%06o тень=%06o видео 177230=%06o стр %o/%o/%o",
-                  mmu_, winCtrl_, winRo_, winShdw_, scrCsr_, pageL0_, pageL1_, pageL2_);
-    return b;
+    return strf("AZБК: 177346=%06o окна=%06o RO=%06o тень=%06o видео 177230=%06o стр %o/%o/%o",
+                mmu_, winCtrl_, winRo_, winShdw_, scrCsr_, pageL0_, pageL1_, pageL2_);
 }
 
 std::string Azbk::details() const {
     if (!on()) return "AZБК не установлен";
-    std::string s;
-    char b[256];
-    s += "Окна маппера (адрес: страница [активно/RO/тень]):\n";
-    for (int w = 0; w < 16; ++w) {
-        std::snprintf(b, sizeof b, "  %06o: %05o %c%c%c%s", w << 12, map_[w], active(w) ? 'A' : '-',
-                      ((winRo_ >> w) & 1) ? 'R' : '-', ((winShdw_ >> w) & 1) ? 'S' : '-', (w & 3) == 3 ? "\n" : "");
-        s += b;
-    }
+    std::string s = "Окна маппера (адрес: страница [активно/RO/тень]):\n";
+    for (int w = 0; w < 16; ++w)
+        s += strf("  %06o: %05o %c%c%c%s", w << 12, map_[w], active(w) ? 'A' : '-',
+                  ((winRo_ >> w) & 1) ? 'R' : '-', ((winShdw_ >> w) & 1) ? 'S' : '-', (w & 3) == 3 ? "\n" : "");
     static const char* kTimer[] = {"выкл", "выкл", "60 Гц", "48 Гц"};
-    std::snprintf(b, sizeof b,
-                  "177346=%06o: %s, доработка 037 %s, 037 %s, эмуляция 11М %s, ПЗУ 11М %s, частота %d, таймер %s%s\n",
-                  mmu_, (mmu_ & MMU_BRDTYPE) ? "БК-0010" : "БК-0011М", (mmu_ & MMU_REVTYPE) ? "есть" : "нет",
-                  (mmu_ & MMU_037_OFF) ? "откл" : "вкл", (mmu_ & MMU_BK11EMU) ? "вкл" : "выкл",
-                  (mmu_ & MMU_ROM11) ? "вкл" : "выкл", (mmu_ >> 6) & 7, kTimer[(mmu_ >> 2) & 3],
-                  (mmu_ & MMU_SMK_WND1) ? ", окно 1 — СМК" : "");
-    s += b;
-    std::snprintf(b, sizeof b, "СМК 177350=%06o, 11М 177352=%06o\n", az130_, az716_);
-    s += b;
+    s += strf("177346=%06o: %s, доработка 037 %s, 037 %s, эмуляция 11М %s, ПЗУ 11М %s, частота %d, таймер %s%s\n",
+              mmu_, (mmu_ & MMU_BRDTYPE) ? "БК-0010" : "БК-0011М", (mmu_ & MMU_REVTYPE) ? "есть" : "нет",
+              (mmu_ & MMU_037_OFF) ? "откл" : "вкл", (mmu_ & MMU_BK11EMU) ? "вкл" : "выкл",
+              (mmu_ & MMU_ROM11) ? "вкл" : "выкл", (mmu_ >> 6) & 7, kTimer[(mmu_ >> 2) & 3],
+              (mmu_ & MMU_SMK_WND1) ? ", окно 1 — СМК" : "");
+    s += strf("СМК 177350=%06o, 11М 177352=%06o\n", az130_, az716_);
     static const int kBpp[] = {1, 2, 4, 8};
-    std::snprintf(b, sizeof b,
-                  "Видео 177230=%06o: %d бит/точку%s, строка %d слов, ×%d по X, ×%d по Y, рулон %d строк%s; "
-                  "страницы %o/%o/%o, скролл В %o/%o/%o Г %o/%o/%o, легаси-палитра %d%s; кадров %llu\n",
-                  scrCsr_, kBpp[scrCsr_ & 3], (scrCsr_ & 4) ? ", слои" : "", fr_.llen, fr_.xs, fr_.ys, fr_.lines,
-                  (scrCsr_ & 04000) ? ", синхр." : "", pageL0_, pageL1_, pageL2_, vscr_[0], vscr_[1], vscr_[2],
-                  hscr_[0], hscr_[1], hscr_[2], legacyPal_, smallScreen_ ? ", малый экран" : "",
-                  static_cast<unsigned long long>(frames_));
-    s += b;
-    std::snprintf(b, sizeof b, "Блиттер 177270=%06o стр %o, запусков %llu\n", blt_.readCtrl(), blt_.page(),
-                  static_cast<unsigned long long>(blt_.runs()));
-    s += b;
-    std::snprintf(b, sizeof b, "DMA 177160=%06o стр %o длина %u %s; Covox L=%06o R=%06o 177212=%o; AY (%s) 1: %o/%o 2: %o/%o\n",
-                  dmaCsr_, dmaPage_, dmaLen_, dmaPlaying_ ? "играет" : "стоит", cvxL_, cvxR_, cvxCsr_,
-                  ym() ? "YM2149" : "AY-3-8910", ay1a_, ay1d_, ay2a_, ay2d_);
-    s += b;
+    s += strf("Видео 177230=%06o: %d бит/точку%s, строка %d слов, ×%d по X, ×%d по Y, рулон %d строк%s; "
+              "страницы %o/%o/%o, скролл В %o/%o/%o Г %o/%o/%o, легаси-палитра %d%s; кадров %llu%s\n",
+              scrCsr_, kBpp[scrCsr_ & 3], (scrCsr_ & 4) ? ", слои" : "", fr_.llen, fr_.xs, fr_.ys, fr_.lines,
+              (scrCsr_ & 04000) ? ", синхр." : "", pageL0_, pageL1_, pageL2_, vscr_[0], vscr_[1], vscr_[2],
+              hscr_[0], hscr_[1], hscr_[2], legacyPal_, smallScreen_ ? ", малый экран" : "",
+              static_cast<unsigned long long>(frames_), live_ ? "" : " (рисуется по запросу)");
+    s += strf("Блиттер 177270=%06o стр %o, запусков %llu\n", blt_.readCtrl(), blt_.page(),
+              static_cast<unsigned long long>(blt_.runs()));
+    s += strf("DMA 177160=%06o стр %o длина %u %s; Covox L=%06o R=%06o 177212=%o; AY (%s) 1: %o/%o 2: %o/%o\n",
+              dmaCsr_, dmaPage_, dmaLen_, dmaPlaying_ ? "играет" : "стоит", cvxL_, cvxR_, cvxCsr_,
+              ym() ? "YM2149" : "AY-3-8910", ay1a_, ay1d_, ay2a_, ay2d_);
     s += "Контроллер: " + ctrl_.summary() + "\n";
     s += "Карта SD: " + cfg_.sdDir + (cfg_.rw ? " (запись в образы)" : "") + "\n";
-    for (const auto& u : ctrl_.units()) {
-        std::snprintf(b, sizeof b, "  AZ%d: %s (%u блоков)%s%s%s\n", u.unit, u.name.c_str(), u.blocks,
-                      u.open ? "" : " НЕ ОТКРЫТ", u.rw ? " запись" : "", u.dirty ? " изменён в памяти" : "");
-        s += b;
-    }
+    for (const auto& u : ctrl_.units())
+        s += strf("  AZ%d: %s (%u блоков)%s%s%s\n", u.unit, u.name.c_str(), u.blocks,
+                  u.open ? "" : " НЕ ОТКРЫТ", u.rw ? " запись" : "", u.dirty ? " изменён в памяти" : "");
     return s;
 }
 

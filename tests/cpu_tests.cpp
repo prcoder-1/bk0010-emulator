@@ -3689,6 +3689,155 @@ int main(int argc, char** argv) {
         CHECK(b.loadStateMem(plain) && !b.azbk(), "AZ/снимок: снимок без платы её снимает");
     }
 
+    SECTION("AZБК: негодная карта, возврат СМК и КНГМД, диск на ходу")
+    {
+        azSetup();
+        Board b;
+        b.setMachine(Machine::Bk0010);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.setSmk512(true);
+        b.reset();
+        Azbk::Config bad; bad.sdDir = (azDir / "нет").string(); bad.writeDir = azWr.string();
+        std::string err;
+        CHECK(!b.setAzbk(true, bad, &err) && !err.empty(), "AZ/ревью: карта без AZ.INI — отказ с причиной");
+        CHECK(!b.azbk() && b.smk512(), "AZ/ревью: после отказа машина как была (СМК на месте)");
+        // Дискета в приводе A: с AZ контроллер НГМД снят, без него — вернулся.
+        const fs::path flop = azDir / "f.bkd";
+        { std::ofstream f(flop, std::ios::binary); std::vector<char> z(819200, 0); f.write(z.data(), z.size()); }
+        CHECK(b.attachDisk(0, flop.string(), true), "AZ/ревью: дискета вставлена");
+        CHECK(b.setAzbk(true, azCfg(), &err), "AZ/ревью: плата ставится");
+        CHECK(!b.smk512() && !b.diskControllerOn(), "AZ/ревью: с AZ СМК и КНГМД сняты с шины");
+        b.setSmk512(false);
+        CHECK(!b.smk512(), "AZ/ревью: СМК при AZ не включается");
+        b.setSmk512(true);
+        b.az().setMemWord(0x1000, 0123);
+        // Образ AZ0 на ходу: память платы та же, контроллер видит новый образ.
+        const fs::path img2 = azDir / "T2.IMG";
+        { std::ofstream d(img2, std::ios::binary); std::vector<char> z(8 * 512, 7); d.write(z.data(), z.size()); }
+        CHECK(b.setAzUnit(0, img2.string()), "AZ/ревью: AZ0 сменён");
+        Azbk& a = b.az();
+        azW(a, 0177220, 0); azW(a, 0177222, 0); azW(a, 0177220, 1); azW(a, 0177220, 7);
+        CHECK(azR(a, 0177222) == 8 && a.memWord(0x1000) == 0123, "AZ/ревью: новый AZ0 — 8 блоков, память платы цела");
+        b.setAzbk(false);
+        CHECK(b.smk512() && b.diskControllerOn(), "AZ/ревью: без AZ — СМК (последняя настройка) и КНГМД с дискетой");
+    }
+
+    SECTION("AZБК: БК-0010 с эмуляцией 11М, 0177716, сводка, отрисовка по запросу")
+    {
+        azSetup();
+        Board b;
+        b.setMachine(Machine::Bk0010);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        Azbk::Config c = azCfg(); c.mod037 = true;
+        b.setAzbk(true, c);
+        b.reset();
+        Memory& m = b.memory();
+        // Ждущая программа в ОЗУ БК: WAIT / BR .-2; прерывание 0100 считает кадры в 03000.
+        m.pokeWord(01000, 01); m.pokeWord(01002, 0776);
+        m.pokeWord(02000, 005237); m.pokeWord(02002, 03000); m.pokeWord(02004, 2);
+        m.pokeWord(0100, 02000); m.pokeWord(0102, 0);
+        auto frames = [&](uint16_t mmu) {
+            m.writeWord(0177346, mmu);
+            m.pokeWord(03000, 0);
+            b.cpu().r[6] = 0700; b.cpu().r[7] = 01000; b.cpu().psw = 0;
+            for (int i = 0; i < 5; ++i) b.runFrame();
+            return m.peekWord(03000);
+        };
+        CHECK(frames(Azbk::MMU_BRDTYPE) >= 4, "AZ/ревью: БК-0010 с AZ — своё кадровое прерывание идёт");
+        CHECK(frames(Azbk::MMU_BRDTYPE | Azbk::MMU_BK11EMU) == 0, "AZ/ревью: эмуляция 11М — у БК-0010 своего прерывания нет");
+        CHECK(frames(Azbk::MMU_BRDTYPE | Azbk::MMU_BK11EMU | Azbk::MMU_V100 | Azbk::MMU_50HZ) >= 4, "AZ/ревью: эмуляция 11М — таймер AZ 48 Гц");
+        m.writeWord(0177346, Azbk::MMU_BRDTYPE | Azbk::MMU_BK11EMU | Azbk::MMU_037_OFF);
+        CHECK((b.peekReg(0177716) & 040000) != 0, "AZ/ревью: peekReg 0177716 — с ответом платы (SEL1 11М)");
+        const std::string d = b.az().details();
+        CHECK(d.size() > 1000 && d.find("AZ0:") != std::string::npos && d.find("Карта SD") != std::string::npos,
+              "AZ/ревью: сводка платы целиком (без обрезки)");
+        // Кадр по запросу совпадает с построчным, пока картинка не меняется.
+        m.writeWord(0177346, Azbk::MMU_BRDTYPE);
+        m.writeWord(0177230, 062223);
+        m.writeWord(0177232, 040);
+        for (uint32_t i = 0; i < 0x20000; ++i) b.az().setMemWord((040u << 12) + i * 2, static_cast<uint16_t>(i * 0x9E37));
+        CHECK(!b.azLive(), "AZ/ревью: по умолчанию кадр VGA не рисуется построчно");
+        b.runFrame(); b.runFrame();
+        const Board::Frame f0 = b.displayFrame();
+        const std::vector<uint32_t> want(f0.px, f0.px + size_t(f0.w) * f0.h);
+        b.setAzLive(true);
+        b.runFrame(); b.runFrame();
+        const Board::Frame f1 = b.displayFrame();
+        CHECK(f1.w == Azbk::VGA_W && std::equal(want.begin(), want.end(), f1.px), "AZ/ревью: кадр по запросу = построчный");
+        bool lit = false;
+        for (uint32_t px : want) lit |= (px & 0xffffff) != 0;
+        CHECK(lit, "AZ/ревью: в кадре есть картинка");
+    }
+
+    SECTION("AZБК: [ALTBOOT] подменяет только свой поток, сетевые 035/036 дают прерывание")
+    {
+        auto boot2 = [&](std::initializer_list<uint16_t> prog) {
+            azSetup();
+            std::ofstream(azDir / "AZ.INI", std::ios::app) << "[ALTBOOT]\r\nB6=0:/ALT.BIN\r\nB4=0:/NONE.BIN\r\n";
+            { std::ofstream f(azDir / "ALT.BIN", std::ios::binary); for (uint16_t w : prog) f.write(reinterpret_cast<const char*>(&w), 2); }
+            Azbk a;
+            a.powerOn(azCfg(), true, 4000000);
+            std::vector<uint16_t> v;
+            for (int i = 0; i < 10; ++i) v.push_back(azR(a, 0177226));
+            return v;
+        };
+        const std::vector<uint16_t> v = boot2({02000, 3, 0111, 0222, 0333});
+        CHECK(v[3] == 02000 && v[5] == 0111 && v[7] == 0222 && v[9] == 0x20,
+              "AZ/ALTBOOT: B6 — своя программа в BOOT2, последнее слово — номер диска");
+        CHECK(boot2({02000, 3, 0111, 0, 0333})[3] == 010000, "AZ/ALTBOOT: нулевое слово — ALTBOOT отключён, остаётся bootB");
+        azSetup();
+        Azbk a;
+        int irqs = 0;
+        a.irqVector = [&] { ++irqs; };
+        a.powerOn(azCfg(), true, 4000000);
+        azW(a, 0177220, 0135);
+        azW(a, 0177220, 0136);
+        CHECK(irqs == 2, "AZ/контроллер: 035/036 с IE — прерывание по 0174, как у прошивки");
+    }
+
+    SECTION("AZБК: снимок — хвост AZB1, СМК до платы, открытый файл и сменённый диск")
+    {
+        azSetup();
+        { std::ofstream f(azDir / "BIG.DAT", std::ios::binary); for (int i = 0; i < 512; ++i) { const uint16_t w = static_cast<uint16_t>(i); f.write(reinterpret_cast<const char*>(&w), 2); } }
+        const fs::path img2 = azDir / "T2.IMG";
+        { std::ofstream d(img2, std::ios::binary); std::vector<char> z(6 * 512, 1); d.write(z.data(), z.size()); }
+        Board b;
+        b.setMachine(Machine::Bk0011m);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.setSmk512(true);
+        b.setAzbk(true, azCfg());
+        b.reset();
+        b.setAzUnit(1, img2.string());
+        Azbk& a = b.az();
+        azW(a, 0177220, 023);
+        const char* nm = "0:/BIG.DAT";
+        for (int i = 0; i < 256; ++i) {
+            const int k = 2 * i, len = static_cast<int>(std::strlen(nm));
+            azW(a, 0177222, static_cast<uint16_t>((k < len ? nm[k] : 0) | ((k + 1 < len ? nm[k + 1] : 0) << 8)));
+        }
+        azW(a, 0177220, 050); azW(a, 0177220, 052);         // первые 512 байт прочитаны
+        std::vector<uint8_t> st;
+        b.saveStateMem(st);
+        const char tag[4] = {'A', 'Z', 'B', '1'};
+        CHECK(std::search(st.begin(), st.end(), tag, tag + 4) != st.end(), "AZ/снимок: плата — отдельным хвостом AZB1");
+        Board c;
+        c.setMachine(Machine::Bk0011m);
+        c.loadRoms(BK_DEFAULT_ROM_DIR);
+        c.setSmk512(false);
+        c.reset();
+        CHECK(c.loadStateMem(st) && c.azbk(), "AZ/снимок: плата встаёт из снимка");
+        Azbk& z = c.az();
+        azW(z, 0177220, 052); azW(z, 0177220, 022);
+        CHECK(azR(z, 0177222) == 256, "AZ/снимок: открытый файл читается дальше с той же позиции");
+        azW(z, 0177220, 0); azW(z, 0177222, 1); azW(z, 0177220, 1); azW(z, 0177220, 7);
+        CHECK(azR(z, 0177222) == 6, "AZ/снимок: AZ1, сменённый на ходу, вернулся");
+        c.setAzbk(false);
+        CHECK(c.smk512(), "AZ/снимок: СМК, стоявшая до платы, вернулась после её снятия");
+        std::vector<uint8_t> plain;
+        c.saveStateMem(plain);
+        CHECK(std::search(plain.begin(), plain.end(), tag, tag + 4) == plain.end(), "AZ/снимок: без платы хвоста AZB1 нет");
+    }
+
     SECTION("AZБК: прошивка 00019 (roms/azbk) — БК-0011М и БК-0010-01 доходят до BIOS")
     {
         const std::string sd = std::string(BK_DEFAULT_ROM_DIR) + "/azbk";
