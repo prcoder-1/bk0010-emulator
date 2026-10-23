@@ -181,8 +181,11 @@ public:
     // память и ПЗУ БК; где окно не подключено, отвечает сама БК (на БК-0010 Бейсик
     // заблокирован — плата управляет памятью с 0120000). Включение — как
     // установка платы в выключенную машину: после него нужен reset(). false — нет карты SD
-    // (err — почему).
+    // (err — почему); тогда машина не меняется. Снятие платы возвращает СМК-512 (её
+    // setSmk512 при AZ лишь запоминает) и контроллер НГМД, если в приводах есть дискеты.
     bool setAzbk(bool on, const Azbk::Config& cfg = {}, std::string* err = nullptr);
+    // Сменить образ AZn на ходу (пусто — убрать); сброса нет, это дело вызывающего.
+    bool setAzUnit(int unit, const std::string& host);
     bool azbk() const { return azOn_; }
     const Azbk& az() const { return az_; }
     Azbk&       az()       { return az_; }
@@ -190,8 +193,12 @@ public:
     void setAzVga(bool on) { azVga_ = on; }
     bool azVga() const { return azVga_; }
     struct Frame { const uint32_t* px; int w, h; };
-    Frame displayFrame() const {
-        if (azOn_ && azVga_) return {az_.frame(), Azbk::VGA_W, Azbk::VGA_H};
+    // Кадр VGA рисуется построчно, только если setAzLive(true) (окно GUI, запись видео);
+    // иначе displayFrame() рисует его целиком сейчас.
+    void setAzLive(bool on) { azLive_ = on; az_.setLiveRender(on); }
+    bool azLive() const { return azLive_; }
+    Frame displayFrame() {
+        if (azOn_ && azVga_) return {az_.renderNow(), Azbk::VGA_W, Azbk::VGA_H};
         return {screen_.pixels(), Screen::TEX_W, Screen::TEX_H};
     }
 
@@ -480,6 +487,8 @@ public:
     // отложенные события клавиатуры, взведённые прерывания, фаза таймера.
     void saveStateExt(std::vector<uint8_t>& out) const;
     void loadStateExt(const std::vector<uint8_t>& in, size_t off);
+    void loadBkx1(const std::vector<uint8_t>& in, size_t off, size_t end);
+    void loadAzTail(const std::vector<uint8_t>& in, size_t off, size_t end);
 private:
     // Общие куски обоих форматов снимка (раскладка — у saveStateMem в Board.cpp).
     struct SnapReader;
@@ -559,6 +568,8 @@ private:
     Azbk   az_;                    // контроллер AZБК
     bool   azOn_ = false;
     bool   azVga_ = true;
+    bool   azLive_ = false;          // кадр AZ построчно (его смотрят) или по запросу
+    bool   smkBeforeAz_ = false;     // СМК-512 до установки AZ — вернётся при снятии
     bool   azResetPending_ = false;  // команда 037: сброс на границе кадра
     bool   azIrqPending_ = false;    // запрос контроллера по вектору 0174
 

@@ -191,13 +191,14 @@ void AzCtrl::loadIni() {
     closeDisks();
     bootErrors_ = 0;
     bootUnit_ = 0x20;
-    bootStream_.assign(std::begin(kBootB), std::end(kBootB));
+    bootB4_.assign(std::begin(kBootB), std::end(kBootB));
+    bootB6_ = bootB4_;
     logo_ = false;
     // Своя копия AZ.INI (её пишет Setup) — главнее карты, как и EEPROM.
     const std::string ini = readPath("AZ.INI");
     FILE* f = ini.empty() ? nullptr : std::fopen(ini.c_str(), "rb");
     std::map<int, std::string> disks;
-    std::string altboot;
+    std::string altboot, altKey;
     if (f) {
         std::string section, line;
         int c;
@@ -229,7 +230,8 @@ void AzCtrl::loadIni() {
             } else if (section == "[DISKS]" && key.size() >= 2 && key[0] == 'D') {
                 const int u = std::atoi(key.c_str() + 1);
                 if (u >= 0 && u < MAX_DISKS) disks[u] = val;
-            } else if (section == "[ALTBOOT]" && (key == "B4" || key == "B6") && altboot.empty()) {
+            } else if (section == "[ALTBOOT]" && (key == "B4" || key == "B6") && altKey.empty()) {
+                altKey = key;                      // прошивка берёт только первую запись
                 altboot = val;
             }
         };
@@ -254,30 +256,60 @@ void AzCtrl::loadIni() {
         if (kv.first < 0 || kv.first >= MAX_DISKS) continue;
         openDisk(kv.first, kv.second, "0:/" + upper(fs::path(kv.second).filename().string()));
     }
+    // [ALTBOOT]: файл {адрес, n, слова}; подменяет только свой поток. Последнее слово
+    // программы прошивка заменяет номером загрузочного диска (на этот момент 0x20).
+    // Нулевые слова прошивка выбрасывает и отключает ALTBOOT — тогда остаётся bootB.
     if (!altboot.empty()) {
-        const std::string p = resolve(cfg_.sdDir, altboot);
+        const std::string p = readPath(altboot);
         if (FILE* a = p.empty() ? nullptr : std::fopen(p.c_str(), "rb")) {
             std::vector<uint16_t> prog;
             uint8_t b[2];
             while (std::fread(b, 1, 2, a) == 2 && prog.size() < 0x406) prog.push_back(static_cast<uint16_t>(b[0] | (b[1] << 8)));
             std::fclose(a);
-            if (prog.size() >= 2 && prog[0] && prog[1] && prog.size() >= 2u + prog[1]) bootStream_ = prog;
+            bool ok = prog.size() >= 2 && prog[0] && prog[1] && 6u + 2u * prog[1] <= 0x80C && prog.size() >= 2u + prog[1];
+            if (ok) {
+                prog.resize(2u + prog[1]);
+                ok = std::find(prog.begin() + 2, prog.end(), uint16_t(0)) == prog.end();
+            }
+            if (ok) {
+                prog.back() = static_cast<uint16_t>(bootUnit_);
+                (altKey == "B4" ? bootB4_ : bootB6_) = prog;
+            }
         }
     }
+    // Ошибки разбора AZ.INI — загрузчик AZLDR должен спросить диск (номер > 7).
+    if (bootErrors_) bootUnit_ = 8;
+}
+
+bool AzCtrl::usable(const Config& c, std::string* err) {
+    std::error_code ec;
+    if (c.sdDir.empty() || !fs::is_directory(c.sdDir, ec)) {
+        if (err) *err = "нет каталога карты SD «" + c.sdDir + "»";
+        return false;
+    }
+    if (resolve(c.sdDir, "AZ.INI").empty() && (c.writeDir.empty() || resolve(c.writeDir, "AZ.INI").empty())) {
+        if (err) *err = "в каталоге карты SD «" + c.sdDir + "» нет AZ.INI";
+        return false;
+    }
+    return true;
 }
 
 bool AzCtrl::init(const Config& c, std::string* err) {
     cfg_ = c;
-    if (cfg_.sdDir.empty() || !fs::is_directory(cfg_.sdDir)) {
-        if (err) *err = "нет каталога карты SD «" + cfg_.sdDir + "»";
-        return false;
-    }
-    reboot();
-    if (readPath("AZ.INI").empty()) {
-        if (err) *err = "в каталоге карты SD «" + cfg_.sdDir + "» нет AZ.INI";
-        return false;
-    }
-    return true;
+    const bool ok = usable(c, err);
+    if (ok) reboot();
+    return ok;
+}
+
+void AzCtrl::setUnit(int u, const std::string& host) {
+    if (u < 0 || u >= MAX_DISKS) return;
+    Unit& un = units_[u];
+    if (un.f) std::fclose(un.f);
+    un = Unit{};
+    std::memset(&ram_[R_DISKS + u * DISK_WORDS], 0, DISK_WORDS * 2);
+    if (host.empty()) { cfg_.units.erase(u); return; }
+    cfg_.units[u] = host;
+    openDisk(u, host, "0:/" + upper(fs::path(host).filename().string()));
 }
 
 void AzCtrl::reboot() {
@@ -288,8 +320,8 @@ void AzCtrl::reboot() {
     unit_ = 0; block_ = 0; blkHiPending_ = false;
     xferBuf_ = R_BLK; xferLen_ = 0x100;
     bootAddr_ = 0; bootPos_ = 0;
-    dirOpen_ = false; dirList_.clear(); dirHost_.clear(); dirPos_ = 0;
-    anyPos_ = 0;
+    dirOpen_ = false; dirList_.clear(); dirHost_.clear(); dirPath_.clear(); dirPos_ = 0;
+    anyPos_ = 0; anyHost_.clear(); anyWrite_ = false;
     lastCmd_ = -1;
 }
 
@@ -316,7 +348,8 @@ uint16_t AzCtrl::read(int reg, bool peek) {
     int64_t v = 0;
     bool streamEnd = false;
     Reg& r = regs_[reg & 3];
-    auto b = [&](uint32_t i) -> uint16_t { return i < bootStream_.size() ? bootStream_[i] : 0; };
+    auto b = [&](uint32_t i) -> uint16_t { return i < bootB4_.size() ? bootB4_[i] : 0; };
+    auto b6 = [&](uint32_t i) -> uint16_t { return i < bootB6_.size() ? bootB6_[i] : 0; };
     switch (reg & 3) {
     case 0:                                   // CSR; в цепочке BOOT1 — команды
         switch (r.rd) {
@@ -393,8 +426,8 @@ uint16_t AzCtrl::read(int reg, bool peek) {
         switch (r.rd) {
         case 0:
             bootPos_ = 0;
-            bootAddr_ = b(bootPos_++);
-            r.count = b(bootPos_++);
+            bootAddr_ = b6(bootPos_++);
+            r.count = b6(bootPos_++);
             r.rd = 2886; v = 0106447; break;                  // MTPS -(PC)
         case 2886: r.rd = 2887; v = 0340; break;
         case 2887: r.rd = 2888; v = 014700; break;            // MOV -(PC),R0
@@ -402,7 +435,7 @@ uint16_t AzCtrl::read(int reg, bool peek) {
         case 2889:
         copyNext:
             r.rd = 2891; v = 014720; break;                   // MOV -(PC),(R0)+
-        case 2891: r.rd = 2892; v = b(bootPos_++); break;
+        case 2891: r.rd = 2892; v = b6(bootPos_++); break;
         case 2892:
             if (--r.count > 0) goto copyNext;
             r.rd = 2895; v = 014720; break;
@@ -500,7 +533,8 @@ int32_t AzCtrl::command(uint16_t v) {
     case 26: streamOut(R_TIME, 14); return 0;                        // (032)
     case 27: streamIn(R_SETTIME, 7); return 0;                       // (033)
     case 28: resetRegs(); j = 28; break;                             // (034) установить часы
-    case 29: case 30: resetRegs(); return 0;                         // (035/036) NTP — нет сети
+    case 29: case 30: resetRegs(); j = cmd; break;                   // (035/036) NTP — нет сети, но долгая
+
     case 31:                                                         // (037) перезапуск AZ и БК
         resetRegs();
         if (resetMachine) resetMachine();
@@ -600,13 +634,19 @@ int32_t AzCtrl::dirOpen() {
     std::string host = name.empty() || name == "0:" || name == "0:/" ? cfg_.sdDir : resolve(cfg_.sdDir, name);
     std::error_code ec;
     if (host.empty() || !fs::is_directory(host, ec)) return 0x8200 | 5;   // FR_NO_PATH
+    listDir(host);
+    return 0;
+}
+
+void AzCtrl::listDir(const std::string& host) {
     dirList_.clear(); dirHost_.clear(); dirPos_ = 0;
+    std::error_code ec;
     std::vector<std::pair<std::string, std::string>> ents;
     for (const auto& e : fs::directory_iterator(host, ec)) ents.push_back({upper(e.path().filename().string()), e.path().string()});
     std::sort(ents.begin(), ents.end());
     for (auto& e : ents) { dirList_.push_back(e.first); dirHost_.push_back(e.second); }
+    dirPath_ = host;
     dirOpen_ = true;
-    return 0;
 }
 
 int32_t AzCtrl::dirRead() {
@@ -727,6 +767,8 @@ void AzCtrl::fileOpenRead() {
     anyPos_ = 0;
     const std::string p = readPath(name);
     any_ = p.empty() || fs::is_directory(p) ? nullptr : std::fopen(p.c_str(), "rb");
+    anyHost_ = any_ ? p : std::string();
+    anyWrite_ = false;
     uint32_t size = 0;
     if (any_) { std::fseek(any_, 0, SEEK_END); size = static_cast<uint32_t>(std::ftell(any_)); }
     w(R_ANYSIZE) = static_cast<uint16_t>(size); w(R_ANYSIZE + 1) = static_cast<uint16_t>(size >> 16);
@@ -748,6 +790,8 @@ void AzCtrl::fileOpenWrite() {
     const std::string p = writePath(cstr(R_XBUF, 256));
     anyPos_ = 0;
     any_ = p.empty() ? nullptr : std::fopen(p.c_str(), "wb");
+    anyHost_ = any_ ? p : std::string();
+    anyWrite_ = true;
     w(R_ANYSIZE) = 0; w(R_ANYSIZE + 1) = 0;
 }
 
@@ -852,12 +896,19 @@ template <class T> bool getv(const uint8_t*& p, const uint8_t* e, T& v) {
 }
 
 void AzCtrl::saveState(std::vector<uint8_t>& out) const {
+    auto putStr = [&](const std::string& t) { putv(out, uint32_t(t.size())); out.insert(out.end(), t.begin(), t.end()); };
     out.insert(out.end(), reinterpret_cast<const uint8_t*>(ram_.data()),
                reinterpret_cast<const uint8_t*>(ram_.data() + ram_.size()));
     for (const Reg& r : regs_) { putv(out, int32_t(r.rd)); putv(out, int32_t(r.wr)); putv(out, r.buf); putv(out, r.count); }
     putv(out, csr_); putv(out, status_); putv(out, dataWr_); putv(out, int32_t(unit_)); putv(out, block_);
     putv(out, uint8_t(blkHiPending_)); putv(out, xferBuf_); putv(out, xferLen_); putv(out, bootErrors_);
     putv(out, bootUnit_); putv(out, bootAddr_); putv(out, bootPos_); putv(out, sizeTmp_); putv(out, timeOffset_);
+    // Открытые образы (в том числе смонтированные командой 004 — их нет в конфигурации).
+    uint8_t nu = 0;
+    for (const Unit& un : units_) nu += un.f ? 1 : 0;
+    putv(out, nu);
+    for (int i = 0; i < MAX_DISKS; ++i)
+        if (units_[i].f) { putv(out, uint8_t(i)); putStr(units_[i].host); putv(out, uint8_t(units_[i].rw)); }
     // Блоки, записанные на образы «только чтение», — часть состояния машины.
     uint32_t n = 0;
     for (const Unit& u : units_) n += static_cast<uint32_t>(u.overlay.size());
@@ -867,9 +918,29 @@ void AzCtrl::saveState(std::vector<uint8_t>& out) const {
             putv(out, uint8_t(i)); putv(out, kv.first);
             out.insert(out.end(), kv.second.begin(), kv.second.end());
         }
+    // Открытый каталог (003/013) и файл (050–055).
+    putv(out, uint8_t(dirOpen_)); putStr(dirPath_); putv(out, uint32_t(dirPos_));
+    putv(out, uint8_t(any_ != nullptr)); putStr(anyHost_); putv(out, uint8_t(anyWrite_)); putv(out, anyPos_);
+}
+
+bool AzCtrl::reopenFile(int u, const std::string& host, bool rw) {
+    Unit& un = units_[u];
+    if (un.f) std::fclose(un.f);
+    un.f = nullptr;
+    un.host = host;
+    un.rw = rw && cfg_.rw;
+    un.f = std::fopen(host.c_str(), un.rw ? "r+b" : "rb");
+    if (!un.f && un.rw) { un.rw = false; un.f = std::fopen(host.c_str(), "rb"); }
+    return un.f != nullptr;
 }
 
 bool AzCtrl::loadState(const uint8_t*& p, const uint8_t* end) {
+    auto getStr = [&](std::string& t) {
+        uint32_t len;
+        if (!getv(p, end, len) || static_cast<uint32_t>(end - p) < len) return false;
+        t.assign(reinterpret_cast<const char*>(p), len); p += len;
+        return true;
+    };
     const size_t rb = ram_.size() * 2;
     if (static_cast<size_t>(end - p) < rb) return false;
     std::memcpy(ram_.data(), p, rb); p += rb;
@@ -884,14 +955,36 @@ bool AzCtrl::loadState(const uint8_t*& p, const uint8_t* end) {
         || !getv(p, end, bootErrors_) || !getv(p, end, bootUnit_) || !getv(p, end, bootAddr_)
         || !getv(p, end, bootPos_) || !getv(p, end, sizeTmp_) || !getv(p, end, timeOffset_)) return false;
     unit_ = u; blkHiPending_ = hi != 0;
+    // Образы — как в снимке: закрыть все, открыть сохранённые (файл мог пропасть —
+    // тогда диск числится, но чтение даст ошибку, как на плате с вынутым образом).
+    for (Unit& un : units_) { if (un.f) std::fclose(un.f); un = Unit{}; }
+    uint8_t nu;
+    if (!getv(p, end, nu)) return false;
+    for (uint8_t i = 0; i < nu; ++i) {
+        uint8_t d, rw; std::string host;
+        if (!getv(p, end, d) || !getStr(host) || !getv(p, end, rw)) return false;
+        if (d < MAX_DISKS && !reopenFile(d, host, rw != 0))
+            std::fprintf(stderr, "AZБК: снимок — образ AZ%d (%s) не открывается\n", int(d), host.c_str());
+    }
     uint32_t n;
     if (!getv(p, end, n)) return false;
-    for (Unit& un : units_) un.overlay.clear();
     for (uint32_t i = 0; i < n; ++i) {
         uint8_t d; uint32_t blk;
         if (!getv(p, end, d) || !getv(p, end, blk) || end - p < 512) return false;
         units_[d % MAX_DISKS].overlay[blk].assign(p, p + 512);
         p += 512;
+    }
+    uint8_t dirOn, anyOn, anyW; uint32_t dpos; std::string dpath, apath;
+    if (!getv(p, end, dirOn) || !getStr(dpath) || !getv(p, end, dpos) || !getv(p, end, anyOn) || !getStr(apath)
+        || !getv(p, end, anyW) || !getv(p, end, anyPos_)) return false;
+    dirOpen_ = false; dirList_.clear(); dirHost_.clear(); dirPath_.clear(); dirPos_ = 0;
+    if (dirOn && !dpath.empty()) { listDir(dpath); dirPos_ = std::min<size_t>(dpos, dirList_.size()); }
+    if (any_) { std::fclose(any_); any_ = nullptr; }
+    anyHost_.clear(); anyWrite_ = anyW != 0;
+    if (anyOn && !apath.empty()) {
+        // Записываемый файл уже начат — дописываем, а не создаём заново.
+        any_ = std::fopen(apath.c_str(), anyWrite_ ? "r+b" : "rb");
+        if (any_) anyHost_ = apath;
     }
     return true;
 }

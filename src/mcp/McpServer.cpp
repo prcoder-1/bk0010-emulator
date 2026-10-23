@@ -1110,13 +1110,15 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
         board_.setSmk512(false);
         board_.setSmk512(args.value("smk").toBool());
     }
-    // AZБК: карта SD, диск AZ0 (с AZ и `disk` — тоже он), запись, доработка 037. Изменение
-    // любой настройки при стоящей плате — переустановка (память платы с нуля).
-    bool azChanged = false;
+    // AZБК: карта SD, диск AZ0 (с AZ и `disk` — тоже он), запись, доработка 037. Смена карты,
+    // записи или 037 при стоящей плате — переустановка (память платы с нуля), смена одного
+    // AZ0 — замена образа на ходу. Негодная карта — отказ, и ничего не меняется.
+    bk::Azbk::Config cfg = azCfg_;
+    bool cfgChanged = false;
     if (args.contains("az_sd")) {
         const QString d = args.value("az_sd").toString();
-        azCfg_.sdDir = (d.isEmpty() ? QString::fromStdString(romDir_) + "/azbk" : d).toStdString();
-        azChanged = true;
+        cfg.sdDir = (d.isEmpty() ? QString::fromStdString(romDir_) + "/azbk" : d).toStdString();
+        cfgChanged = true;
     }
     const bool azWanted = args.contains("az") ? args.value("az").toBool() : board_.azbk();
     QString unit0;
@@ -1124,20 +1126,20 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
     if (unit0Given) unit0 = args.value("az_unit0").toString();
     else if (azWanted && args.contains("disk")) { unit0 = args.value("disk").toString(); unit0Given = true; }
     if (unit0Given) {
-        if (unit0.isEmpty()) azCfg_.units.erase(0); else azCfg_.units[0] = unit0.toStdString();
-        azChanged = true;
+        if (unit0.isEmpty()) cfg.units.erase(0); else cfg.units[0] = unit0.toStdString();
     }
-    if (args.contains("az_rw")) {
-        azCfg_.rw = args.value("az_rw").toBool();
-        azChanged = true;
-    }
-    if (args.contains("az_037")) { azCfg_.mod037 = args.value("az_037").toBool(); azChanged = true; }
-    if (azChanged || args.contains("az")) {
-        azCfg_.writeDir = azWriteDirFor(QString::fromStdString(azCfg_.sdDir), azCfg_.rw).toStdString();
+    if (args.contains("az_rw")) { cfg.rw = args.value("az_rw").toBool(); cfgChanged = true; }
+    if (args.contains("az_037")) { cfg.mod037 = args.value("az_037").toBool(); cfgChanged = true; }
+    cfg.writeDir = azWriteDirFor(QString::fromStdString(cfg.sdDir), cfg.rw).toStdString();
+    if (azWanted && (cfgChanged || unit0Given || !board_.azbk())) {
         std::string err;
-        if (azWanted) board_.setAzbk(false);
-        if (!board_.setAzbk(azWanted, azCfg_, &err)) return fail("AZБК: " + QString::fromStdString(err));
+        if (!bk::Azbk::usable(cfg, &err)) return fail("AZБК: " + QString::fromStdString(err));
+        if (board_.azbk() && !cfgChanged) board_.setAzUnit(0, unit0.toStdString());
+        else if (!board_.setAzbk(true, cfg, &err)) return fail("AZБК: " + QString::fromStdString(err));
+    } else if (!azWanted && board_.azbk()) {
+        board_.setAzbk(false);
     }
+    azCfg_ = cfg;
     if (args.contains("az_vga")) board_.setAzVga(args.value("az_vga").toBool());
     board_.reset();
     cyrState_ = false;
@@ -1513,7 +1515,7 @@ QJsonObject McpServer::tool_bk_screenshot(const QJsonObject& args) {
     }
     // С AZБК — его VGA 1024x768, если не попросили экран самой БК (tv).
     const bool vga = board_.azbk() && board_.azVga() && !args.value("tv").toBool(false);
-    const uint32_t* px = vga ? board_.az().frame() : board_.screen().pixels();
+    const uint32_t* px = vga ? board_.displayFrame().px : board_.screen().pixels();
     const int w = vga ? bk::Azbk::VGA_W : bk::Screen::TEX_W, h = vga ? bk::Azbk::VGA_H : bk::Screen::TEX_H;
     QImage img = QImage(reinterpret_cast<const uchar*>(px), w, h, QImage::Format_ARGB32).copy();
     QString path = args.value("path").toString(), note = vga ? "AZБК VGA 1024x768" : "BK screen";

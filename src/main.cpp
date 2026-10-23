@@ -278,11 +278,12 @@ static int resolveOptions(CliOptions& o) {
             : ".BIN: машина БК-0010-01 (явно — ключ --machine bk10|bk11m)\n");
     const int effMachine = o.machine == bk::Machine::Bk0011m ? 1 : 0;
     // AZБК: GUI — по настройке (если ключом не задано), образ дискеты становится диском AZ0.
-    // Плата только из настройки не мешает запуску .BIN и винчестера — на этот запуск её нет.
+    // Плата только из настройки не мешает запуску .BIN, винчестера и явного --smk — на этот
+    // запуск её нет.
     const bool azExplicit = o.az > 0;
     if (o.az < 0 && gui) o.az = MainWindow::savedAzbk(effMachine == 1) ? 1 : -1;
-    if (o.az > 0 && !azExplicit && (!o.bin.isEmpty() || !o.hdd.isEmpty() || !o.hddB.isEmpty())) {
-        std::fprintf(stderr, "AZБК: на этот запуск снят (программа .BIN или винчестер)\n");
+    if (o.az > 0 && !azExplicit && (!o.bin.isEmpty() || !o.hdd.isEmpty() || !o.hddB.isEmpty() || o.smk == 1)) {
+        std::fprintf(stderr, "AZБК: на этот запуск снят (программа .BIN, винчестер или --smk)\n");
         o.az = 0;
     }
     if (o.az > 0) {
@@ -406,6 +407,7 @@ static int runHeadless(const CliOptions& o) {
         std::string err;
         // С AZБК кадр — VGA платы 1024x768.
         const bool vga = board.azbk();
+        board.setAzLive(true);                    // кадр в запись — построчно, как его видит монитор
         if (!video.start(o.video.toStdString(), vo, vga ? bk::Azbk::VGA_W : bk::Screen::TEX_W,
                          vga ? bk::Azbk::VGA_H : bk::Screen::TEX_H,
                          static_cast<uint32_t>(board.cpuFreqHz()), static_cast<uint32_t>(board.ticksPerFrame()), &err)) {

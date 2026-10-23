@@ -412,7 +412,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `--az`, `--az-sd`, `--az-unit N=img`, `--az-rw`, `--az-037`; SD template `roms/azbk`
   (firmware 00019, no disks); BK writes (EEPROM, AZ.INI from Setup, files) go to a per-card
   dir AppDataLocation/azbk/<card>-<hash> (`src/ui/AzPaths.h`), read before the card, unless `--az-rw`.
-  `Board::displayFrame()` is the VGA 1024x768 (or the BK screen); state is appended to BKX1.
+  `Board::displayFrame()` is the VGA 1024x768 (or the BK screen), drawn per line only while
+  `setAzLive(true)` (GUI VGA view, video capture), else rendered whole on demand. State is a
+  separate «AZB1» tail after BKX1. `setAzbk` validates the card first (no change on failure);
+  `setSmk512` under AZ only records, removing AZ restores СМК/КНГМД; `setAzUnit` swaps images live.
 - **Video capture** (`src/core/VideoCapture`, `Zmbv`, `AviWriter`; core links zlib + threads):
   one AVI frame per EMULATED BK frame, rate/scale = cpuFreqHz/ticksPerFrame reduced (3125/64 on
   both machines) — never wall-clock. The GUI feeds a frame only when the LAST slice of a frame

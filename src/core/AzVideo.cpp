@@ -73,20 +73,46 @@ const int kRoll[12] = {6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 983
 // фиксируются в начале кадра; страницы слоёв — тоже, если задан разряд 11, иначе живые
 // (перелистывание страниц видно сразу). На строке 769 — готовый кадр, кадровое
 // прерывание 60 Гц и автоматический пуск блиттера.
+void Azbk::latchFrame() {
+    const uint16_t v = scrCsr_;
+    sync_ = (v & 04000) != 0;
+    fr_.mode = v & 7;
+    fr_.llen = kLlen[(v >> 3) & 3];
+    fr_.xs = kXs[(v >> 6) & 3];
+    fr_.ys = kYs[(v >> 9) & 3];
+    fr_.lines = kRoll[std::min(11, (v >> 12) & 15)] / fr_.llen;
+    for (int i = 0; i < 3; ++i) { fr_.vscr[i] = vscr_[i]; fr_.hscr[i] = hscr_[i]; }
+    fr_.page[0] = pageL0_; fr_.page[1] = pageL1_; fr_.page[2] = pageL2_;
+}
+
+// Кадр целиком текущими значениями регистров — когда построчная отрисовка выключена.
+// Состояние растра (строка, повтор, параметры кадра) не меняется.
+const uint32_t* Azbk::renderNow() {
+    if (!on()) return front_.data();
+    if (live_) return front_.data();
+    const FrameRegs fr = fr_;
+    const bool sync = sync_;
+    const int src = srcLine_, rep = rep_;
+    latchFrame();
+    srcLine_ = 0; rep_ = 0;
+    for (int y = 0; y < VGA_H; ++y) {
+        if (rep_ == 0) {
+            if (smallScreen_ && srcLine_ >= 192) std::fill(std::begin(lineBuf_), std::end(lineBuf_), 0xff000000u);
+            else renderLine(lineBuf_);
+        }
+        std::memcpy(front_.data() + size_t(y) * VGA_W, lineBuf_, sizeof lineBuf_);
+        if (++rep_ >= fr_.ys) { rep_ = 0; ++srcLine_; }
+    }
+    fr_ = fr; sync_ = sync; srcLine_ = src; rep_ = rep;
+    return front_.data();
+}
+
 void Azbk::vgaLine() {
     if (vline_ == 0) {
-        const uint16_t v = scrCsr_;
-        sync_ = (v & 04000) != 0;
-        fr_.mode = v & 7;
-        fr_.llen = kLlen[(v >> 3) & 3];
-        fr_.xs = kXs[(v >> 6) & 3];
-        fr_.ys = kYs[(v >> 9) & 3];
-        fr_.lines = kRoll[std::min(11, (v >> 12) & 15)] / fr_.llen;
-        for (int i = 0; i < 3; ++i) { fr_.vscr[i] = vscr_[i]; fr_.hscr[i] = hscr_[i]; }
-        fr_.page[0] = pageL0_; fr_.page[1] = pageL1_; fr_.page[2] = pageL2_;
+        latchFrame();
         srcLine_ = 0; rep_ = 0;
     }
-    if (vline_ < VGA_H) {
+    if (vline_ < VGA_H && live_) {
         if (rep_ == 0) {
             // Малый экран БК (бит 9 0177664 = 0): строки изображения за 192-й гаснут.
             if (smallScreen_ && srcLine_ >= 192) std::fill(std::begin(lineBuf_), std::end(lineBuf_), 0xff000000u);
@@ -99,7 +125,7 @@ void Azbk::vgaLine() {
     blt_.line();
     if (vline_ == 769) {
         blt_.frameEnd();
-        std::swap(back_, front_);
+        if (live_) std::swap(back_, front_);
         ++frames_;
         if ((mmu_ & (MMU_V100 | MMU_50HZ)) == MMU_V100 && irq2) irq2();
     }
