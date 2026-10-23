@@ -207,6 +207,7 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
         }
         status_->setText("Диск AZ0 — по AZ.INI");
     });
+    azMenu->addAction("&Сеть (кабель сетевой карты)…", this, &MainWindow::chooseAzNet);
     az037Action_ = azMenu->addAction("Доработка &037 (БК-0010: эмуляция БК-0011М)");
     az037Action_->setCheckable(true);
     connect(az037Action_, &QAction::toggled, this, [this](bool on) {
@@ -862,7 +863,35 @@ bk::Azbk::Config MainWindow::azConfig() const {
     const QString u0 = st.value("azbk/unit0").toString();
     if (!u0.isEmpty()) c.units[0] = u0.toStdString();
     for (const auto& kv : azCli_.units) c.units[kv.first] = kv.second.toStdString();
+    const QString net = !azCli_.net.isEmpty() ? azCli_.net : st.value("azbk/net").toString();
+    if (net != "-") c.net = net.toStdString();
     return c;
+}
+
+// Сетевая карта платы: кабель — интерфейс хоста (tap/macvtap). Вставляется на ходу, как
+// настоящий; MAC, DHCP и адрес — из [NETWORK] в AZ.INI (их меняет Setup платы).
+void MainWindow::chooseAzNet() {
+    bool ok = false;
+    const QString cur = QString::fromStdString(azConfig().net);
+    const QString spec = QInputDialog::getText(this, "Сеть AZБК",
+        "Интерфейс хоста для сетевой карты платы:\n"
+        "  macvtap:ИМЯ — свой MAC в локальной сети, адрес от её DHCP\n"
+        "  tap:ИМЯ — tap-интерфейс (мост или NAT)\n"
+        "  /dev/tapN — устройство macvtap\n"
+        "Пусто — кабель вынут. Как создать интерфейс — docs/azbk.md, «Сеть».",
+        QLineEdit::Normal, cur, &ok).trimmed();
+    if (!ok) return;
+    QSettings().setValue("azbk/net", spec.isEmpty() ? QString("-") : spec);
+    azCli_.net.clear();
+    if (!board_->azbk()) {
+        status_->setText(spec.isEmpty() ? "Сеть AZБК: без кабеля" : "Сеть AZБК: " + spec + " (подключится с платой)");
+        return;
+    }
+    const bool on = board_->az().setNet(spec.toStdString());
+    const QString note = QString::fromStdString(board_->az().ctrl().netStatus());
+    if (!on) status_->setText("Сеть AZБК не подключена: " + note);
+    else if (spec.isEmpty()) status_->setText("Сеть AZБК: кабель вынут");
+    else status_->setText("Сеть AZБК: " + spec + (note.isEmpty() ? QString() : " — " + note));
 }
 
 bool MainWindow::applyAz(bool on) {

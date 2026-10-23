@@ -1545,6 +1545,16 @@ Board::RunStop Board::runLoop(int maxTicks, bool frames, Target target, int& don
     auto nextFrame = [&] { if (frames && totalTicks_ >= frameEnd_) { endFrame(); beginFrame(); } };
     if (frames && totalTicks_ >= frameEnd_) beginFrame();
     while (done < maxTicks) {
+        // МК платы AZБК грузится с сетевыми дисками: БК держится в сбросе, время идёт.
+        if (azOn_ && az_.holdCpu()) {
+            int chunk = std::min(maxTicks - done, 64);
+            if (frames && frameEnd_ > totalTicks_)
+                chunk = static_cast<int>(std::min<uint64_t>(static_cast<uint64_t>(chunk), frameEnd_ - totalTicks_));
+            advanceDevices(chunk);
+            done += chunk;
+            nextFrame();
+            continue;
+        }
         if (cpu_.halted()) return RunStop::Halt;
         done += stepCore();
         nextFrame();

@@ -40,6 +40,7 @@ struct AzCliOptions {
     std::map<int, QString> units;
     bool rw = false;
     int mod037 = -1;
+    QString net;                           // кабель сетевой карты (пусто — настройка, «-» — нет)
 };
 
 class MainWindow : public QMainWindow {
@@ -197,6 +198,7 @@ private:
     bool applyAz(bool on);              // поставить/снять плату (без сброса); false — нет карты SD
     void chooseAzSd();
     void chooseAzUnit0();
+    void chooseAzNet();
     AzOptions azCli_;
     QString romDir_;
     QAction* azAction_ = nullptr;          // галка «AZБК»

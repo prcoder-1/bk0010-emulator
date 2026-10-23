@@ -5,6 +5,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "AzNet.h"
 
 namespace bk {
 
@@ -15,7 +16,8 @@ namespace bk {
 // по чтению DR вне потока — результат последней «длинной» команды, ошибка — разряд 15 CSR.
 // Долгие команды (диск, каталоги, EEPROM, часы, файлы) исполняются мгновенно, как у GID;
 // по их окончании при разряде IE (6) в записанном CSR — прерывание по вектору 0174.
-// Сети нет: сетевые команды отвечают, как контроллер без кабеля. См. docs/azbk.md.
+// Команды, которые в прошивке ждут сеть (010 с IE, landisk, HOF), идут в эмулированном
+// времени задачей МК (AzNet): CSR всё это время «занят». См. docs/azbk.md.
 class AzCtrl {
 public:
     struct Config {
@@ -23,6 +25,7 @@ public:
         std::string writeDir;                // куда идёт то, что пишет БК (EEPROM, файлы)
         bool rw = false;                     // образы дисков на запись (иначе — в памяти)
         std::map<int, std::string> units;    // AZn поверх [DISKS] (путь хоста)
+        std::string net;                     // кабель: tap:ИМЯ | macvtap:ИМЯ | /dev/tapN, пусто — нет
     };
     // Что контроллер делает с памятью AZ при загрузке (ПЗУ в слоты, логотип) и снимке.
     std::function<void(uint32_t byteAddr, const uint8_t* p, size_t n)> memLoad;
@@ -32,6 +35,7 @@ public:
     std::function<void()> irq;                 // вектор 0174
     std::function<void()> resetMachine;        // команда 037
 
+    AzCtrl();
     bool init(const Config& c, std::string* err);   // AZ.INI: ПЗУ, логотип, диски
     // Годится ли карта (каталог и AZ.INI на нём или в каталоге записи) — до того, как
     // что-то менять в машине.
@@ -47,6 +51,18 @@ public:
     // Шина. false на чтении/записи — регистр не ответил (зависание).
     uint16_t read(int reg, bool peek = false);
     void     write(int reg, uint16_t v);
+
+    // Время платы (такты ЦП): сеть и задачи МК.
+    void advance(int ticks, int cpuHz);
+    // МК грузится с сетевыми дисками — БК держится в сбросе (bk_reset_hold прошивки).
+    bool holdBk() const { return holdBk_; }
+    bool busy() const { return busy_; }
+    AzNet&       net()       { return net_; }
+    const AzNet& net() const { return net_; }
+    // Кабель: открыть порт хоста по описанию (пусто — вынуть). Текст ошибки или
+    // предупреждения — в netStatus().
+    bool setNet(const std::string& spec);
+    const std::string& netStatus() const { return netStatus_; }
 
     // Для отладчика и MCP.
     struct UnitInfo { int unit; std::string name, host; uint32_t blocks; bool open, rw, dirty; };
@@ -127,7 +143,15 @@ private:
     void fileWrite();
     void fileToMem();
     void cardSize();
-    void screenshot();
+    void screenshot(std::string name = {});
+    // Сеть.
+    static bool isLandisk(char c) { return c == 'N' || c == 'P' || c == 'R' || c == 'S' || c == 'A'; }
+    void startAsync(std::function<void()> job);   // долгая сетевая команда (CSR «занят»)
+    void asyncDone();
+    void netBoot(std::vector<int> netUnits);      // пуск МК с сетевыми дисками
+    int32_t netMount(int u, const std::string& name);
+    void landiskOpen(int u);                       // OPEN с описанием платы (landisk_open_at_boot)
+    void rtcFromNtp();
 
     Config cfg_;
     bool logo_ = false;
@@ -162,6 +186,15 @@ private:
     bool reopenFile(int u, const std::string& host, bool rw);
     uint32_t anyPos_ = 0, anySize_ = 0;
     int64_t timeOffset_ = 0;                // часы AZ относительно хоста, с
+
+    AzNet net_;
+    std::string netStatus_;
+    bool busy_ = false, holdBk_ = false;
+    bool ieLatch_ = false;                  // D6 последней записи в CSR (его защёлкивает ПЛИС)
+    bool netWait_ = false, stopWait_ = false;   // задача команды 010 с IE
+    int pendingCsr_ = -1;                   // запись в CSR, пока МК занят
+    uint64_t tickAcc_ = 0;
+    std::vector<int> netUnits_;             // сетевые диски из [DISKS] (открываются при пуске)
 };
 
 } // namespace bk

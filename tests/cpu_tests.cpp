@@ -15,6 +15,8 @@
 #include "Zmbv.h"
 #include "VideoCapture.h"
 #include "VideoSink.h"
+#include "AzCrypto.h"
+#include "NetPort.h"
 #ifdef BK_HAVE_FFMPEG
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -3819,6 +3821,232 @@ int main(int argc, char** argv) {
         azW(a, 0177220, 0135);
         azW(a, 0177220, 0136);
         CHECK(irqs == 2, "AZ/контроллер: 035/036 с IE — прерывание по 0174, как у прошивки");
+    }
+
+    SECTION("AZБК: сеть — DHCP, ARP, ping, NTP, HTTP, команды 040/041/043, 010 с IE")
+    {
+        // «Соседи по сети» в памяти: DHCP-сервер, шлюз (ARP), NTP, ping и TCP-клиент.
+        struct FakeLan : EthPort {
+            std::vector<std::vector<uint8_t>> in, out;
+            uint8_t gwMac[6] = {0x52, 0x54, 0, 0, 0, 1}, boardMac[6] = {0};
+            const uint8_t gwIp[4] = {10, 1, 1, 1}, yi[4] = {10, 1, 1, 42};
+            std::string hostname;
+            int discovers = 0;
+            size_t recv(uint8_t* b, size_t cap) override {
+                if (in.empty()) return 0;
+                std::vector<uint8_t> f = in.front(); in.erase(in.begin());
+                std::memcpy(b, f.data(), std::min(cap, f.size()));
+                return f.size();
+            }
+            bool link() const override { return true; }
+            std::string describe() const override { return "fake"; }
+            bool live() const override { return false; }
+            static uint16_t sum(const uint8_t* p, size_t n, uint32_t s = 0) {
+                for (size_t i = 0; i + 1 < n; i += 2) s += (p[i] << 8) | p[i + 1];
+                if (n & 1) s += p[n - 1] << 8;
+                while (s >> 16) s = (s & 0xFFFF) + (s >> 16);
+                return static_cast<uint16_t>(~s);
+            }
+            // Кадр IPv4 к плате: Ethernet + IP + полезная часть.
+            std::vector<uint8_t> ip(uint8_t proto, const uint8_t* dst, const std::vector<uint8_t>& pl, bool bcast = false) {
+                std::vector<uint8_t> f(34 + pl.size(), 0);
+                std::memcpy(f.data(), bcast ? std::vector<uint8_t>(6, 0xFF).data() : boardMac, 6);
+                std::memcpy(f.data() + 6, gwMac, 6);
+                f[12] = 8; f[13] = 0;
+                uint8_t* h = f.data() + 14;
+                h[0] = 0x45; h[2] = static_cast<uint8_t>((20 + pl.size()) >> 8); h[3] = static_cast<uint8_t>(20 + pl.size());
+                h[8] = 64; h[9] = proto;
+                std::memcpy(h + 12, gwIp, 4); std::memcpy(h + 16, dst, 4);
+                const uint16_t c = sum(h, 20); h[10] = c >> 8; h[11] = c & 0xFF;
+                std::memcpy(f.data() + 34, pl.data(), pl.size());
+                return f;
+            }
+            std::vector<uint8_t> udp(uint16_t sp, uint16_t dp, const uint8_t* dst, const std::vector<uint8_t>& d, bool bcast = false) {
+                std::vector<uint8_t> u(8 + d.size(), 0);
+                u[0] = sp >> 8; u[1] = sp & 0xFF; u[2] = dp >> 8; u[3] = dp & 0xFF;
+                u[4] = static_cast<uint8_t>(u.size() >> 8); u[5] = static_cast<uint8_t>(u.size());
+                std::memcpy(u.data() + 8, d.data(), d.size());
+                return ip(17, dst, u, bcast);                  // сумма UDP 0 — «не считана»
+            }
+            void send(const uint8_t* f, size_t n) override {
+                out.emplace_back(f, f + n);
+                std::memcpy(boardMac, f + 6, 6);
+                if (n >= 42 && f[12] == 8 && f[13] == 6 && f[21] == 1) {          // ARP-запрос — отвечает «шлюз»
+                    std::vector<uint8_t> r(42, 0);
+                    std::memcpy(r.data(), f + 6, 6); std::memcpy(r.data() + 6, gwMac, 6);
+                    r[12] = 8; r[13] = 6; r[15] = 1; r[16] = 8; r[18] = 6; r[19] = 4; r[21] = 2;
+                    std::memcpy(r.data() + 22, gwMac, 6); std::memcpy(r.data() + 28, f + 38, 4);
+                    std::memcpy(r.data() + 32, f + 22, 6); std::memcpy(r.data() + 38, f + 28, 4);
+                    in.push_back(r);
+                    return;
+                }
+                if (n < 42 || f[12] != 8 || f[13] != 0 || f[23] != 17) return;
+                const uint16_t dp = static_cast<uint16_t>((f[36] << 8) | f[37]);
+                const uint8_t* d = f + 42;
+                if (dp == 67) {                                                   // DHCP
+                    int type = 0;
+                    for (size_t i = 240; i + 1 < n - 42 && d[i] != 0xFF;) {
+                        if (d[i] == 0) { ++i; continue; }
+                        if (d[i] == 53) type = d[i + 2];
+                        if (d[i] == 12) hostname.assign(reinterpret_cast<const char*>(d + i + 2), d[i + 1]);
+                        i += 2u + d[i + 1];
+                    }
+                    if (type == 1) ++discovers;
+                    std::vector<uint8_t> r(240, 0);
+                    r[0] = 2; r[1] = 1; r[2] = 6;
+                    std::memcpy(r.data() + 4, d + 4, 4);
+                    std::memcpy(r.data() + 16, yi, 4);
+                    std::memcpy(r.data() + 28, d + 28, 6);
+                    r[236] = 0x63; r[237] = 0x82; r[238] = 0x53; r[239] = 0x63;
+                    const uint8_t opts[] = {53, 1, static_cast<uint8_t>(type == 1 ? 2 : 5), 54, 4, 10, 1, 1, 1, 1, 4, 255, 255, 255, 0,
+                                            3, 4, 10, 1, 1, 1, 6, 4, 10, 1, 1, 1, 42, 4, 10, 1, 1, 1, 51, 4, 0, 0, 0x0E, 0x10, 255};
+                    r.insert(r.end(), std::begin(opts), std::end(opts));
+                    in.push_back(udp(67, 68, std::vector<uint8_t>(4, 0xFF).data(), r, true));
+                } else if (dp == 123) {                                           // NTP: 2026-01-02 03:04:05 UTC
+                    std::vector<uint8_t> r(48, 0);
+                    r[0] = 0x1C;
+                    const uint32_t t = 1767323045u + 2208988800u;
+                    r[40] = t >> 24; r[41] = (t >> 16) & 0xFF; r[42] = (t >> 8) & 0xFF; r[43] = t & 0xFF;
+                    in.push_back(udp(123, static_cast<uint16_t>((f[34] << 8) | f[35]), yi, r));
+                }
+            }
+        };
+        azSetup();
+        std::ofstream(azDir / "AZ.INI", std::ios::app)
+            << "[NETWORK]\r\nDHCP=ON\r\nTIMEZONE=60\r\nMAC=0200000000AB\r\nDHCPNAME=testbk\r\n";
+        Azbk a;
+        a.powerOn(azCfg(), true, 4000000);
+        auto lan = std::make_unique<FakeLan>();
+        FakeLan& L = *lan;
+        a.ctrl().net().setPort(std::move(lan));
+        auto ms = [&](int n) { for (int i = 0; i < n; ++i) a.advance(4000); };
+        auto words = [&](int cmd, int n) {
+            azW(a, 0177220, static_cast<uint16_t>(cmd)); azW(a, 0177220, 041);
+            std::vector<uint16_t> v;
+            for (int i = 0; i < n; ++i) v.push_back(azR(a, 0177222));
+            return v;
+        };
+        std::vector<uint16_t> mac = words(043, 3);
+        CHECK(mac[0] == 0x0002 && mac[1] == 0 && mac[2] == 0xAB00, "AZ/сеть: 043 — MAC из AZ.INI (MAC=0200000000AB)");
+        azW(a, 0177220, 0110);                               // 010 с IE: МК крутит сеть, пока БК ждёт
+        CHECK(a.ctrl().busy() && azR(a, 0177220) == 0, "AZ/сеть: 010 с IE — CSR «не готов», пока МК занят");
+        ms(3000);
+        CHECK(L.discovers >= 1 && L.hostname == "TESTBK", "AZ/сеть: DHCP — DISCOVER, в REQUEST имя из DHCPNAME (заглавными)");
+        int irqs = 0;
+        a.irqVector = [&] { ++irqs; };
+        std::vector<uint16_t> ni = words(040, 12);           // запись в CSR завершает ожидание по 010
+        CHECK(!a.ctrl().busy() && irqs == 0, "AZ/сеть: запись в CSR без IE завершает 010 — без прерывания");
+        CHECK(ni[0] == (1 << 8 | 10) && ni[1] == (42 << 8 | 1) && ni[2] == 0xFFFF && ni[3] == 0x00FF
+              && ni[4] == 0x010A && ni[5] == 0x0101, "AZ/сеть: 040/041 — адрес и маска из DHCP (10.1.1.42/24)");
+        CHECK(ni[6] == 0x010A && ni[7] == 0x0101 && ni[8] == 0x010A && ni[10] == 0, "AZ/сеть: 040/041 — NTP и DNS1 из DHCP, DNS2 нет");
+        // Ping с «шлюза».
+        std::vector<uint8_t> echo = {8, 0, 0, 0, 0x12, 0x34, 0, 1, 'B', 'K', '-', '1', '1'};
+        { const uint16_t c = FakeLan::sum(echo.data(), echo.size()); echo[2] = c >> 8; echo[3] = c & 0xFF; }
+        L.in.push_back(L.ip(1, L.yi, echo));
+        L.out.clear();
+        azW(a, 0177220, 0110);
+        ms(20);
+        bool pong = false;
+        for (const auto& f : L.out)
+            if (f.size() >= 34 + echo.size() && f[23] == 1 && f[34] == 0 && std::memcmp(f.data() + 38, echo.data() + 4, echo.size() - 4) == 0)
+                pong = FakeLan::sum(f.data() + 34, echo.size()) == 0;
+        CHECK(pong, "AZ/сеть: ответ на ping — тот же id/seq/данные, сумма ICMP верна");
+        // NTP: первый запрос уходит, как только известен MAC сервера; часы — со смещением TIMEZONE.
+        ms(12000);
+        std::vector<uint16_t> tr = words(042, 0);
+        azW(a, 0177220, 032);
+        for (int i = 0; i < 14; ++i) tr.push_back(azR(a, 0177222));
+        CHECK(tr[7] == 2026 && tr[8] == 1 && tr[9] == 2 && tr[11] == 4 && tr[12] == 4, "AZ/сеть: 042 — время по NTP + TIMEZONE=60");
+        // HTTP: TCP-клиент «шлюза» берёт /AZ.INI.
+        auto tcp = [&](uint32_t seq, uint32_t ack, uint8_t fl, const std::string& data) {
+            std::vector<uint8_t> t(20 + data.size(), 0);
+            t[0] = 0x9C; t[1] = 0x40; t[2] = 0; t[3] = 80;
+            for (int i = 0; i < 4; ++i) { t[4 + i] = static_cast<uint8_t>(seq >> (24 - 8 * i)); t[8 + i] = static_cast<uint8_t>(ack >> (24 - 8 * i)); }
+            t[12] = 0x50; t[13] = fl; t[14] = 0x20;
+            std::memcpy(t.data() + 20, data.data(), data.size());
+            std::vector<uint8_t> ph = {10, 1, 1, 1, 10, 1, 1, 42, 0, 6, static_cast<uint8_t>(t.size() >> 8), static_cast<uint8_t>(t.size())};
+            ph.insert(ph.end(), t.begin(), t.end());
+            const uint16_t c = FakeLan::sum(ph.data(), ph.size()); t[16] = c >> 8; t[17] = c & 0xFF;
+            L.in.push_back(L.ip(6, L.yi, t));
+        };
+        auto lastTcp = [&](std::vector<uint8_t>& seg) {
+            for (auto it = L.out.rbegin(); it != L.out.rend(); ++it)
+                if (it->size() >= 54 && (*it)[23] == 6) { seg = *it; return true; }
+            return false;
+        };
+        azW(a, 0177220, 0110);
+        L.out.clear();
+        tcp(1000, 0, 0x02, "");
+        ms(5);
+        std::vector<uint8_t> seg;
+        const bool synack = lastTcp(seg) && seg[47] == 0x12;
+        CHECK(synack, "AZ/сеть: HTTP — SYN на порт 80 даёт SYN-ACK");
+        uint32_t srvSeq = synack ? ((uint32_t(seg[38]) << 24) | (seg[39] << 16) | (seg[40] << 8) | seg[41]) + 1 : 0;
+        tcp(1001, srvSeq, 0x10, "");
+        tcp(1001, srvSeq, 0x18, "GET /AZ.INI HTTP/1.1\r\nHost: bk\r\n\r\n");
+        uint32_t mySeq = 1001 + 34;
+        std::string body;
+        for (int round = 0; round < 20; ++round) {
+            L.out.clear();
+            ms(5);
+            bool fin = false;
+            for (const auto& f : L.out) {
+                if (f.size() < 54 || f[23] != 6) continue;
+                const size_t tot = (f[16] << 8) | f[17];
+                const size_t hl = (f[46] >> 4) * 4u;
+                const size_t dl = tot - 20 - hl;
+                body.append(reinterpret_cast<const char*>(f.data() + 34 + hl), dl);
+                srvSeq += static_cast<uint32_t>(dl) + ((f[47] & 1) ? 1 : 0);
+                fin |= (f[47] & 1) != 0;
+            }
+            tcp(mySeq, srvSeq, static_cast<uint8_t>(fin ? 0x11 : 0x10), "");
+            if (fin) break;
+        }
+        std::ifstream ini(azDir / "AZ.INI", std::ios::binary);
+        const std::string file((std::istreambuf_iterator<char>(ini)), std::istreambuf_iterator<char>());
+        CHECK(body.rfind("HTTP/1.1 200 OK\r\n", 0) == 0 && body.find("Server: MAXIOL HTTP/WEBDAV Server v1.00 \r\n") != std::string::npos
+              && body.size() > file.size() && body.compare(body.size() - file.size(), file.size(), file) == 0,
+              "AZ/сеть: HTTP GET /AZ.INI — заголовки прошивки и файл карты целиком");
+        // Снимок: адрес и часы NTP переживают сохранение (метка NET1 в хвосте AZB1).
+        std::vector<uint8_t> st;
+        a.saveState(st);
+        Azbk b2;
+        b2.powerOn(azCfg(), true, 4000000);
+        const uint8_t* sp = st.data();
+        CHECK(b2.loadState(sp, st.data() + st.size()) && b2.ctrl().net().cfg().ip == 0x2A01010Au,
+              "AZ/сеть: снимок — адрес DHCP сохраняется");
+        // Постоянный адрес из AZ.INI, без DHCP; без кабеля.
+        azSetup();
+        std::ofstream(azDir / "AZ.INI", std::ios::app)
+            << "[NETWORK]\r\nDHCP=OFF\r\nIP=192.168.7.9\r\nMASK=255.255.0.0\r\nGW=192.168.0.1\r\nDNS1=8.8.8.8\r\n";
+        Azbk c;
+        c.powerOn(azCfg(), true, 4000000);
+        std::vector<uint16_t> si;
+        azW(c, 0177220, 040); azW(c, 0177220, 041);
+        for (int i = 0; i < 12; ++i) si.push_back(azR(c, 0177222));
+        CHECK(si[0] == (168 << 8 | 192) && si[1] == (9 << 8 | 7) && si[2] == 0xFFFF && si[3] == 0 && si[8] == (8 << 8 | 8),
+              "AZ/сеть: DHCP=OFF — адрес, маска, DNS из AZ.INI");
+        CHECK(c.ctrl().net().cfg().mac[0] == 0x00 && c.ctrl().net().cfg().mac[1] == 0x0E && c.ctrl().net().cfg().mac[5] == 0x01,
+              "AZ/сеть: без MAC= в AZ.INI — MAC прошивки по умолчанию 00:0E:35:22:0B:01");
+        azW(c, 0177220, 010);                                // 010 без IE — один проход, без «занят»
+        CHECK(!c.ctrl().busy() && azR(c, 0177220) == 0200, "AZ/сеть: 010 без IE — один проход net_poll");
+    }
+
+    SECTION("AZБК: AES-256 и base64 облачного клиента")
+    {
+        uint8_t key[32], blk[16];
+        for (int i = 0; i < 32; ++i) key[i] = static_cast<uint8_t>(i);
+        for (int i = 0; i < 16; ++i) blk[i] = static_cast<uint8_t>(i * 0x11);
+        azcrypto::aes256EncryptBlock(key, blk);
+        const uint8_t want[16] = {0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49, 0x60, 0x89};
+        CHECK(std::memcmp(blk, want, 16) == 0, "AZ/HOF: AES-256 — вектор FIPS-197 C.3");
+        azcrypto::aes256DecryptBlock(key, blk);
+        CHECK(blk[0] == 0 && blk[1] == 0x11 && blk[15] == 0xFF, "AZ/HOF: AES-256 — расшифровка обратна");
+        char b64[64]; size_t n = 0;
+        azcrypto::base64Encode(b64, sizeof b64, &n, reinterpret_cast<const uint8_t*>("BK-0011M"), 8);
+        uint8_t back[16]; size_t m = 0;
+        CHECK(std::string(b64, n) == "QkstMDAxMU0=" && azcrypto::base64Decode(back, sizeof back, &m, reinterpret_cast<uint8_t*>(b64), n) == 0
+              && m == 8 && std::memcmp(back, "BK-0011M", 8) == 0, "AZ/HOF: base64 туда и обратно");
     }
 
     SECTION("AZБК: снимок — хвост AZB1, СМК до платы, открытый файл и сменённый диск")

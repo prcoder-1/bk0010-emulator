@@ -46,7 +46,7 @@ bool Azbk::powerOn(const Config& c, bool bk11, int cpuHz, std::string* err) {
     cvxL_ = cvxR_ = cvxM_ = 0x8000; cvxCsr_ = 0;
     com_[0] = 0; com_[1] = 0; com_[2] = 0200; com_[3] = 0;
     AzCtrl::Config cc;
-    cc.sdDir = c.sdDir; cc.writeDir = c.writeDir; cc.rw = c.rw; cc.units = c.units;
+    cc.sdDir = c.sdDir; cc.writeDir = c.writeDir; cc.rw = c.rw; cc.units = c.units; cc.net = c.net;
     const bool ok = ctrl_.init(cc, err);
     // Заставка из [LOGO] — 256×192, 256 цветов в странице 040 (так её показывает GID).
     if (ctrl_.logoLoaded()) { pageL0_ = 040; setMode(063223); }
@@ -538,6 +538,8 @@ std::string Azbk::details() const {
               ym() ? "YM2149" : "AY-3-8910", ay1a_, ay1d_, ay2a_, ay2d_);
     s += "Контроллер: " + ctrl_.summary() + "\n";
     s += "Карта SD: " + cfg_.sdDir + (cfg_.rw ? " (запись в образы)" : "") + "\n";
+    s += ctrl_.net().summary();
+    if (!ctrl_.netStatus().empty()) s += "  кабель: " + ctrl_.netStatus() + "\n";
     for (const auto& u : ctrl_.units())
         s += strf("  AZ%d: %s (%u блоков)%s%s%s\n", u.unit, u.name.c_str(), u.blocks,
                   u.open ? "" : " НЕ ОТКРЫТ", u.rw ? " запись" : "", u.dirty ? " изменён в памяти" : "");
@@ -598,6 +600,9 @@ void Azbk::saveState(std::vector<uint8_t>& out) const {
     const uint32_t np = static_cast<uint32_t>(pages.size());
     put(&np, 4);
     for (uint32_t pg : pages) { put(&pg, 4); put(mem_.data() + pg * 4096, 4096); }
+    // Сеть — меткой в конце (в снимках до неё её нет).
+    put("NET1", 4);
+    ctrl_.net().saveState(out);
 }
 
 bool Azbk::loadState(const uint8_t*& p, const uint8_t* e) {
@@ -613,6 +618,7 @@ bool Azbk::loadState(const uint8_t*& p, const uint8_t* e) {
     c.rw = fl & 1; c.mod037 = fl & 2;
     // Плата заново «вставляется» (диски открываются по конфигурации снимка), потом
     // поверх неё — состояние.
+    c.net = cfg_.net;                                // кабель — хоста, не снимка
     if (!on() || cfg_.sdDir != c.sdDir || cfg_.units != c.units || cfg_.rw != c.rw) powerOn(c, bk11_, cpuHz_);
     cfg_ = c;
     smkTrigger_ = fl & 4; smallScreen_ = fl & 8; sync_ = fl & 16; dmaPlaying_ = fl & 32; dmaDone_ = fl & 64;
@@ -640,6 +646,10 @@ bool Azbk::loadState(const uint8_t*& p, const uint8_t* e) {
     for (uint32_t i = 0; i < np; ++i) {
         uint32_t pg;
         if (!get(&pg, 4) || pg >= MEM_BYTES / 4096 || !get(mem_.data() + pg * 4096, 4096)) return false;
+    }
+    if (e - p >= 4 && std::memcmp(p, "NET1", 4) == 0) {
+        p += 4;
+        if (!ctrl_.net().loadState(p, e)) return false;
     }
     soundOut();
     if (ayModel) ayModel(ym());

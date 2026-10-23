@@ -125,6 +125,36 @@ std::string AzCtrl::cstr(uint32_t at, size_t maxBytes) const {
     return s;
 }
 
+AzCtrl::AzCtrl() {
+    net_.readPath = [this](const std::string& n) { return readPath(n); };
+    net_.writePath = [this](const std::string& n) { return writePath(n); };
+    // Каталог «карты» для HTTP: сама карта и поверх неё то, что записала БК.
+    net_.listDir = [this](const std::string& dir, std::vector<AzNet::DirEnt>* out) {
+        std::error_code ec;
+        std::map<std::string, std::string> ents;
+        bool found = false;
+        for (const std::string& root : {cfg_.sdDir, cfg_.writeDir}) {
+            if (root.empty()) continue;
+            const std::string d = dir.empty() || dir == "/" ? root : resolve(root, dir);
+            if (d.empty() || !fs::is_directory(d, ec)) continue;
+            found = true;
+            if (out) for (const auto& e : fs::directory_iterator(d, ec)) ents[upper(e.path().filename().string())] = e.path().string();
+        }
+        if (out)
+            for (const auto& kv : ents) {
+                AzNet::DirEnt e;
+                e.name = kv.first;
+                fatStamp(kv.second, e.fdate, e.ftime, e.size, e.dir);
+                out->push_back(e);
+            }
+        return found;
+    };
+    net_.screenshot = [this](const std::string& n) { screenshot(n); };
+    net_.reboot = [this]() { if (resetMachine) resetMachine(); };
+    net_.xbuf = [this]() { return reinterpret_cast<char*>(bytes(R_XBUF)); };
+    net_.jobDone = [this]() { asyncDone(); };
+}
+
 void AzCtrl::fillDiskEntry(int u, const std::string& host) {
     uint16_t d, t; uint32_t size; bool dir;
     fatStamp(host, d, t, size, dir);
@@ -174,6 +204,10 @@ void AzCtrl::closeDisks() {
 }
 
 void AzCtrl::close() {
+    net_.abortJob();
+    busy_ = holdBk_ = netWait_ = false;
+    net_.setPort(nullptr);
+    netStatus_.clear();
     closeDisks();
     if (any_) { std::fclose(any_); any_ = nullptr; }
 }
@@ -230,6 +264,10 @@ void AzCtrl::loadIni() {
             } else if (section == "[DISKS]" && key.size() >= 2 && key[0] == 'D') {
                 const int u = std::atoi(key.c_str() + 1);
                 if (u >= 0 && u < MAX_DISKS) disks[u] = val;
+            } else if (section == "[NETWORK]") {
+                std::string l = upper(s);                  // строки AZ.INI прошивка приводит к заглавным
+                std::replace(l.begin(), l.end(), '\\', '/');
+                net_.iniLine(l);
             } else if (section == "[ALTBOOT]" && (key == "B4" || key == "B6") && altKey.empty()) {
                 altKey = key;                      // прошивка берёт только первую запись
                 altboot = val;
@@ -245,11 +283,21 @@ void AzCtrl::loadIni() {
         std::fprintf(stderr, "AZБК: нет %s/AZ.INI\n", cfg_.sdDir.c_str());
         bootErrors_ |= 0x100;
     }
+    netUnits_.clear();
     for (const auto& kv : disks) {
-        // Имена — как их нормализует прошивка: заглавные, «\» -> «/».
+        // Имена — как их нормализует прошивка: заглавные, «\» -> «/». Имя сетевого диска
+        // (landisk: первая буква N, P, R, S, A) — как есть; открывается он при пуске МК.
         std::string name = upper(kv.second);
         std::replace(name.begin(), name.end(), '\\', '/');
-        if (name.empty() || name[0] != '0') continue;      // сетевые (landisk) — без сети нет
+        if (!kv.second.empty() && isLandisk(kv.second[0]) && !cfg_.units.count(kv.first)) {
+            char* nm = diskName(kv.first);
+            std::memset(nm, 0, NAME_BYTES);
+            std::strncpy(nm, kv.second.c_str(), NAME_BYTES - 1);
+            diskFlags(kv.first) |= DISK_MOUNTED;
+            netUnits_.push_back(kv.first);
+            continue;
+        }
+        if (name.empty() || name[0] != '0') continue;
         openDisk(kv.first, readPath(kv.second), name);
     }
     for (const auto& kv : cfg_.units) {
@@ -297,8 +345,26 @@ bool AzCtrl::usable(const Config& c, std::string* err) {
 bool AzCtrl::init(const Config& c, std::string* err) {
     cfg_ = c;
     const bool ok = usable(c, err);
-    if (ok) reboot();
+    if (ok) {
+        reboot();
+        // Кабель — после разбора AZ.INI: для macvtap нужен MAC платы.
+        if (!setNet(c.net) && !c.net.empty()) std::fprintf(stderr, "AZБК: сеть: %s\n", netStatus_.c_str());
+        else if (!netStatus_.empty()) std::fprintf(stderr, "AZБК: сеть: %s\n", netStatus_.c_str());
+    }
     return ok;
+}
+
+bool AzCtrl::setNet(const std::string& spec) {
+    cfg_.net = spec;
+    net_.setPort(nullptr);
+    netStatus_.clear();
+    if (spec.empty()) return true;
+    std::string err, warn;
+    std::unique_ptr<EthPort> p = openEthPort(spec, net_.cfg().mac, &err, &warn);
+    if (!p) { netStatus_ = err; return false; }
+    net_.setPort(std::move(p));
+    netStatus_ = warn;
+    return true;
 }
 
 void AzCtrl::setUnit(int u, const std::string& host) {
@@ -312,9 +378,24 @@ void AzCtrl::setUnit(int u, const std::string& host) {
     openDisk(u, host, "0:/" + upper(fs::path(host).filename().string()));
 }
 
+// Перезапуск МК (main прошивки): lan_init, AZ.INI ([NETWORK] -> net_reinit), диски; с
+// сетевыми дисками — ожидание сети и landisk, пока БК держится в сбросе; затем имена
+// DNS и 1000 проходов net_poll.
 void AzCtrl::reboot() {
+    net_.abortJob();
+    busy_ = holdBk_ = netWait_ = stopWait_ = ieLatch_ = false;
+    pendingCsr_ = -1;
     if (any_) { std::fclose(any_); any_ = nullptr; }
+    net_.lanInit();
     loadIni();
+    net_.netReinit();
+    // MAC мог смениться в Setup: macvtap пропускает кадры только на свой.
+    if (net_.port()) {
+        netStatus_ = ethPortMacWarning(cfg_.net, net_.cfg().mac);
+        if (!netStatus_.empty()) std::fprintf(stderr, "AZБК: сеть: %s\n", netStatus_.c_str());
+    }
+    if (!netUnits_.empty()) netBoot(netUnits_);
+    else net_.bootFinish();
     resetRegs();
     csr_ = 0200; status_ = 0; dataWr_ = 0;
     unit_ = 0; block_ = 0; blkHiPending_ = false;
@@ -336,6 +417,8 @@ bool AzCtrl::unitMounted() {
 // ---- Регистры -----------------------------------------------------------------
 
 uint16_t AzCtrl::read(int reg, bool peek) {
+    // МК занят (сеть): ПЛИС отвечает за него «не готов»; что она отдаёт в DR, неизвестно — 0.
+    if (busy_) return 0;
     // Отладчику — без побочных эффектов: автоматы прогоняются на копии.
     if (peek) {
         const Reg saved[4] = {regs_[0], regs_[1], regs_[2], regs_[3]};
@@ -453,6 +536,18 @@ uint16_t AzCtrl::read(int reg, bool peek) {
 }
 
 void AzCtrl::write(int reg, uint16_t v) {
+    if (busy_) {
+        // МК занят: ПЛИС защёлкивает разряд IE (на нём держится ожидание команды 010), сама
+        // запись ждёт главного цикла МК. Запись в CSR завершает ожидание по 010 — кроме той же
+        // команды с IE. DR, пока МК занят, не принимается.
+        if ((reg & 3) != 0 || holdBk_) return;
+        ieLatch_ = (v & 0100) != 0;
+        if (!netWait_) { pendingCsr_ = v; return; }
+        if ((v & 077) == 8 && (v & 0100)) return;
+        stopWait_ = true;
+        net_.finishJob();
+        if (busy_) { pendingCsr_ = v; return; }
+    }
     int32_t res = 0;
     switch (reg & 3) {
     case 0: res = command(v); break;
@@ -475,13 +570,14 @@ void AzCtrl::write(int reg, uint16_t v) {
 int32_t AzCtrl::command(uint16_t v) {
     const int cmd = v & 077;
     const bool ie = (v & 0100) != 0;
+    ieLatch_ = ie;
     lastCmd_ = cmd;
     ++ncmd_;
     csr_ = 0200;
     int j = 0;
     int32_t res = 0;
     switch (cmd) {
-    case 0: resetRegs(); return 0;
+    case 0: resetRegs(); net_.tim6(false); return 0;   // TIM6 стоит до сетевых операций
     case 1:                                    // (001) выбор диска
         unit_ = static_cast<int>(dataWr_ & 0xFFFF);
         if (unit_ < 0 || unit_ >= MAX_DISKS) { status_ = 0x8600; return -1; }
@@ -505,21 +601,68 @@ int32_t AzCtrl::command(uint16_t v) {
         j = 11; blkHiPending_ = false;
         xferBuf_ = R_FNO; xferLen_ = 12;
         break;
-    case 4:  j = 4; break;                                           // (004) смонтировать
-    case 12: j = 12; break;                                          // (014) размонтировать
+    case 4: {                                                        // (004) смонтировать
+        const std::string raw = cstr(R_BLK, 512);
+        if (raw.size() > 4 && isLandisk(raw[4]) && upper(raw.substr(0, 1)) == "D") {
+            const int u = (raw[1] - '0') * 10 + (raw[2] - '0');
+            if (raw[1] >= '0' && raw[1] <= '3' && raw[2] >= '0' && raw[2] <= '9' && u < MAX_DISKS && raw[3] == '='
+                && !(diskFlags(u) & DISK_OPENED) && raw.size() - 4 < 0x180)
+                return netMount(u, raw.substr(4));
+        }
+        j = 4;
+        break;
+    }
+    case 12: {                                                       // (014) размонтировать
+        const std::string s = upper(cstr(R_BLK, 512));
+        if (s.size() >= 3 && s[0] == 'D' && s[1] >= '0' && s[1] <= '3' && s[2] >= '0' && s[2] <= '9') {
+            const int u = (s[1] - '0') * 10 + (s[2] - '0');
+            if (u < MAX_DISKS && (diskFlags(u) & DISK_OPENED) && isLandisk(diskName(u)[0])) {
+                startAsync([this, u] {
+                    const uint16_t rc = net_.landiskCmd(diskName(u), 0, bytes(R_BLK), AzNet::LD_CLOSE);
+                    diskFlags(u) = 0;
+                    bytes(R_DISKS + u * DISK_WORDS + 4)[1] = 0;
+                    w(R_DISKS + u * DISK_WORDS + 2) = 0; w(R_DISKS + u * DISK_WORDS + 3) = 0;
+                    diskName(u)[0] = 0;
+                    status_ = rc ? 0x8008F00u : 0;
+                });
+                return 0;
+            }
+        }
+        j = 12;
+        break;
+    }
     case 5:                                                          // (005) чтение блока
         if (!unitMounted()) return -1;
-        j = 5; xferBuf_ = R_BLK; xferLen_ = 0x100; blkHiPending_ = false;
+        xferBuf_ = R_BLK; xferLen_ = 0x100; blkHiPending_ = false;
+        if (isLandisk(diskName(unit_)[0])) {
+            startAsync([this] { net_.landiskCmd(diskName(unit_), block_, bytes(R_BLK), AzNet::LD_READ); });
+            return 0;
+        }
+        j = 5;
         break;
     case 6:                                                          // (006) запись блока
         if (!unitMounted()) return -1;
-        j = 6; blkHiPending_ = false;
+        blkHiPending_ = false;
+        if (isLandisk(diskName(unit_)[0])) {
+            startAsync([this] { net_.landiskCmd(diskName(unit_), block_, bytes(R_BLK), AzNet::LD_WRITE); resetRegs(); });
+            return 0;
+        }
+        j = 6;
         break;
     case 7:  regs_[1].rd = 3; return 0;                              // (007) размер, 16
     case 15: regs_[1].rd = 4; return 0;                              // (017) размер, 32
     case 16: regs_[1].rd = 5; return 0;                              // (020) ошибки загрузки
     case 23: regs_[1].rd = 7; return 0;                              // (027) версия
-    case 8:  resetRegs(); return 0;                                  // (010) сеть: без кабеля — ничего
+    case 8:                                                          // (010) крутить сеть, пока БК ждёт
+        resetRegs();
+        if (ie) {
+            netWait_ = true;
+            stopWait_ = false;
+            startAsync([this] { net_.netPollWait([this] { return ieLatch_ && !stopWait_; }); });
+            return 0;
+        }
+        net_.netPollWait([] { return false; });                      // один проход
+        return 0;
     case 9:  xferBuf_ = R_DISKS; xferLen_ = 0x18C0; return 0;        // (011) таблица дисков
     case 13: streamOut(xferBuf_, static_cast<int32_t>(xferLen_)); return 0;   // (015)
     case 14: streamIn(R_BLK, 0x100); return 0;                       // (016)
@@ -527,23 +670,25 @@ int32_t AzCtrl::command(uint16_t v) {
     case 18: streamOut(R_XBUF, 0x100); return 0;                     // (022)
     case 19: streamIn(R_XBUF, 0x100); return 0;                      // (023)
     case 20: resetRegs(); j = 20; break;                             // (024) буфер -> EEPROM
-    case 21: case 22: resetRegs(); j = cmd; break;                   // (025/026) Hall of Fame
+    case 21: case 22:                                                // (025/026) облако HOF
+        resetRegs();
+        startAsync([this, cmd] {
+            char* json = reinterpret_cast<char*>(bytes(R_XBUF));
+            if (cmd == 21) net_.hofSession(json); else net_.hofTransaction(json);
+        });
+        return 0;
     case 24: return 0;                                               // (030) NOP: важен разряд IE
-    case 25: case 34: resetRegs(); j = 25; break;                    // (031/042) время в буфер
+    case 25: case 34: resetRegs(); j = cmd; break;                   // (031/042) время RTC / NTP
     case 26: streamOut(R_TIME, 14); return 0;                        // (032)
     case 27: streamIn(R_SETTIME, 7); return 0;                       // (033)
     case 28: resetRegs(); j = 28; break;                             // (034) установить часы
-    case 29: case 30: resetRegs(); j = cmd; break;                   // (035/036) NTP — нет сети, но долгая
+    case 29: case 30: resetRegs(); j = cmd; break;                   // (035/036) NTP: опрос сейчас, RTC по NTP
 
     case 31:                                                         // (037) перезапуск AZ и БК
         resetRegs();
         if (resetMachine) resetMachine();
         return 0;
-    case 32: case 35:                                                // (040/043) IP, MAC — нули
-        resetRegs();
-        for (uint32_t i = 0; i < 12; ++i) w(R_NET + i) = 0;
-        j = cmd;
-        break;
+    case 32: case 35: resetRegs(); j = cmd; break;                   // (040/043) сетевые параметры, MAC
     case 33: streamOut(R_NET, 12); return 0;                         // (041)
     case 36: resetRegs(); j = 36; break;                             // (044) снимок экрана
     case 39: resetRegs(); j = 39; break;                             // (047) файл в память AZ
@@ -564,24 +709,30 @@ int32_t AzCtrl::command(uint16_t v) {
 
 int32_t AzCtrl::job(int j) {
     switch (j) {
-    case 5:  hdRead(); break;
-    case 6:  hdWrite(); break;
+    case 5:  hdRead(); net_.netPollWait([] { return false; }); break;     // HD_read: и проход net_poll
+    case 6:  hdWrite(); net_.netPollWait([] { return false; }); break;
     case 3:  status_ = static_cast<uint32_t>(dirOpen()); break;
     case 11: status_ = static_cast<uint32_t>(dirRead()); break;
     case 4:  status_ = static_cast<uint32_t>(mount()); break;
     case 12: status_ = static_cast<uint32_t>(dismount()); break;
     case 17: eepromRead(); break;
     case 20: eepromWrite(); break;
-    case 21: case 22: {
-        static const char kJson[] = "{\"RESULT\":\"ERROR\",\"DESCRIPTION\":\"CONNECTION_ERROR\"}";
-        for (size_t i = 0; i < sizeof kJson; ++i) {
-            uint16_t& x = w(R_XBUF + static_cast<uint32_t>(i / 2));
-            x = (i & 1) ? static_cast<uint16_t>((x & 0377) | (uint8_t(kJson[i]) << 8))
-                        : static_cast<uint16_t>((x & 0177400) | uint8_t(kJson[i]));
-        }
+    case 25: timeRecord(); break;
+    case 34: net_.timeRecordNtp(&ram_[R_TIME]); break;
+    case 29: net_.ntpResync(); break;
+    case 30: rtcFromNtp(); break;
+    case 32: {
+        uint8_t b[24];
+        net_.netinfo(b);
+        std::memcpy(bytes(R_NET), b, 24);
         break;
     }
-    case 25: timeRecord(); break;
+    case 35: {                                       // MAC — в тот же буфер, поверх первых 6 байт
+        uint8_t b[6];
+        net_.macAddr(b);
+        std::memcpy(bytes(R_NET), b, 6);
+        break;
+    }
     case 28: setTime(); break;
     case 36: screenshot(); break;
     case 39: fileToMem(); break;
@@ -832,10 +983,10 @@ void AzCtrl::cardSize() {
 
 // Снимок экрана .SCR: блок теневых регистров видео (слово 0x1F000 AZ) и палитры
 // (0x1F100) — их кладёт screenshotPrepare, — затем видеопамять (screenshot.c).
-void AzCtrl::screenshot() {
+void AzCtrl::screenshot(std::string name) {
     if (!memRead) return;
     if (screenshotPrepare) screenshotPrepare();
-    std::string name = cstr(R_XBUF, 256);
+    if (name.empty()) name = cstr(R_XBUF, 256);
     if (name.size() < 10) {
         const time_t t = std::time(nullptr) + static_cast<time_t>(timeOffset_);
         std::tm tm {};
@@ -864,23 +1015,133 @@ void AzCtrl::screenshot() {
     std::fclose(f);
 }
 
+// ---- Сеть ------------------------------------------------------------------------
+
+void AzCtrl::advance(int ticks, int cpuHz) {
+    if (ticks <= 0 || cpuHz <= 0) return;
+    tickAcc_ += static_cast<uint64_t>(ticks) * 1000000u;
+    const uint64_t us = tickAcc_ / static_cast<uint64_t>(cpuHz);
+    tickAcc_ %= static_cast<uint64_t>(cpuHz);
+    if (us) net_.advance(us);
+}
+
+// Долгая команда с сетью: МК уходит в задачу, CSR «занят»; по её окончании — прерывание
+// по 0174, если IE защёлкнут, и запись в CSR, пришедшая за это время.
+void AzCtrl::startAsync(std::function<void()> job) {
+    busy_ = true;
+    net_.startJob(std::move(job));
+}
+
+void AzCtrl::asyncDone() {
+    if (!busy_) return;
+    busy_ = holdBk_ = netWait_ = stopWait_ = false;
+    csr_ = (csr_ & 0x8000) | 0200;
+    if (ieLatch_ && irq) irq();
+    if (pendingCsr_ >= 0) {
+        const uint16_t v = static_cast<uint16_t>(pendingCsr_);
+        pendingCsr_ = -1;
+        write(0, v);
+    }
+}
+
+// azbk_boot_from_ini с сетевыми дисками: до 10 с ждать адреса, landisk_init, OPEN
+// каждого диска — всё это время БК в сбросе; потом main: имена DNS, 1000 проходов.
+void AzCtrl::netBoot(std::vector<int> units) {
+    holdBk_ = true;
+    busy_ = true;
+    net_.startJob([this, units] {
+        net_.tim6(true);
+        net_.waitLink(10);
+        net_.landiskInit();
+        net_.tim6(false);
+        for (int u : units) landiskOpen(u);
+        net_.tim6(true);
+        net_.bootFinish();
+    });
+}
+
+// OPEN передаёт в данных сведения о плате: время, адреса, версию, дату сборки, UID.
+void AzCtrl::landiskOpen(int u) {
+    uint8_t* b = bytes(R_BLK);
+    std::memset(b, 0, 512);
+    auto p32 = [&](int i, uint32_t v) { std::memcpy(b + 4 * i, &v, 4); };
+    auto p16 = [&](int i, uint16_t v) { std::memcpy(b + 2 * i, &v, 2); };
+    p32(1, net_.uptimeS());
+    p32(0, net_.unixLocal());
+    p32(3, net_.cfg().dns1);
+    p32(4, net_.cfg().dns2);
+    p32(2, net_.cfg().ip);
+    p16(10, static_cast<uint16_t>(net_.cfg().timezone));
+    p16(13, 0x1904);
+    std::snprintf(reinterpret_cast<char*>(b + 0x3C), 0x40, "https://www.maxiol.com");
+    std::snprintf(reinterpret_cast<char*>(b + 0x1C), 0x20, "%s %s", "May 24 2025", "01:38:31");
+    p32(31, net_.uid()[0]); p32(32, net_.uid()[1]); p32(33, net_.uid()[2]);
+    p16(12, 1);
+    p16(11, 1);
+    uint16_t* e = &ram_[R_DISKS + u * DISK_WORDS];
+    if (net_.landiskCmd(diskName(u), 0, b, AzNet::LD_OPEN)) {
+        bytes(R_DISKS + u * DISK_WORDS + 4)[1] = 0;
+        e[2] = e[3] = 0; e[0] = e[1] = 0;
+        diskFlags(u) = 0;
+        diskName(u)[0] = 0;
+        return;
+    }
+    bytes(R_DISKS + u * DISK_WORDS + 4)[1] = b[0];
+    e[2] = static_cast<uint16_t>(b[1] | (b[2] << 8));
+    e[3] = static_cast<uint16_t>(b[3] | (b[4] << 8));
+    const uint32_t blocks = (b[5] | (b[6] << 8) | (b[7] << 16) | (uint32_t(b[8]) << 24)) >> 9;
+    e[0] = static_cast<uint16_t>(blocks); e[1] = static_cast<uint16_t>(blocks >> 16);
+    diskFlags(u) |= DISK_MOUNTED | DISK_OPENED;
+}
+
+// dmount сетевого диска: landisk_init, OPEN; ошибка — 0x80000000 и запись снята.
+int32_t AzCtrl::netMount(int u, const std::string& name) {
+    char* nm = diskName(u);
+    std::memset(nm, 0, NAME_BYTES);
+    std::strncpy(nm, name.c_str(), NAME_BYTES - 1);
+    diskFlags(u) |= DISK_MOUNTED;
+    startAsync([this, u] {
+        net_.landiskInit();
+        landiskOpen(u);
+        if (diskFlags(u) & DISK_OPENED) { status_ = 0; return; }
+        diskFlags(u) = DISK_ERROR;
+        status_ = 0x80000000u;
+    });
+    return 0;
+}
+
+// 036: RTC по часам NTP — только если год позже 2021-го.
+void AzCtrl::rtcFromNtp() {
+    int yy, mon, day, wd, h, m, sec;
+    if (!net_.ntpClock(yy, mon, day, wd, h, m, sec)) return;
+    std::tm tm {};
+    tm.tm_year = 2000 + yy - 1900; tm.tm_mon = mon - 1; tm.tm_mday = day;
+    tm.tm_hour = h; tm.tm_min = m; tm.tm_sec = sec;
+    tm.tm_isdst = -1;
+    const time_t want = std::mktime(&tm);
+    if (want != static_cast<time_t>(-1)) timeOffset_ = static_cast<int64_t>(want - std::time(nullptr));
+}
+
 // ---- Отладка и снимок ------------------------------------------------------------
 
 std::vector<AzCtrl::UnitInfo> AzCtrl::units() const {
     std::vector<UnitInfo> v;
     for (int u = 0; u < MAX_DISKS; ++u) {
         if (!(diskFlags(u) & (DISK_MOUNTED | DISK_ERROR))) continue;
-        v.push_back({u, diskNameStr(u), units_[u].host, diskBlocks(u), units_[u].f != nullptr,
-                     units_[u].rw, !units_[u].overlay.empty()});
+        const bool net = isLandisk(diskNameStr(u).empty() ? 0 : diskNameStr(u)[0]);
+        v.push_back({u, diskNameStr(u), net ? std::string("landisk") : units_[u].host, diskBlocks(u),
+                     net ? (diskFlags(u) & DISK_OPENED) != 0 : units_[u].f != nullptr,
+                     !net && units_[u].rw, !units_[u].overlay.empty()});
     }
     return v;
 }
 
 std::string AzCtrl::summary() const {
-    char b[160];
-    std::snprintf(b, sizeof b, "CSR=%06o DR-сост=%d диск=%d блок=%u посл.команда=%03o (%llu команд)",
+    char b[320];
+    std::snprintf(b, sizeof b, "CSR=%06o DR-сост=%d диск=%d блок=%u посл.команда=%03o (%llu команд)%s%s",
                   csr_, regs_[1].rd, unit_, block_, lastCmd_ < 0 ? 0 : lastCmd_,
-                  static_cast<unsigned long long>(ncmd_));
+                  static_cast<unsigned long long>(ncmd_), busy_ ? ", МК занят сетью" : "",
+                  holdBk_ ? ", БК в сбросе (пуск с сетевыми дисками)" : "");
     return b;
 }
 
@@ -941,6 +1202,10 @@ bool AzCtrl::loadState(const uint8_t*& p, const uint8_t* end) {
         t.assign(reinterpret_cast<const char*>(p), len); p += len;
         return true;
     };
+    // Задача МК (сеть) в снимок не входит: после загрузки её нет.
+    net_.abortJob();
+    busy_ = holdBk_ = netWait_ = stopWait_ = false;
+    pendingCsr_ = -1;
     const size_t rb = ram_.size() * 2;
     if (static_cast<size_t>(end - p) < rb) return false;
     std::memcpy(ram_.data(), p, rb); p += rb;

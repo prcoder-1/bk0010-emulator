@@ -423,6 +423,7 @@ QJsonArray McpServer::toolDefs() const {
                 {"az_rw", P("boolean", "AZ disk images and BK writes (EEPROM, files) go to the SD card itself (default false: disks in memory, the rest in the emulator's data dir)")},
                 {"az_037", P("boolean", "BK-0010: the 037 modification (BK-0011M emulation, fast memory)")},
                 {"az_vga", P("boolean", "Show (and screenshot) the AZ VGA picture (true, default) or the BK's own screen")},
+                {"az_net", P("string", "AZБК network card cable (ENC28J60 + firmware 00019 TCP/IP: DHCP, NTP, ping, HTTP, landisk, HOF): \"tap:NAME\", \"macvtap:NAME\" or \"/dev/tapN\"; \"\" = unplugged. MAC/DHCP/address come from AZ.INI [NETWORK]. Plugged live, no reinstall (default: keep)")},
                 {"frames", P("integer", "Run this many frames after reset/boot (default 0)")}})));
     t.append(tool("bk_machine", "Show or switch the emulated machine and the machine mode. Without `machine` "
                   "it reports the current model (БК-0010-01 or БК-0011М), the mode, CPU clock, frame length, "
@@ -1164,6 +1165,15 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
         board_.setAzbk(false);
     }
     azCfg_ = cfg;
+    QString netNote;
+    if (args.contains("az_net")) {
+        // Кабель вставляют на ходу: плата не переустанавливается.
+        azCfg_.net = args.value("az_net").toString().toStdString();
+        if (board_.azbk() && !board_.az().setNet(azCfg_.net))
+            return fail("AZБК: сеть: " + QString::fromStdString(board_.az().ctrl().netStatus()));
+        if (board_.azbk() && !board_.az().ctrl().netStatus().empty())
+            netNote = " Сеть: " + QString::fromStdString(board_.az().ctrl().netStatus()) + ".";
+    }
     if (args.contains("az_vga")) board_.setAzVga(args.value("az_vga").toBool());
     board_.reset();
     cyrState_ = false;
@@ -1216,7 +1226,9 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
         extra += " AZБК on (SD " + QString::fromStdString(board_.az().config().sdDir) + ")";
         for (const auto& u : board_.az().ctrl().units())
             extra += QString(", AZ%1=%2").arg(u.unit).arg(QString::fromStdString(u.host.empty() ? u.name : u.host));
-        extra += ".";
+        const bk::EthPort* port = board_.az().ctrl().net().port();
+        extra += port ? ", network " + QString::fromStdString(port->describe()) : QString(", network unplugged");
+        extra += "." + netNote;
     }
     extra = QString(" %1%2.").arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
                 .arg(board_.ay() ? ", AY on" : "") + extra;
