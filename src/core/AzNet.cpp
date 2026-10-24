@@ -855,7 +855,8 @@ void AzNet::netPoll() {
     if (cfg_.ip) {
         if (linkPrev_ != 1) {
             if (linkPrev_ == 3 && ntpTries_++ > 20) { linkPrev_ = 1; ntpTries_ = 0; }
-            if (linkPrev_ == 2 && arpResolve(cfg_.ntp)) { linkPrev_ = 3; ntpTries_ = 0; }
+            // ntp_arp_server (0x08008A1C) спрашивает MAC шлюза (netcfg+0x14), не сервера NTP.
+            if (linkPrev_ == 2 && arpResolve(cfg_.gw)) { linkPrev_ = 3; ntpTries_ = 0; }
             if (linkPrev_ == 0) linkPrev_ = 2;
         }
         tcpTimers();
