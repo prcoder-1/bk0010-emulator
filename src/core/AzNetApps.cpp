@@ -147,13 +147,18 @@ void AzNet::hofDecodeBody(uint8_t* payload, bool rotateKey) {
     body[n] = 0;
     std::memset(hofJson_, 0, 0x1FF);
     size_t blen = 0;
-    azcrypto::base64Decode(reinterpret_cast<uint8_t*>(hofJson_), 0x200, &blen, reinterpret_cast<uint8_t*>(body), static_cast<size_t>(n));
+    const int b64 = azcrypto::base64Decode(reinterpret_cast<uint8_t*>(hofJson_), 0x200, &blen,
+                                           reinterpret_cast<uint8_t*>(body), static_cast<size_t>(n));
     std::memset(payload, 0, 0x200);
     size_t olen = 0;
-    azcrypto::ecbDecrypt(reinterpret_cast<uint8_t*>(hofJson_), std::min<size_t>(blen, 0x200), payload, &olen, hofKey_);
+    // Не base64 (сервер ответил ошибкой открытым текстом): длина у прошивки — мусор со стека,
+    // расшифровка не проходит — JSON для БК пустой, ключ прежний.
+    const bool ok = b64 == 0 && azcrypto::ecbDecrypt(reinterpret_cast<uint8_t*>(hofJson_), std::min<size_t>(blen, 0x200), payload, &olen, hofKey_);
     if (rotateKey) {
-        std::memcpy(hofKey_, payload, 0x20);
-        std::memcpy(hofJson_, payload + 0x20, 0x1E0);
+        if (ok) {                                     // ключ меняется, только если расшифровалось
+            std::memcpy(hofKey_, payload, 0x20);
+            std::memcpy(hofJson_, payload + 0x20, 0x1E0);
+        }
     } else {
         std::memcpy(hofJson_, payload, 0x200);
     }
