@@ -413,7 +413,7 @@ QJsonArray McpServer::toolDefs() const {
                 {"cpu_phase", P("integer", "CPU clock phase vs the 037 window, 0 or 1 (default: keep)")},
                 {"smk", P("boolean", "СМК-512 memory board on/off (default: keep)")},
                 {"disk", P("string", "Floppy image (.bkd/.img) to insert into drive 0 and boot; \"\" = eject (default: keep)")},
-                {"disk_rw", P("boolean", "Insert the image writable (default false = read-only)")},
+                {"disk_rw", P("boolean", "Insert the image writable (default false = read-only). With AZБК: the AZ0 image is written to its file (default: BK writes stay in memory)")},
                 {"hdd", P("string", "Hard-disk image (.hdi) to attach as IDE master and boot; \"\" = detach (default: keep)")},
                 {"hdd_rw", P("boolean", "Attach the HDD image writable (default false: BK writes stay in memory)")},
                 {"hdd_ctl", P("string", "HDD controller: \"auto\" (by the image's layout), \"smk\" or \"samara\" (default: keep)")},
@@ -1153,16 +1153,24 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
     if (unit0Given) {
         if (unit0.isEmpty()) cfg.units.erase(0); else cfg.units[0] = unit0.toStdString();
     }
+    // disk_rw с AZ — образ AZ0 на запись в свой файл (иначе записи БК — в памяти поверх него).
+    const bool unit0RwGiven = azWanted && args.contains("disk_rw");
+    if (unit0RwGiven) { if (args.value("disk_rw").toBool()) cfg.rwUnits.insert(0); else cfg.rwUnits.erase(0); }
     if (args.contains("az_rw")) { cfg.rw = args.value("az_rw").toBool(); cfgChanged = true; }
     if (args.contains("az_037")) { cfg.mod037 = args.value("az_037").toBool(); cfgChanged = true; }
     cfg.writeDir = azWriteDirFor(QString::fromStdString(cfg.sdDir), cfg.rw).toStdString();
     if (azWanted && (cfgChanged || unit0Given || !board_.azbk())) {
         std::string err;
         if (!bk::Azbk::usable(cfg, &err)) return fail("AZБК: " + QString::fromStdString(err));
-        if (board_.azbk() && !cfgChanged) board_.setAzUnit(0, unit0.toStdString());
+        if (board_.azbk() && !cfgChanged) {
+            board_.az().setUnitRw(0, cfg.rwUnits.count(0) != 0);
+            board_.setAzUnit(0, unit0.toStdString());
+        }
         else if (!board_.setAzbk(true, cfg, &err)) return fail("AZБК: " + QString::fromStdString(err));
     } else if (!azWanted && board_.azbk()) {
         board_.setAzbk(false);
+    } else if (unit0RwGiven) {
+        board_.az().setUnitRw(0, cfg.rwUnits.count(0) != 0);
     }
     azCfg_ = cfg;
     QString netNote;

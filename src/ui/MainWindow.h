@@ -41,6 +41,7 @@ struct AzCliOptions {
     bool rw = false;
     int mod037 = -1;
     QString net;                           // кабель сетевой карты (пусто — настройка, «-» — нет)
+    bool unitsRw = false;                  // --disk-rw: диски AZn из командной строки — на запись
 };
 
 class MainWindow : public QMainWindow {
@@ -203,6 +204,7 @@ private:
     QString romDir_;
     QAction* azAction_ = nullptr;          // галка «AZБК»
     QAction* az037Action_ = nullptr;       // галка «доработка 037» (БК-0010)
+    QAction* azUnit0RwAction_ = nullptr;   // галка «диск AZ0 на запись»
     QAction* azVgaAction_ = nullptr;       // галка «экран VGA AZБК»
     void syncMachineMenu();                // галки меню — по состоянию платы (без сигналов)
     QAction* aspectAction_ = nullptr;   // галка «Пиксели 3:4»

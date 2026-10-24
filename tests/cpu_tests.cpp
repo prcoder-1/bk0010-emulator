@@ -3614,6 +3614,36 @@ int main(int argc, char** argv) {
         CHECK(azR(a, 0177226) == 0106447, "AZ/контроллер: BOOT2 — поток команд загрузчика (MTPS)");
     }
 
+    SECTION("AZБК: запись в образ отдельного диска (rwUnits, --disk-rw)")
+    {
+        azSetup();
+        auto writeBlock = [&](Azbk& a, uint16_t blk, uint16_t w0) {
+            azW(a, 0177220, 0); azW(a, 0177222, 0); azW(a, 0177220, 1);
+            azW(a, 0177222, blk); azW(a, 0177220, 2);
+            azW(a, 0177220, 016);
+            for (int i = 0; i < 256; ++i) azW(a, 0177222, static_cast<uint16_t>(w0 + i));
+            azW(a, 0177220, 6);
+        };
+        auto fileWord = [&](int blk) {
+            std::ifstream d(azDir / "DISKS" / "T.IMG", std::ios::binary);
+            d.seekg(blk * 512); uint16_t w = 0; d.read(reinterpret_cast<char*>(&w), 2); return w;
+        };
+        Azbk::Config c = azCfg();
+        c.rwUnits.insert(0);
+        Azbk a;
+        a.powerOn(c, true, 4000000);
+        writeBlock(a, 1, 01000);
+        CHECK(fileWord(1) == 01000, "AZ/запись: AZ0 из rwUnits — блок записан в файл образа");
+        CHECK(!fs::exists(azWr / "DISKS"), "AZ/запись: карта не трогается — EEPROM и файлы по-прежнему в каталог записи");
+        azSetup();
+        Azbk b;
+        b.powerOn(azCfg(), true, 4000000);
+        writeBlock(b, 2, 02000);
+        CHECK(fileWord(2) == static_cast<uint16_t>(512 * 3 + 1), "AZ/запись: без rwUnits — в памяти, файл цел");
+        b.setUnitRw(0, true);
+        CHECK(fileWord(2) == 02000, "AZ/запись: включение на ходу сбрасывает в файл уже записанное");
+    }
+
     SECTION("AZБК: DMA-звук — PCM, конец однократного проигрывания, IMA ADPCM")
     {
         azSetup();

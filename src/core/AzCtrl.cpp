@@ -179,7 +179,7 @@ bool AzCtrl::openDisk(int u, const std::string& host, const std::string& name) {
         bootErrors_ |= 0x4000;
         return false;
     }
-    un.rw = cfg_.rw;
+    un.rw = unitRw(u);
     un.f = std::fopen(host.c_str(), un.rw ? "r+b" : "rb");
     if (!un.f && un.rw) { un.rw = false; un.f = std::fopen(host.c_str(), "rb"); }
     if (!un.f) {
@@ -376,6 +376,24 @@ void AzCtrl::setUnit(int u, const std::string& host) {
     if (host.empty()) { cfg_.units.erase(u); return; }
     cfg_.units[u] = host;
     openDisk(u, host, "0:/" + upper(fs::path(host).filename().string()));
+}
+
+void AzCtrl::setUnitRw(int u, bool on) {
+    if (u < 0 || u >= MAX_DISKS) return;
+    if (on) cfg_.rwUnits.insert(u); else cfg_.rwUnits.erase(u);
+    Unit& un = units_[u];
+    if (!un.f || un.host.empty() || unitRw(u) == un.rw) return;
+    FILE* f = std::fopen(un.host.c_str(), unitRw(u) ? "r+b" : "rb");
+    if (!f) return;                            // файл не открылся на запись — остаётся как был
+    std::fclose(un.f);
+    un.f = f;
+    un.rw = unitRw(u);
+    if (un.rw) {
+        for (const auto& kv : un.overlay)
+            if (std::fseek(un.f, static_cast<long>(kv.first) * 512, SEEK_SET) == 0) std::fwrite(kv.second.data(), 1, 512, un.f);
+        std::fflush(un.f);
+        un.overlay.clear();
+    }
 }
 
 // Перезапуск МК (main прошивки): lan_init, AZ.INI ([NETWORK] -> net_reinit), диски; с
@@ -1203,7 +1221,7 @@ bool AzCtrl::reopenFile(int u, const std::string& host, bool rw) {
     if (un.f) std::fclose(un.f);
     un.f = nullptr;
     un.host = host;
-    un.rw = rw && cfg_.rw;
+    un.rw = rw && unitRw(u);
     un.f = std::fopen(host.c_str(), un.rw ? "r+b" : "rb");
     if (!un.f && un.rw) { un.rw = false; un.f = std::fopen(host.c_str(), "rb"); }
     return un.f != nullptr;

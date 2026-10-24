@@ -417,7 +417,9 @@ Key cross-cutting facts to know before editing the CPU or screen:
   dir AppDataLocation/azbk/<card>-<hash> (`src/ui/AzPaths.h`), read before the card, unless `--az-rw`.
   `Board::displayFrame()` is the VGA 1024x768 (or the BK screen), drawn per line only while
   `setAzLive(true)` (GUI VGA view, video capture), else rendered whole on demand. State is a
-  separate «AZB1» tail after BKX1. `setAzbk` validates the card first (no change on failure);
+  separate «AZB1» tail after BKX1. Images are read-only overlays unless `--az-rw` (everything)
+  or per unit (`Config::rwUnits`: `--disk-rw` for CLI images, GUI «Диск AZ0 на запись», MCP
+  `disk_rw`; `setUnitRw` flushes the overlay). `setAzbk` validates the card first (no change on failure);
   `setSmk512` under AZ only records, removing AZ restores СМК/КНГМД; `setAzUnit` swaps images live.
   **Network** (`src/core/AzNet*`, `NetPort`, `McuFiber`, `AzCrypto`): ENC28J60 + the firmware's
   own TCP/IP stack ported 1:1 from the 00019 RE (DHCP/DNS/NTP/ARP/ICMP/TCP, landisk, HOF, HTTP

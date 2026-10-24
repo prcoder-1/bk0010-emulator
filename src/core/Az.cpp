@@ -46,7 +46,7 @@ bool Azbk::powerOn(const Config& c, bool bk11, int cpuHz, std::string* err) {
     cvxL_ = cvxR_ = cvxM_ = 0x8000; cvxCsr_ = 0;
     com_[0] = 0; com_[1] = 0; com_[2] = 0200; com_[3] = 0;
     AzCtrl::Config cc;
-    cc.sdDir = c.sdDir; cc.writeDir = c.writeDir; cc.rw = c.rw; cc.units = c.units; cc.net = c.net;
+    cc.sdDir = c.sdDir; cc.writeDir = c.writeDir; cc.rw = c.rw; cc.units = c.units; cc.net = c.net; cc.rwUnits = c.rwUnits;
     const bool ok = ctrl_.init(cc, err);
     // Заставка из [LOGO] — 256×192, 256 цветов в странице 040 (так её показывает GID).
     if (ctrl_.logoLoaded()) { pageL0_ = 040; setMode(063223); }
@@ -618,7 +618,8 @@ bool Azbk::loadState(const uint8_t*& p, const uint8_t* e) {
     c.rw = fl & 1; c.mod037 = fl & 2;
     // Плата заново «вставляется» (диски открываются по конфигурации снимка), потом
     // поверх неё — состояние.
-    c.net = cfg_.net;                                // кабель — хоста, не снимка
+    c.net = cfg_.net;                                // кабель и запись в образы — хоста, не снимка
+    c.rwUnits = cfg_.rwUnits;
     if (!on() || cfg_.sdDir != c.sdDir || cfg_.units != c.units || cfg_.rw != c.rw) powerOn(c, bk11_, cpuHz_);
     cfg_ = c;
     smkTrigger_ = fl & 4; smallScreen_ = fl & 8; sync_ = fl & 16; dmaPlaying_ = fl & 32; dmaDone_ = fl & 64;

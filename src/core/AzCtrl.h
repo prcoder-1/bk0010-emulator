@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include "AzNet.h"
@@ -24,6 +25,7 @@ public:
         std::string sdDir;                   // корень «карты SD»: AZ.INI, ROM/, DISKS/
         std::string writeDir;                // куда идёт то, что пишет БК (EEPROM, файлы)
         bool rw = false;                     // образы дисков на запись (иначе — в памяти)
+        std::set<int> rwUnits;               // эти AZn на запись и без rw (запись карты — как без rw)
         std::map<int, std::string> units;    // AZn поверх [DISKS] (путь хоста)
         std::string net;                     // кабель: tap:ИМЯ | macvtap:ИМЯ | /dev/tapN, пусто — нет
     };
@@ -43,6 +45,9 @@ public:
     // Диск AZn на ходу (пустой путь — снять, вернётся по AZ.INI при перезапуске МК).
     // Остальное состояние платы не трогается.
     void setUnit(int unit, const std::string& host);
+    // Запись в образ AZn на ходу: включение сначала сбрасывает в файл то, что БК уже записала
+    // в память поверх него.
+    void setUnitRw(int unit, bool on);
     void reboot();                                   // 037: МК перезапускается, AZ.INI заново
     void close();
     const Config& config() const { return cfg_; }
@@ -185,6 +190,7 @@ private:
     std::string anyHost_;                   // открытый файл (для снимка)
     bool anyWrite_ = false;
     bool reopenFile(int u, const std::string& host, bool rw);
+    bool unitRw(int u) const { return cfg_.rw || cfg_.rwUnits.count(u) != 0; }
     uint32_t anyPos_ = 0, anySize_ = 0;
     int64_t timeOffset_ = 0;                // часы AZ относительно хоста, с
 
