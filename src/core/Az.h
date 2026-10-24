@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include "Memory.h"
@@ -43,6 +44,7 @@ public:
     struct Config {
         std::string sdDir, writeDir;
         bool rw = false;                     // образы дисков на запись
+        std::set<int> rwUnits;               // отдельные AZn на запись (AzCtrl::Config::rwUnits)
         bool mod037 = false;                 // доработка 037 (REVTYPE = 1): эмуляция 11М на БК-0010
         std::map<int, std::string> units;    // AZn поверх [DISKS]
         std::string net;                     // кабель сетевой карты (AzCtrl::Config::net)
@@ -69,6 +71,11 @@ public:
     bool on() const { return !mem_.empty(); }
     // Кабель сетевой карты — на ходу (AzCtrl::setNet); запоминается для следующих включений.
     bool setNet(const std::string& spec) { cfg_.net = spec; return !on() || ctrl_.setNet(spec); }
+    // Запись в образ AZn — на ходу (AzCtrl::setUnitRw).
+    void setUnitRw(int unit, bool rw) {
+        if (rw) cfg_.rwUnits.insert(unit); else cfg_.rwUnits.erase(unit);
+        if (on()) ctrl_.setUnitRw(unit, rw);
+    }
     void setMachine(bool bk11, int cpuHz) { bk11_ = bk11; cpuHz_ = cpuHz; }
     const Config& config() const { return cfg_; }
     // Сброс БК (кнопка, включение, команда 037): ResetCold платы — окна сняты, в окне 15

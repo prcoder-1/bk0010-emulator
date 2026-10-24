@@ -134,7 +134,10 @@ struct CliOptions {
         c.sdDir = (azSd.isEmpty() ? romDir + "/azbk" : azSd).toStdString();
         c.writeDir = MainWindow::azWriteDir(QString::fromStdString(c.sdDir), azRw).toStdString();
         c.rw = azRw; c.mod037 = az037;
-        for (const auto& kv : azUnits) c.units[kv.first] = kv.second.toStdString();
+        for (const auto& kv : azUnits) {
+            c.units[kv.first] = kv.second.toStdString();
+            if (diskRw) c.rwUnits.insert(kv.first);   // --disk-rw: образы из командной строки — на запись
+        }
         if (azNet != "-") c.net = azNet.toStdString();
         return c;
     }
@@ -684,7 +687,8 @@ static void printHelp(const char* prog) {
         "  --az-sd <каталог>      «карта SD» с AZ.INI (по умолчанию <каталог ПЗУ>/azbk —\n"
         "                         прошивка 00019 без дисков)\n"
         "  --az-unit N=<образ>    диск AZn поверх [DISKS] из AZ.INI (без «N=» — AZ0);\n"
-        "                         включает --az. Образ дискеты позиционным аргументом — AZ0\n"
+        "                         включает --az. Образ дискеты позиционным аргументом — AZ0;\n"
+        "                         с --disk-rw такие образы пишутся в свои файлы\n"
         "  --az-rw                образы на запись и запись БК (EEPROM, файлы) — прямо на\n"
         "                         карту; иначе изменения дисков в памяти, остальное — в\n"
         "                         каталоге данных эмулятора\n"
@@ -698,7 +702,8 @@ static void printHelp(const char* prog) {
         "Дисковод:\n"
         "  --disk <образ>         вставить дискету в привод A и загрузиться с неё\n"
         "  --disk-b <образ>       вставить дискету в привод B\n"
-        "  --disk-rw              образы без защиты записи (изменения пишутся в файл)\n"
+        "  --disk-rw              образы без защиты записи (изменения пишутся в файл);\n"
+        "                         с AZБК — диски AZn из командной строки\n"
         "  --disk-sides 1|2       число сторон (по умолчанию — по размеру образа)\n"
         "  --disk-rom smk|326|<файл>  прошивка контроллера: smk512.rom, disk326.rom или своя\n"
         "\n"
@@ -820,6 +825,7 @@ int main(int argc, char** argv) {
     MainWindow::AzOptions azo;
     azo.on = o.az; azo.sd = o.azSd; azo.units = o.azUnits; azo.rw = o.azRw; azo.mod037 = o.az037 ? 1 : -1;
     azo.net = o.azNet;
+    azo.unitsRw = o.diskRw;
     MainWindow w(o.romDir, o.machineChoice, o.machine, o.smk, o.aspect34, o.ay, o.ay2, o.covox, azo);
     w.setScanlineOverride(o.scanline);
     w.setMstd(o.mstd);

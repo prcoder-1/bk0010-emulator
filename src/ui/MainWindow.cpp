@@ -207,6 +207,16 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
         }
         status_->setText("Диск AZ0 — по AZ.INI");
     });
+    // Образы AZ по умолчанию только на чтение (записи БК — в памяти поверх файла); галка
+    // пишет изменения диска AZ0 в его файл, включая уже сделанные.
+    azUnit0RwAction_ = azMenu->addAction("Диск AZ0 на &запись (изменения — в файл образа)");
+    azUnit0RwAction_->setCheckable(true);
+    connect(azUnit0RwAction_, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue("azbk/unit0rw", on);
+        azCli_.unitsRw = false;
+        board_->az().setUnitRw(0, on);
+        status_->setText(on ? "Диск AZ0: запись в файл образа" : "Диск AZ0: только чтение, изменения — в памяти");
+    });
     azMenu->addAction("&Сеть (кабель сетевой карты)…", this, &MainWindow::chooseAzNet);
     az037Action_ = azMenu->addAction("Доработка &037 (БК-0010: эмуляция БК-0011М)");
     az037Action_->setCheckable(true);
@@ -862,7 +872,11 @@ bk::Azbk::Config MainWindow::azConfig() const {
     c.mod037 = azCli_.mod037 >= 0 ? azCli_.mod037 > 0 : st.value("azbk/mod037", false).toBool();
     const QString u0 = st.value("azbk/unit0").toString();
     if (!u0.isEmpty()) c.units[0] = u0.toStdString();
-    for (const auto& kv : azCli_.units) c.units[kv.first] = kv.second.toStdString();
+    for (const auto& kv : azCli_.units) {
+        c.units[kv.first] = kv.second.toStdString();
+        if (azCli_.unitsRw) c.rwUnits.insert(kv.first);
+    }
+    if (st.value("azbk/unit0rw", false).toBool()) c.rwUnits.insert(0);
     const QString net = !azCli_.net.isEmpty() ? azCli_.net : st.value("azbk/net").toString();
     if (net != "-") c.net = net.toStdString();
     return c;
@@ -998,10 +1012,11 @@ void MainWindow::syncMachineMenu() {
     smkAction_->setChecked(board_->smk512());
     smkAction_->setEnabled(!board_->azbk());
     if (azAction_) {
-        QSignalBlocker ba(azAction_), bb(az037Action_);
+        QSignalBlocker ba(azAction_), bb(az037Action_), bc(azUnit0RwAction_);
         azAction_->setChecked(board_->azbk());
         az037Action_->setEnabled(!board_->bk11());
         az037Action_->setChecked(azConfig().mod037);
+        azUnit0RwAction_->setChecked(azConfig().rwUnits.count(0) != 0);
     }
 }
 
