@@ -417,8 +417,9 @@ bool AzCtrl::unitMounted() {
 // ---- Регистры -----------------------------------------------------------------
 
 uint16_t AzCtrl::read(int reg, bool peek) {
-    // МК занят (сеть): ПЛИС отвечает за него «не готов»; что она отдаёт в DR, неизвестно — 0.
-    if (busy_) return 0;
+    // Ожидание по 010 кончается любым обращением БК к регистрам, и обращение обслуживается.
+    // Другая задача МК (landisk, HOF): ПЛИС отвечает за него «не готов», в DR — 0 (неизвестно).
+    if (busy_ && (peek || !endNetWait())) return 0;
     // Отладчику — без побочных эффектов: автоматы прогоняются на копии.
     if (peek) {
         const Reg saved[4] = {regs_[0], regs_[1], regs_[2], regs_[3]};
@@ -536,17 +537,20 @@ uint16_t AzCtrl::read(int reg, bool peek) {
 }
 
 void AzCtrl::write(int reg, uint16_t v) {
+    if (busy_ && !holdBk_ && netWait_) {
+        // Ожидание по 010 кончается любым обращением (драйвер AZ337 ставит 0110 после каждой
+        // операции, а следующую начинает с записи номера блока в DR); та же 010 с IE — опрос
+        // просто продолжается.
+        if ((reg & 3) == 0 && (v & 077) == 8 && (v & 0100)) return;
+        endNetWait();
+    }
     if (busy_) {
-        // МК занят: ПЛИС защёлкивает разряд IE (на нём держится ожидание команды 010), сама
-        // запись ждёт главного цикла МК. Запись в CSR завершает ожидание по 010 — кроме той же
-        // команды с IE. DR, пока МК занят, не принимается.
+        // Другая задача МК: ПЛИС защёлкивает разряд IE, запись в CSR ждёт главного цикла МК,
+        // DR не принимается.
         if ((reg & 3) != 0 || holdBk_) return;
         ieLatch_ = (v & 0100) != 0;
-        if (!netWait_) { pendingCsr_ = v; return; }
-        if ((v & 077) == 8 && (v & 0100)) return;
-        stopWait_ = true;
-        net_.finishJob();
-        if (busy_) { pendingCsr_ = v; return; }
+        pendingCsr_ = v;
+        return;
     }
     int32_t res = 0;
     switch (reg & 3) {
@@ -1032,11 +1036,21 @@ void AzCtrl::startAsync(std::function<void()> job) {
     net_.startJob(std::move(job));
 }
 
+bool AzCtrl::endNetWait() {
+    if (busy_ && netWait_ && !holdBk_) {
+        stopWait_ = true;
+        net_.finishJob();
+    }
+    return !busy_;
+}
+
 void AzCtrl::asyncDone() {
     if (!busy_) return;
+    const bool wait = netWait_;
     busy_ = holdBk_ = netWait_ = stopWait_ = false;
     csr_ = (csr_ & 0x8000) | 0200;
-    if (ieLatch_ && irq) irq();
+    // Ожидание по 010 кончает обращение БК — прерывания за ним нет.
+    if (ieLatch_ && !wait && irq) irq();
     if (pendingCsr_ >= 0) {
         const uint16_t v = static_cast<uint16_t>(pendingCsr_);
         pendingCsr_ = -1;
