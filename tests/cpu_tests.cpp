@@ -4042,6 +4042,18 @@ int main(int argc, char** argv) {
         CHECK(std::memcmp(blk, want, 16) == 0, "AZ/HOF: AES-256 — вектор FIPS-197 C.3");
         azcrypto::aes256DecryptBlock(key, blk);
         CHECK(blk[0] == 0 && blk[1] == 0x11 && blk[15] == 0xFF, "AZ/HOF: AES-256 — расшифровка обратна");
+        // Хвост последнего блока — нулями (__aeabi_memset прошивки), кратная 16 длина — лишний нулевой блок.
+        uint8_t enc[48], ref[16] = {'B', 'K', '1'};
+        char k32[32];
+        for (int i = 0; i < 32; ++i) k32[i] = static_cast<char>(i);
+        const size_t el = azcrypto::ecbEncrypt(reinterpret_cast<const uint8_t*>("BK1"), 3, enc, k32);
+        azcrypto::aes256EncryptBlock(key, ref);
+        uint8_t z[16] = {0};
+        azcrypto::aes256EncryptBlock(key, z);
+        uint8_t enc2[48];
+        const size_t el2 = azcrypto::ecbEncrypt(reinterpret_cast<const uint8_t*>("0123456789ABCDEF"), 16, enc2, k32);
+        CHECK(el == 16 && std::memcmp(enc, ref, 16) == 0 && el2 == 32 && std::memcmp(enc2 + 16, z, 16) == 0,
+              "AZ/HOF: AES ECB — дополнение нулями, у кратной 16 длины — лишний нулевой блок");
         char b64[64]; size_t n = 0;
         azcrypto::base64Encode(b64, sizeof b64, &n, reinterpret_cast<const uint8_t*>("BK-0011M"), 8);
         uint8_t back[16]; size_t m = 0;

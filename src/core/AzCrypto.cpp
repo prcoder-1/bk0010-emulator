@@ -104,15 +104,16 @@ void aes256DecryptBlock(const uint8_t key[32], uint8_t s[16]) {
 size_t ecbEncrypt(const uint8_t* in, size_t len, uint8_t* out, const char key[32]) {
     const size_t n = len + (16 - (len & 15));
     std::memset(out, 0, n);
-    uint8_t blk[16] = {0};
     for (size_t i = 0; i < n; i += 16) {
-        if (i + 16 < len) std::memcpy(blk, in + i, 16);
-        else if (len > i) std::memcpy(blk, in + i, len - i);   // хвост блока — от предыдущего
         uint8_t b[16];
-        std::memcpy(b, blk, 16);
+        if (i + 16 < len) {
+            std::memcpy(b, in + i, 16);
+        } else {
+            std::memset(b, 0, 16);                    // хвост — нулями (__aeabi_memset)
+            if (len > i) std::memcpy(b, in + i, len - i);
+        }
         aes256EncryptBlock(reinterpret_cast<const uint8_t*>(key), b);
         std::memcpy(out + i, b, 16);
-        std::memcpy(blk, b, 16);   // прошивка шифрует блок на месте: следующий начинается с шифртекста
     }
     return n;
 }

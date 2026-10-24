@@ -12,8 +12,7 @@ void aes256EncryptBlock(const uint8_t key[32], uint8_t block[16]);
 void aes256DecryptBlock(const uint8_t key[32], uint8_t block[16]);
 
 // aes256_ecb_encrypt_buf прошивки: длина результата — len, дополненная до следующей
-// кратной 16 (кратная 16 получает лишний блок). Хвост последнего блока прошивка не
-// заполняет — там остаются байты предыдущего блока; так и здесь.
+// кратной 16 (кратная 16 получает лишний блок), хвост — нулями.
 size_t ecbEncrypt(const uint8_t* in, size_t len, uint8_t* out, const char key[32]);
 // aes256_ecb_decrypt_buf: false, если len не кратна 16; длина результата — strlen.
 bool ecbDecrypt(const uint8_t* in, size_t len, uint8_t* out, size_t* outLen, const char key[32]);
