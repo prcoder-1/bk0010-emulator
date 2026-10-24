@@ -4030,7 +4030,7 @@ int main(int argc, char** argv) {
         // Постоянный адрес из AZ.INI, без DHCP; без кабеля.
         azSetup();
         std::ofstream(azDir / "AZ.INI", std::ios::app)
-            << "[NETWORK]\r\nDHCP=OFF\r\nIP=192.168.7.9\r\nMASK=255.255.0.0\r\nGW=192.168.0.1\r\nDNS1=8.8.8.8\r\n";
+            << "[NETWORK]\r\nDHCP=OFF\r\nIP=192.168.7.9\r\nMASK=255.255.0.0\r\nGW=192.168.0.1\r\nDNS1=8.8.8.8\r\nNTP=8.8.4.4\r\n";
         Azbk c;
         c.powerOn(azCfg(), true, 4000000);
         std::vector<uint16_t> si;
@@ -4042,6 +4042,19 @@ int main(int argc, char** argv) {
               "AZ/сеть: без MAC= в AZ.INI — MAC прошивки по умолчанию 00:0E:35:22:0B:01");
         azW(c, 0177220, 010);                                // 010 без IE — один проход, без «занят»
         CHECK(!c.ctrl().busy() && azR(c, 0177220) == 0200, "AZ/сеть: 010 без IE — один проход net_poll");
+        // NTP вне подсети: прошивка (ntp_arp_server) спрашивает по ARP шлюз, а не сервер NTP.
+        auto lan2 = std::make_unique<FakeLan>();
+        FakeLan& L2 = *lan2;
+        c.ctrl().net().setPort(std::move(lan2));
+        azW(c, 0177220, 0110);
+        for (int i = 0; i < 3000; ++i) c.advance(4000);
+        int arpNtp = 0, arpGw = 0;
+        for (const auto& f : L2.out)
+            if (f.size() >= 42 && f[12] == 8 && f[13] == 6 && f[21] == 1) {
+                if (f[38] == 8 && f[39] == 8 && f[40] == 4 && f[41] == 4) ++arpNtp;
+                if (f[38] == 192 && f[39] == 168 && f[40] == 0 && f[41] == 1) ++arpGw;
+            }
+        CHECK(arpNtp == 0 && arpGw >= 1, "AZ/сеть: ARP — шлюз, а не NTP вне подсети (без шторма раз в 200 мс)");
     }
 
     SECTION("AZБК: AES-256 и base64 облачного клиента")
