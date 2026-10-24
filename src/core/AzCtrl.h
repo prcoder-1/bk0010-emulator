@@ -148,6 +148,7 @@ private:
     static bool isLandisk(char c) { return c == 'N' || c == 'P' || c == 'R' || c == 'S' || c == 'A'; }
     void startAsync(std::function<void()> job);   // долгая сетевая команда (CSR «занят»)
     void asyncDone();
+    bool endNetWait();                             // обращение БК кончает ожидание по 010
     void netBoot(std::vector<int> netUnits);      // пуск МК с сетевыми дисками
     int32_t netMount(int u, const std::string& name);
     void landiskOpen(int u);                       // OPEN с описанием платы (landisk_open_at_boot)

@@ -425,7 +425,8 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `EthPort` (tap/macvtap, Linux). MCU time is EMULATED time; TIM6/uptime runs only while the
   firmware enables it (boot..cmd 000, network ops, cmd 010+IE). Blocking firmware loops run in
   `McuFiber` (a thread in strict hand-off with emulation — deterministic); while a network job
-  runs CSR reads 0 («busy»), a CSR write is latched (a write ends the 010 wait). Network disks
+  runs CSR reads 0 («busy») and a CSR write is latched; the 010 wait instead ends on ANY BK
+  access to CSR/DR, which is then served (AZ337 writes DR right after its `0110`). Network disks
   in AZ.INI hold the BK in reset during MCU boot (`Board::runLoop`, `Azbk::holdCpu`). End-to-end
   test without root: `unshare -rn` + tap + dnsmasq (docs/azbk.md, «Сеть»).
 - **Video capture** (`src/core/VideoCapture`, `Zmbv`, `AviWriter`; core links zlib + threads):
