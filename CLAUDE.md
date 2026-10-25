@@ -63,6 +63,9 @@ the СМК-512 or the «Самара» controller, `docs/hdd.md`),
 for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
 `--video <file.avi|.mp4>` / `--video-codec zmbv|h264` (default: by extension) / `--video-size 1024x768|512x256` /
 `--video-audio` / `--no-video-audio` (screen capture with sound, GUI and headless, `docs/video.md`),
+`--tape <file.wav>` / `--tape-play` / `--tape-remote` (cassette in the tape recorder) and
+`--wav2bin <file.wav>` (catalogue + extract to .BIN, `docs/tape.md`); a positional `.wav` (or
+`x.wav#N`) loads the tape's program like a .BIN,
 `--scanline` (per-scanline rendering — each line drawn with the palette/screen values live
 when the beam crossed it and the scroll latched for the field, driven off the `Vp037` raster; OFF by default,
 see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
@@ -87,7 +90,7 @@ Two layers, deliberately decoupled:
   REAL time (`QElapsedTimer`), not by timer ticks: a frame is 20.48 ms, which is not
   an integral number of milliseconds.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
-  as ~46 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
+  as ~47 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
   run/step/step-over/step-out, `bk_machine` (show / switch БК-0010-01 ↔ БК-0011М), regs/mem, break (optionally conditional) / watch
   (data watchpoints), backtrace, xrefs, search/diff memory, type, callers/callees,
   frames, coverage, profile (speedscope folded stacks) / calltree (text CCT) / profile-reset
@@ -95,7 +98,7 @@ Two layers, deliberately decoupled:
   io-state / io-log, emt-log (EMT 36 file I/O), hotspots, screenshot (inline PNG) /
   audio, state save/load, plus the game-debugging set: `bk_joystick` / `bk_joy_probe`
   (parallel port 0177714), timed input on `bk_key` / `bk_run` (`input` timeline),
-  `bk_ocr` (read screen text via the character cells).
+  `bk_ocr` (read screen text via the character cells), `bk_tape` (tape recorder).
   Owns its own `Board`, reuses only the `Board`/`Cpu`/`Memory`/`Screen`/`Trace`
   public API + `bk::disasm` + the shared input tables. Entered at the very top of
   `main()` before any GUI setup; runs under an offscreen `QGuiApplication` so
@@ -431,6 +434,20 @@ Key cross-cutting facts to know before editing the CPU or screen:
   access to CSR/DR, which is then served (AZ337 writes DR right after its `0110`). Network disks
   in AZ.INI hold the BK in reset during MCU boot (`Board::runLoop`, `Azbk::holdCpu`). End-to-end
   test without root: `unshare -rn` + tap + dnsmasq (docs/azbk.md, «Сеть»).
+- **Tape recorder** (`src/core/Tape.{h,cpp}`, `docs/tape.md`): a .WAV cassette goes through
+  an input-comparator model (`tapeBinarize`: envelopes + hysteresis) into 1 bit per sample; the
+  `Tape` deck maps CPU ticks to samples (exact for 3 and 4 MHz) and feeds bit 5 of 0177716
+  (high WAV level = 1, as GID — the Maxim turbo loader needs that polarity; BKBTL inverts).
+  `tapeDecode` reads the same bits the way the ROM EMT 36 driver does (pilot → threshold 1.5L,
+  marker half > threshold sets the phase, bit = skip one period + measure one) plus the Maxim
+  turbo stream after a recognised maxim-loader. `Board::loadBin` takes `x.wav[#N]` (the turbo
+  body, else the first good file) and leaves the cassette past that file. While a cassette is
+  inserted EMT 36 is NOT intercepted. Autostart: the tape starts when an instruction in the ROM
+  tape-read range (monitor 116640–117460, BOS 155662–156502) reads 0177716 — the motor bit is
+  useless as a trigger because game sound toggles it — and an autostarted tape pauses when the
+  driver switches the motor off, except right after a Maxim loader. Position/buttons/motor are
+  at the end of BKX1. GUI menu «Магнитофон» + `TapeDialog`, warp while the tape moves; MCP
+  `bk_tape`. Corpus `~/emulators/БК-0010-01/wav` (55 WAVs): all decode, 54 load through the ROM.
 - **Video capture** (`src/core/VideoCapture`, `Zmbv`, `AviWriter`; core links zlib + threads):
   one AVI frame per EMULATED BK frame, rate/scale = cpuFreqHz/ticksPerFrame reduced (3125/64 on
   both machines) — never wall-clock. The GUI feeds a frame only when the LAST slice of a frame

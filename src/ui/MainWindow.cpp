@@ -17,6 +17,7 @@
 #include "Disasm.h"
 #include "VideoCapture.h"
 #include "VideoSink.h"
+#include "TapeDialog.h"
 #include <QDateTime>
 #include <QStandardPaths>
 #include <vector>
@@ -145,6 +146,49 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     }
     file->addSeparator();
     file->addAction("В&ыход", this, &QWidget::close, QKeySequence::Quit);
+
+    // --- Магнитофон: кассета .wav, сигнал — в разряд 5 регистра 0177716 ---
+    QMenu* tapeMenu = menuBar()->addMenu("&Магнитофон");
+    tapeMenu->addAction("Вставить &кассету (.wav)…", this, &MainWindow::openTape);
+    tapeMenu->addAction("&Оглавление кассеты…", this, &MainWindow::showTapeCatalog);
+    tapeMenu->addSeparator();
+    tapePlayAction_ = tapeMenu->addAction("&Воспроизведение");
+    tapePlayAction_->setCheckable(true);
+    connect(tapePlayAction_, &QAction::triggered, this, [this](bool on) {
+        if (!board_->tape().loaded()) { tapePlayAction_->setChecked(false); openTape(); return; }
+        if (on) board_->tape().play(board_->totalTicks()); else board_->tape().stop(board_->totalTicks());
+        updateTapeLabel();
+    });
+    tapeMenu->addAction("&Перемотать в начало", this, [this] {
+        board_->tape().seek(0, board_->totalTicks());
+        updateTapeLabel();
+    });
+    tapeMenu->addAction("&Извлечь кассету", this, [this] {
+        board_->ejectTape();
+        updateTapeLabel();
+        status_->setText("Кассета извлечена: EMT 36 снова обслуживается файлами хоста");
+    });
+    tapeMenu->addSeparator();
+    auto tapeOption = [&](const QString& text, const char* key, bool def, auto apply) {
+        QAction* a = tapeMenu->addAction(text);
+        a->setCheckable(true);
+        const bool on = QSettings().value(QString("tape/") + key, def).toBool();
+        a->setChecked(on);
+        apply(on);
+        connect(a, &QAction::toggled, this, [this, key, apply](bool v) {
+            QSettings().setValue(QString("tape/") + key, v);
+            apply(v);
+            updateTapeLabel();
+        });
+    };
+    tapeOption("&Автопуск: лента трогается, когда драйвер ПЗУ начинает чтение", "autostart", true,
+               [this](bool v) { board_->tape().setAutoStart(v); });
+    tapeOption("&ДУ: лента идёт только при включённом двигателе (разряд 7)", "remote", false,
+               [this](bool v) { board_->tape().setRemote(v, board_->totalTicks()); });
+    tapeOption("Ин&вертировать сигнал", "invert", false,
+               [this](bool v) { board_->tape().setInverted(v); });
+    tapeOption("&Ускорять эмуляцию, пока идёт лента", "warp", true, [this](bool v) { tapeWarp_ = v; });
+    lastTape_ = QSettings().value("tape/last").toString();
 
     QMenu* emu = menuBar()->addMenu("&Эмуляция");
     emu->addAction("&Сброс", this, &MainWindow::resetMachine, QKeySequence("Ctrl+R"));
@@ -343,6 +387,9 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     videoLabel_->setStyleSheet("color: #d22; font-weight: bold;");
     videoLabel_->hide();
     statusBar()->addPermanentWidget(videoLabel_);
+    tapeLabel_ = new QLabel(this);
+    tapeLabel_->hide();
+    statusBar()->addPermanentWidget(tapeLabel_);
 
     // --- Таймер эмуляции. Кадр разбит на 4 слайса, чтобы звук подавался непрерывно,
     // а не одним всплеском на кадр (это давало слышимое «вобблирование»); экран и
@@ -474,9 +521,21 @@ void MainWindow::onTick() {
     qint64 due = clock_.nsecsElapsed() / kSliceNs;
     if (due - slicesDone_ > kCatchUp) slicesDone_ = due - kCatchUp;  // долг списываем
     int steps = static_cast<int>(due - slicesDone_);
-    if (steps <= 0) return;
-    slicesDone_ = due;
-    while (steps-- > 0) runOneSlice(kSlices);
+    if (steps > 0) {
+        slicesDone_ = due;
+        while (steps-- > 0) runOneSlice(kSlices);
+    }
+    // Пока идёт лента, загрузка не ждёт реального времени: слайсы подряд, до 12 мс за тик
+    // (окну остаётся время на события), затем отсчёт темпа — заново от «сейчас».
+    auto tapeMoving = [this] {
+        return tapeWarp_ && !paused_ && !suspended_ && board_->tape().moving(board_->totalTicks());
+    };
+    if (tapeMoving()) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < 12 && tapeMoving()) runOneSlice(kSlices);
+        slicesDone_ = clock_.nsecsElapsed() / kSliceNs;
+    }
 }
 
 void MainWindow::runOneSlice(int kSlices) {
@@ -545,6 +604,103 @@ void MainWindow::renderScreen() {
     if (!board_->scanlineRender()) board_->screen().render(board_->memory());
     const bk::Board::Frame fr = board_->displayFrame();
     screen_->setFrame(fr.px, fr.w, fr.h);
+    updateTapeLabel();
+}
+
+void MainWindow::updateTapeLabel() {
+    const bk::Tape& tp = board_->tape();
+    if (tapePlayAction_ && tapePlayAction_->isChecked() != tp.playing()) {
+        const QSignalBlocker b(tapePlayAction_);
+        tapePlayAction_->setChecked(tp.playing());
+    }
+    if (!tapeLabel_) return;
+    if (!tp.loaded()) { tapeLabel_->hide(); tapeLabelText_.clear(); return; }
+    const uint64_t now = board_->totalTicks();
+    auto mmss = [](double t) {
+        const int m = static_cast<int>(t) / 60;
+        return QString("%1:%2").arg(m, 2, 10, QChar('0')).arg(static_cast<int>(t) % 60, 2, 10, QChar('0'));
+    };
+    const int f = tp.fileAt(tp.position(now));
+    const QString text = QString("%1 лента %2/%3%4")
+        .arg(tp.moving(now) ? "▶" : tp.playing() ? "⏸" : "■")
+        .arg(mmss(tp.seconds(now))).arg(mmss(tp.image()->seconds()))
+        .arg(f >= 0 ? " · " + QString::fromStdString(tp.image()->files[f].name) : QString());
+    if (text != tapeLabelText_) {
+        tapeLabelText_ = text;
+        tapeLabel_->setText(text);
+        tapeLabel_->setToolTip(QString::fromStdString(tp.image()->path));
+    }
+    tapeLabel_->show();
+}
+
+bool MainWindow::insertTape(const QString& path, bool play, int remote) {
+    std::string err;
+    if (!board_->insertTape(path.toStdString(), err)) {
+        QMessageBox::warning(this, "Магнитофон", QString("Кассета не вставлена: %1").arg(QString::fromStdString(err)));
+        return false;
+    }
+    lastTape_ = path;
+    QSettings().setValue("tape/last", path);
+    if (remote >= 0) board_->tape().setRemote(remote > 0, board_->totalTicks());
+    if (play) board_->tape().play(board_->totalTicks());
+    const bk::TapeImage& img = *board_->tape().image();
+    status_->setText(QString("Кассета %1: файлов %2. Файлы читает драйвер ПЗУ (EMT 36 не перехватывается); "
+                             "лента тронется сама, когда БК начнёт чтение")
+                         .arg(QFileInfo(path).fileName()).arg(img.files.size()));
+    updateTapeLabel();
+    if (tapeDialog_ && tapeDialog_->isVisible()) tapeDialog_->refresh();
+    return true;
+}
+
+void MainWindow::openTape() {
+    const QString path = QFileDialog::getOpenFileName(this, "Вставить кассету", lastTape_.isEmpty() ? lastBin_ : lastTape_,
+                                                      "Кассеты БК (*.wav *.WAV *.Wav);;Все файлы (*)");
+    if (!path.isEmpty()) insertTape(path);
+}
+
+void MainWindow::showTapeCatalog() {
+    if (!tapeDialog_) {
+        tapeDialog_ = new TapeDialog(board_.get(), this);
+        connect(tapeDialog_, &TapeDialog::loadRequested, this, [this](int i) {
+            if (const bk::TapeImage* img = board_->tape().image())
+                loadBinFromPath(QString::fromStdString(img->path) + QString("#%1").arg(i + 1));
+        });
+    }
+    tapeDialog_->show();
+    tapeDialog_->raise();
+}
+
+QString MainWindow::chooseTapeProgram(const QString& wav) {
+    std::string err;
+    const auto img = bk::loadTapeImage(wav.toStdString(), err);
+    if (!img) {
+        QMessageBox::warning(this, "БК", QString("Кассета не читается: %1").arg(QString::fromStdString(err)));
+        return {};
+    }
+    // Загрузчик Maxim с прочитанным турбо-потоком за ним — не отдельная программа.
+    QStringList items;
+    std::vector<int> idx;
+    for (size_t i = 0; i < img->files.size(); ++i) {
+        const bk::TapeFile& f = img->files[i];
+        const bool loaderOfTurbo = f.maximLoader && i + 1 < img->files.size()
+                                   && img->files[i + 1].kind == bk::TapeFile::Kind::MaximTurbo;
+        if (f.data.empty() || loaderOfTurbo) continue;
+        items << QString("%1. %2 — адрес %3, длина %4%5").arg(i + 1).arg(QString::fromStdString(f.name))
+                     .arg(f.addr, 6, 8, QChar('0')).arg(f.len, 6, 8, QChar('0'))
+                     .arg(f.crcOk() ? QString() : QString(", КС не сошлась"));
+        idx.push_back(static_cast<int>(i));
+    }
+    if (idx.empty()) {
+        QMessageBox::warning(this, "БК", QString("На кассете %1 нет записей БК").arg(QFileInfo(wav).fileName()));
+        return {};
+    }
+    if (idx.size() == 1) return wav + QString("#%1").arg(idx[0] + 1);
+    int cur = 0;
+    for (size_t k = 0; k < idx.size(); ++k) if (idx[k] == img->mainProgram()) cur = static_cast<int>(k);
+    bool ok = false;
+    const QString pick = QInputDialog::getItem(this, "Кассета", "Какой файл загрузить программой:", items, cur, false, &ok);
+    if (!ok) return {};
+    return wav + QString("#%1").arg(idx[items.indexOf(pick)] + 1);
 }
 
 void MainWindow::setPaused(bool paused) {
@@ -777,9 +933,18 @@ void MainWindow::closeEvent(QCloseEvent* e) {
 }
 
 void MainWindow::openBin() {
-    QString path = QFileDialog::getOpenFileName(this, "Загрузить .BIN",
-        lastBin_.isEmpty() ? QString() : lastBin_, "BK images (*.bin *.BIN);;Все файлы (*)");
-    if (!path.isEmpty()) loadBinFromPath(path);
+    std::string wav;
+    int n = 0;
+    QString start = lastBin_;
+    if (bk::parseTapeSpec(start.toStdString(), wav, n)) start = QString::fromStdString(wav);
+    QString path = QFileDialog::getOpenFileName(this, "Загрузить программу", start,
+        "Программы БК (*.bin *.BIN *.wav *.WAV);;Кассеты (*.wav *.WAV);;Все файлы (*)");
+    if (path.isEmpty()) return;
+    if (bk::parseTapeSpec(path.toStdString(), wav, n) && !n) {
+        path = chooseTapeProgram(path);
+        if (path.isEmpty()) return;
+    }
+    loadBinFromPath(path);
 }
 
 bool MainWindow::loadBinFromPath(const QString& path) {
@@ -808,11 +973,16 @@ bool MainWindow::loadBinFromPath(const QString& path) {
     lastBin_ = path;
     boot_ = Boot::Bin;
     if (fresh) loadAnnotations(annotationsPath());   // "<bin>.bkdb" — символы и комментарии
-    status_->setText(QString("Загружено %1: адрес %2, длина %3 (восьм.)%4")
+    std::string wav;
+    int n = 0;
+    const bool fromTape = bk::parseTapeSpec(path.toStdString(), wav, n);
+    status_->setText(QString("Загружено %1: адрес %2, длина %3 (восьм.)%4%5")
         .arg(QFileInfo(path).fileName())
         .arg(QString::number(addr, 8))
         .arg(QString::number(len, 8))
-        .arg(azDropped ? " — AZБК на этот запуск снят" : ""));
+        .arg(azDropped ? " — AZБК на этот запуск снят" : "")
+        .arg(fromTape ? " — кассета в магнитофоне за этим файлом" : ""));
+    if (fromTape) updateTapeLabel();
     updateTitle();
     return true;
 }

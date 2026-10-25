@@ -69,6 +69,9 @@ public:
     ~MainWindow() override;
 
     bool loadBinFromPath(const QString& path);
+    // Вставить кассету (.wav) в магнитофон. play — сразу «Воспроизведение»; remote — ДУ
+    // двигателем на этот запуск (-1 — настройка).
+    bool insertTape(const QString& path, bool play = false, int remote = -1);
     // Вставить образ диска и, для привода A, отдать управление автозагрузчику
     // ПЗУ контроллера. Тем же путём идут и меню, и образ из командной строки.
     bool insertDiskAndBoot(const QString& path, int drive = 0);
@@ -133,10 +136,23 @@ private slots:
     void openHotChart();
     void saveState();
     void loadState();
+    void openTape();
+    void showTapeCatalog();
 
 private:
     void updateTitle();
     void renderScreen();
+    // Магнитофон: индикатор в строке состояния и галка «Воспроизведение» — по ленте.
+    void updateTapeLabel();
+    // Какой файл кассеты грузить программой: один — он, несколько — спросить.
+    // Пусто — отказались или на кассете нечего грузить.
+    QString chooseTapeProgram(const QString& wav);
+    class TapeDialog* tapeDialog_ = nullptr;
+    QLabel* tapeLabel_ = nullptr;
+    QAction* tapePlayAction_ = nullptr;
+    QString tapeLabelText_;
+    QString lastTape_;
+    bool tapeWarp_ = true;     // пока лента идёт — эмуляция без привязки к реальному времени
     // Linked highlighting: relay a hovered address to every profiler window (and
     // the debugger's disassembler) except the one it came from.
     void broadcastHighlight(int addr, ProfilerView* src);

@@ -105,6 +105,8 @@ struct CliOptions {
     bool diskRw = false, hddRw = false;
     int  diskSides = 0;                   // 0 — по размеру образа, 1 или 2 — принудительно
     QString diskRom;                      // --disk-rom smk|326|<файл>: прошивка контроллера
+    QString tape, wav2bin;                // кассета в магнитофон; извлечь файлы кассеты
+    bool tapeRemote = false, tapePlay = false;
     bk::Board::HddController hddCtl = bk::Board::HddController::Auto;
     // Запись видео: --video-codec, --video-size, --video-audio перекрывают настройки GUI.
     QString video, videoCodec;
@@ -146,6 +148,7 @@ struct CliOptions {
         m.disk = disk.toStdString(); m.diskB = diskB.toStdString();
         m.hdd = hdd.toStdString(); m.hddB = hddB.toStdString();
         m.diskRw = diskRw; m.hddRw = hddRw; m.diskSides = diskSides;
+        m.tape = tape.toStdString(); m.tapeRemote = tapeRemote; m.tapePlay = tapePlay;
         return m;
     }
 };
@@ -228,6 +231,10 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
             const QString v = args[++i];
             o.diskRom = (v == "smk") ? "smk512.rom" : (v == "326") ? "disk326.rom" : v;
         }
+        else if (a == "--tape" && hasVal) o.tape = args[++i];
+        else if (a == "--tape-remote") o.tapeRemote = true;
+        else if (a == "--tape-play") o.tapePlay = true;
+        else if (a == "--wav2bin" && hasVal) o.wav2bin = args[++i];
         else if (a == "--hdd" && hasVal) o.hdd = args[++i];
         else if (a == "--hdd-b" && hasVal) o.hddB = args[++i];
         else if (a == "--hdd-rw") o.hddRw = true;
@@ -349,6 +356,30 @@ static int resolveOptions(CliOptions& o) {
         }
     }
     return 0;
+}
+
+// --wav2bin: оглавление кассеты и её файлы — в .BIN текущего каталога (ИМЯ.BIN; занятое
+// имя не перезаписывается — ИМЯ_2.BIN…).
+static int runWav2Bin(const QString& wav) {
+    std::string err;
+    const auto img = bk::loadTapeImage(wav.toStdString(), err);
+    if (!img) { std::fprintf(stderr, "--wav2bin: %s\n", err.c_str()); return 2; }
+    std::fputs(bk::tapeCatalog(*img).c_str(), stdout);
+    int saved = 0;
+    for (size_t i = 0; i < img->files.size(); ++i) {
+        const bk::TapeFile& f = img->files[i];
+        if (f.data.empty()) continue;
+        const QString base = QString::fromStdString(bk::tapeHostName(f, static_cast<int>(i) + 1));
+        QString name = base + ".BIN";
+        for (int k = 2; QFileInfo::exists(name); ++k) name = QString("%1_%2.BIN").arg(base).arg(k);
+        if (!bk::saveTapeFileBin(f, name.toStdString())) {
+            std::fprintf(stderr, "--wav2bin: не записался %s\n", qPrintable(name));
+            return 3;
+        }
+        std::printf("%2zu -> %s%s\n", i + 1, qPrintable(name), f.crcOk() ? "" : " (КС не сошлась или файл оборван)");
+        ++saved;
+    }
+    return saved ? 0 : 1;
 }
 
 // Headless verification: boot the monitor, optionally load a .BIN, run N frames
@@ -659,11 +690,12 @@ static int runHeadless(const CliOptions& o) {
 static void printHelp(const char* prog) {
     std::printf("Эмулятор-отладчик БК-0010-01 / БК-0011М\n\n"
                 "Запуск:\n"
-                "  %s [ключи] [игра.bin | диск.bkd | диск.img | винчестер.hdi]\n\n", prog);
+                "  %s [ключи] [игра.bin | кассета.wav | диск.bkd | диск.img | винчестер.hdi]\n\n", prog);
     std::fputs(
         "Позиционный аргумент: .bkd и .img (в любом регистре) — образ дискеты, с него сразу\n"
-        "идёт загрузка; .hdi — образ винчестера (то же, что --hdd); любой другой файл —\n"
-        "программа в формате .BIN.\n"
+        "идёт загрузка; .hdi — образ винчестера (то же, что --hdd); .wav — кассета: её\n"
+        "программа грузится сразу, как .BIN («кассета.wav#N» — N-й файл ленты), а кассета\n"
+        "остаётся в магнитофоне за этим файлом; любой другой файл — программа в формате .BIN.\n"
         "\n"
         "Машина:\n"
         "  --machine auto|bk10|bk11m  эмулируемая машина. auto (по умолчанию; в GUI — выбор\n"
@@ -716,6 +748,16 @@ static void printHelp(const char* prog) {
         "  --hdd-ctl auto|smk|samara  контроллер винчестера; auto (по умолчанию) — по\n"
         "                         разметке образа: «Самара» — её контроллер, иначе СМК\n"
         "\n"
+        "Магнитофон (кассета — звуковой файл .WAV, сигнал — в разряд 5 регистра 0177716):\n"
+        "  --tape <файл.wav>      вставить кассету. Файлы с неё читает драйвер ПЗУ (EMT 36\n"
+        "                         монитора, БОС) или свой загрузчик программы — в реальном\n"
+        "                         времени; лента трогается сама, когда драйвер ПЗУ начинает\n"
+        "                         чтение, и встаёт, когда он выключает двигатель\n"
+        "  --tape-play            сразу нажать «Воспроизведение» (для своих загрузчиков)\n"
+        "  --tape-remote          ДУ: лента идёт, только пока включён двигатель (разряд 7)\n"
+        "  --wav2bin <файл.wav>   показать оглавление кассеты и сохранить её файлы в .BIN\n"
+        "                         текущего каталога, без запуска эмулятора\n"
+        "\n"
         "Видео (запись экрана со звуком в AVI или MP4, частота кадров БК — 48,828125 Гц):\n"
         "  --video <файл.avi|.mp4>  записывать экран с первого кадра (GUI — до остановки\n"
         "                         записи или выхода, безголовый режим — все --frames кадров)\n"
@@ -761,6 +803,8 @@ static void printHelp(const char* prog) {
         "  bk0010-emulator game.bin\n"
         "  bk0010-emulator --machine bk11m INSULT.IMG\n"
         "  bk0010-emulator --az --az-unit 0=ANDOS330.IMG\n"
+        "  bk0010-emulator ARKANOID.wav\n"
+        "  bk0010-emulator --wav2bin КАССЕТА.wav\n"
         "  QT_QPA_PLATFORM=offscreen bk0010-emulator --frames 200 --shot out.png game.bin\n",
         stdout);
 }
@@ -782,6 +826,7 @@ int main(int argc, char** argv) {
 #endif
     if (qEnvironmentVariableIsSet("BK_ROM_DIR")) o.romDir = qEnvironmentVariable("BK_ROM_DIR");
     if (const int rc = parseArgs(args, o)) return rc;
+    if (!o.wav2bin.isEmpty()) return runWav2Bin(o.wav2bin);
 
     // MCP server mode: a headless JSON-RPC-over-stdio server for debugging BK
     // programs from an MCP client (e.g. Claude Code). Handled before the GUI so
@@ -837,6 +882,7 @@ int main(int argc, char** argv) {
     if (!o.disk.isEmpty()) w.insertDiskAndBoot(o.disk, 0);
     else if (!o.bin.isEmpty()) w.loadBinFromPath(o.bin);
     if (!o.diskB.isEmpty()) w.insertDiskAndBoot(o.diskB, 1);
+    if (!o.tape.isEmpty()) w.insertTape(o.tape, o.tapePlay, o.tapeRemote ? 1 : -1);
     w.setHddWritable(o.hddRw);
     w.setHddController(o.hddCtl);
     if (!o.video.isEmpty()) w.startVideo(o.video, o.videoCodec, o.videoAspect, o.videoAudio);

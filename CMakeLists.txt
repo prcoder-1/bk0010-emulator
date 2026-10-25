@@ -32,6 +32,7 @@ add_library(bkcore STATIC
     src/core/Hdd.cpp
     src/core/Kngmd.cpp
     src/core/Board.cpp
+    src/core/Tape.cpp
     src/core/Az.cpp
     src/core/AzVideo.cpp
     src/core/AzSound.cpp
@@ -85,6 +86,7 @@ set(APP_SOURCES
     src/ui/AudioOut.cpp
     src/ui/BkKeymap.cpp
     src/ui/Gamepad.cpp
+    src/ui/TapeDialog.cpp
     src/mcp/McpServer.cpp
 )
 

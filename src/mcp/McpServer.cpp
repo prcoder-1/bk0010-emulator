@@ -368,6 +368,9 @@ QJsonArray McpServer::toolDefs() const {
     const QJsonObject addrArg = P("string", "Address (decimal, 0x hex, or leading-0 octal) OR a symbol name");
 
     t.append(tool("bk_load", "Load a .BIN game/program (boots the monitor first) and start it. "
+                  "A .wav cassette works too: its program (the Maxim turbo body, else the first file with a "
+                  "good checksum; x.wav#N = file N) is decoded and loaded at once, and the cassette stays in "
+                  "the tape recorder past that file, so the program can read its next files from it (bk_tape). "
                   "Use frames to run it right away, and reset=true when loading a second game "
                   "so its trace/hotspot data is not mixed with the previous one. In the \"auto\" machine mode "
                   "(the default; see bk_machine) the program picks the machine: one that writes the 0177662 "
@@ -378,7 +381,7 @@ QJsonArray McpServer::toolDefs() const {
                   "its monitor), the file into the user memory map, SP=01000, PSW from the monitor. "
                   "With the AZБК board on, the file goes into the RUNNING system (boot a DOS from AZ0 "
                   "first), as a DOS would load it: no reset, no machine switch, through the mapper windows.",
-        schema({{"path", P("string", "Path to the .BIN file")},
+        schema({{"path", P("string", "Path to the .BIN file (or a .wav cassette, x.wav#N)")},
                 {"machine", P("string", "\"auto\", \"bk10\" or \"bk11m\" for this load (default: the server's machine mode)")},
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
                 {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
@@ -644,6 +647,29 @@ QJsonArray McpServer::toolDefs() const {
                 {"font_base", P("string", "Code of the first glyph in a custom table (default 020)")},
                 {"font_count", P("integer", "Glyph count in a custom table")},
                 {"codes", P("boolean", "Also dump the octal screen code of every cell")}})));
+    t.append(tool("bk_tape", "Tape recorder with a .WAV cassette. Its signal (after an input comparator model) "
+                  "goes to bit 5 of 0177716 in emulated time and is read by the ROM tape driver (BK-0010 monitor "
+                  "EMT 36, BK-0011M BOS) or by a program's own loader (e.g. the Maxim turbo loader that "
+                  "thesands.ru converter WAVs carry). While a cassette is inserted EMT 36 is NOT intercepted "
+                  "(no host-file I/O): files come from the tape. The tape starts by itself when the ROM tape "
+                  "driver begins reading (autostart, as if PLAY were pressed then) and pauses when the driver "
+                  "switches the motor off; use play for loaders that do not use the ROM; remote=true gates the "
+                  "tape by the motor bit 7 of 0177716 (a recorder with remote control). Actions: status "
+                  "(default), list (catalogue decoded from the signal like the ROM driver does: name, address, "
+                  "length, checksum, time, standard or Maxim turbo), insert (`path`, optional play), eject, "
+                  "play, stop, rewind, seek (`file` N from 1 or `seconds`), run (run frames while the tape "
+                  "loads: until it stops after moving, at most `frames`, default 6000; type the load command "
+                  "first, e.g. МАГ + name in the BK-0010 start monitor), save (`file` N as a .BIN to `path`). "
+                  "To load a program from a .wav instantly, use bk_load with the .wav (x.wav#N = file N).",
+        schema({{"action", P("string", "status|list|insert|eject|play|stop|rewind|seek|run|save (default status)")},
+                {"path", P("string", "insert: the .wav; save: output .BIN")},
+                {"file", P("integer", "seek/save: file number on the tape, from 1")},
+                {"seconds", P("number", "seek: position in seconds")},
+                {"frames", P("integer", "run: frame limit (default 6000)")},
+                {"play", P("boolean", "insert: press PLAY right away")},
+                {"remote", P("boolean", "Remote control: the motor bit gates the tape (default false)")},
+                {"autostart", P("boolean", "Start the tape when the ROM driver reads it (default true)")},
+                {"invert", P("boolean", "Invert the signal polarity (default false)")}})));
     t.append(tool("bk_emt_log", "List intercepted EMT 36 tape/disk file operations (which files the "
                   "game loaded/saved, load address, length, and result). Useful for multi-part loaders.",
         schema({{"count", P("integer", "How many recent ops to show (default 40)")}})));
@@ -734,7 +760,8 @@ QString McpServer::disasmText(uint16_t addr, int count) {
 // ввод и прогон кадров (общая машинка для bk_run / bk_key / bk_joystick / …)
 // ---------------------------------------------------------------------------
 McpServer::RunOutcome McpServer::runFrames(int maxFrames, const std::vector<InputStep>& script,
-                                           const std::function<void()>& afterFrame) {
+                                           const std::function<void()>& afterFrame,
+                                           const std::function<bool()>& stopWhen) {
     RunOutcome out;
     if (maxFrames < 0) maxFrames = 0;
     size_t si = 0;
@@ -761,6 +788,7 @@ McpServer::RunOutcome McpServer::runFrames(int maxFrames, const std::vector<Inpu
             break;
         }
         if (board_.cpu().halted()) { out.reason = "halted"; break; }
+        if (stopWhen && stopWhen()) { out.reason = "tape"; break; }
     }
     return out;
 }
@@ -2238,6 +2266,97 @@ QJsonObject McpServer::tool_bk_ocr(const QJsonObject& args) {
             out += line + "\n";
         }
     }
+    return textContent(out);
+}
+
+QString McpServer::tapeText() {
+    const bk::Tape& tp = board_.tape();
+    const uint64_t now = board_.totalTicks();
+    if (!tp.loaded()) return "Магнитофон пуст: EMT 36 обслуживается файлами хоста.";
+    const bk::TapeImage& img = *tp.image();
+    auto mmss = [](double t) { return QString::asprintf("%02d:%04.1f", int(t) / 60, t - 60 * (int(t) / 60)); };
+    QString s = QString("Кассета %1: %2 / %3, %4%5; двигатель %6, ДУ %7, автопуск %8%9.")
+        .arg(QString::fromStdString(img.path)).arg(mmss(tp.seconds(now))).arg(mmss(img.seconds()))
+        .arg(tp.moving(now) ? "лента идёт" : "лента стоит")
+        .arg(tp.playing() ? (tp.autoStarted() ? " (автопуск)" : " (нажато «Воспроизведение»)") : "")
+        .arg(tp.motor() ? "вкл" : "выкл").arg(tp.remote() ? "вкл" : "выкл").arg(tp.autoStart() ? "вкл" : "выкл")
+        .arg(tp.inverted() ? ", сигнал инвертирован" : "");
+    const int f = tp.fileAt(tp.position(now));
+    if (f >= 0) {
+        const bk::TapeFile& tf = img.files[f];
+        s += QString(" Под головкой или позади: файл %1 «%2»%3.").arg(f + 1).arg(QString::fromStdString(tf.name))
+                 .arg(tp.position(now) >= tf.end ? " (пройден)" : "");
+    }
+    s += " EMT 36 читает драйвер ПЗУ с ленты.";
+    return s;
+}
+
+QJsonObject McpServer::tool_bk_tape(const QJsonObject& args) {
+    const QString action = args.value("action").toString("status");
+    bk::Tape& tp = board_.tape();
+    const uint64_t now = board_.totalTicks();
+    if (args.contains("remote")) tp.setRemote(args.value("remote").toBool(), now);
+    if (args.contains("autostart")) tp.setAutoStart(args.value("autostart").toBool());
+    if (args.contains("invert")) tp.setInverted(args.value("invert").toBool());
+    auto needTape = [&]() { return tp.loaded() ? QString() : QString("магнитофон пуст (action insert)"); };
+    auto fileArg = [&](int& n, QString& err) {
+        n = args.value("file").toInt(0);
+        if (n < 1 || n > static_cast<int>(tp.image()->files.size())) {
+            err = QString("file — номер файла на кассете, от 1 до %1").arg(tp.image()->files.size());
+            return false;
+        }
+        return true;
+    };
+    QString prefix;
+    bool catalogue = action == "list";
+    if (action == "insert") {
+        const QString path = args.value("path").toString();
+        if (path.isEmpty()) return fail("insert: нужен path (.wav)");
+        std::string err;
+        if (!board_.insertTape(path.toStdString(), err)) return fail(QString::fromStdString(err));
+        if (args.value("play").toBool(false)) tp.play(now);
+        catalogue = true;
+    } else if (action == "eject") {
+        board_.ejectTape();
+    } else if (action == "play" || action == "stop" || action == "rewind" || action == "seek"
+               || action == "run" || action == "save" || action == "list") {
+        if (const QString e = needTape(); !e.isEmpty()) return fail(e);
+        if (action == "play") tp.play(now);
+        else if (action == "stop") tp.stop(now);
+        else if (action == "rewind") tp.seek(0, now);
+        else if (action == "seek") {
+            if (args.contains("seconds")) {
+                tp.seek(static_cast<uint64_t>(std::max(0.0, args.value("seconds").toDouble()) * tp.image()->rate), now);
+            } else {
+                int n; QString err;
+                if (!fileArg(n, err)) return fail(err);
+                tp.seek(tp.image()->files[n - 1].start, now);
+            }
+        } else if (action == "save") {
+            int n; QString err;
+            if (!fileArg(n, err)) return fail(err);
+            const QString path = args.value("path").toString();
+            if (path.isEmpty()) return fail("save: нужен path (.BIN)");
+            const bk::TapeFile& f = tp.image()->files[n - 1];
+            if (!bk::saveTapeFileBin(f, path.toStdString())) return fail("не записался " + path);
+            prefix = QString("Файл %1 «%2» сохранён в %3: адрес %4, длина %5%6.\n").arg(n)
+                .arg(QString::fromStdString(f.name)).arg(path).arg(oct6(f.addr)).arg(oct6(f.data.size()))
+                .arg(f.crcOk() ? "" : " (КС не сошлась или файл оборван)");
+        } else if (action == "run") {
+            bool moved = false;
+            const RunOutcome r = runFrames(args.value("frames").toInt(6000), {}, {}, [&]() {
+                const bool m = board_.tape().moving(board_.totalTicks());
+                moved |= m;
+                return moved && !m;
+            });
+            prefix = runText(r) + (moved ? "" : " Лента так и не тронулась (драйвер ПЗУ не читал её; "
+                                                "свой загрузчик — action play).") + "\n" + regsText() + "\n";
+        }
+    } else if (action != "status") {
+        return fail("action: status, list, insert, eject, play, stop, rewind, seek, run или save");
+    }
+    QString out = prefix + tapeText();
+    if (catalogue && tp.loaded()) out += "\n" + QString::fromStdString(bk::tapeCatalog(*tp.image()));
     return textContent(out);
 }
 

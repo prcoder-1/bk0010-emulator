@@ -14,6 +14,7 @@
 #include "Kngmd.h"
 #include "Hdd.h"
 #include "Az.h"
+#include "Tape.h"
 #include "Trace.h"
 #include "Symbols.h"
 
@@ -225,9 +226,11 @@ public:
         std::string disk, diskB, hdd, hddB;
         bool diskRw = false, hddRw = false;
         int  diskSides = 0;                          // 0 — по размеру образа
-        bool empty() const { return disk.empty() && diskB.empty() && hdd.empty() && hddB.empty(); }
+        std::string tape;                            // кассета .wav в магнитофон
+        bool tapeRemote = false, tapePlay = false;   // ДУ двигателем; сразу «Воспроизведение»
+        bool empty() const { return disk.empty() && diskB.empty() && hdd.empty() && hddB.empty() && tape.empty(); }
     };
-    // Вставить носители и загрузиться: с дискеты A (из поднятого монитора, как «160000G»),
+    // Вставить носители (кассету — в магнитофон, без пуска) и загрузиться: с дискеты A (из поднятого монитора, как «160000G»),
     // иначе с винчестера. false — носитель не вставился; err — что не так (и
     // предупреждения, если загрузки не будет).
     bool bootMedia(const Media& m, std::string& err);
@@ -434,6 +437,8 @@ public:
     // удерживаемой клавишей (БОС сразу уходит в клавиатурный монитор), затем команды
     // монитора «L», «R6/1000» и «G»: файл — в распределение страниц пользователя
     // (040402), SP = 01000, пуск кодом самой БОС. Без `run` файл кладётся в текущую карту.
+    // «x.wav» / «x.wav#N» — программа с кассеты (TapeImage::mainProgram или N-й файл):
+    // кассета остаётся в магнитофоне за этим файлом, следующие файлы программа читает с неё.
     bool loadBin(const std::string& path, bool run,
                  uint16_t* outAddr = nullptr, uint16_t* outLen = nullptr);
     // Программа для БК-0011М? Признаки: запись в регистр 0177662/0177663 (палитра,
@@ -455,6 +460,15 @@ public:
 
     // Running CPU-tick counter (free-running, monotonic).
     uint64_t totalTicks() const { return totalTicks_; }
+
+    // Магнитофон: кассета .wav, сигнал — в разряд 5 регистра 0177716. Пока кассета
+    // вставлена, EMT 36 не перехватывается: файлы читает драйвер ПЗУ с ленты.
+    bool insertTape(const std::string& path, std::string& err);
+    void ejectTape() { tape_.eject(); }
+    Tape& tape() { return tape_; }
+    const Tape& tape() const { return tape_; }
+    // Драйвер магнитофона ПЗУ (монитор БК-0010 / БОС БК-0011М) — по адресу команды.
+    bool inTapeDriver(uint16_t pc) const;
 
     // Tick timestamps of recent frame-synchronisation events. BK frames are not a
     // fixed 50 Hz: a game paces itself on the programmable timer, spinning until it
@@ -514,6 +528,7 @@ private:
     Screen screen_;
     Vp037  vp037_;                 // видеоконтроллер 037: арбитраж доступа к ДОЗУ
     Smk512 smk_;                   // блок расширения памяти в разъёме МПИ
+    Tape   tape_;                  // магнитофон
     bool   smkOn_ = false;         // плата СМК-512 установлена
     // Есть ли на шине прошивка контроллера, перехватывающая пуск (smk512.rom): тогда
     // режим после включения и «СТОП» ставит она сама.

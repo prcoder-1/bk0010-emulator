@@ -21,7 +21,8 @@
     X(bk_state_load) X(bk_symbols) X(bk_hotspots) X(bk_watch) X(bk_unwatch) X(bk_watchpoints) \
     X(bk_backtrace) X(bk_search_mem) X(bk_diff_mem) X(bk_type) X(bk_callers) X(bk_callees) \
     X(bk_frames) X(bk_coverage) X(bk_profile_reset) X(bk_calltree) X(bk_profile) X(bk_vram) \
-    X(bk_ocr) X(bk_emt_log) X(bk_xrefs) X(bk_io_state) X(bk_io_log) X(bk_joy_probe)
+    X(bk_ocr) X(bk_emt_log) X(bk_xrefs) X(bk_io_state) X(bk_io_log) X(bk_joy_probe) \
+    X(bk_tape)
 
 // Minimal Model Context Protocol server (JSON-RPC 2.0 over newline-delimited
 // stdio) exposing the BK-0010 emulator as debugging tools for an MCP client
@@ -72,7 +73,9 @@ private:
     // точке наблюдения, HALT или лимиту кадров. afterFrame вызывается после
     // каждого кадра (bk_audio сливает им FIFO динамика, чтобы не терять звук).
     RunOutcome runFrames(int maxFrames, const std::vector<InputStep>& script = {},
-                         const std::function<void()>& afterFrame = {});
+                         const std::function<void()>& afterFrame = {},
+                         const std::function<bool()>& stopWhen = {});   // true — стоп (reason «tape»)
+    QString tapeText();                  // состояние магнитофона для bk_tape
     bool parseInputScript(const QJsonArray& arr, std::vector<InputStep>& out, QString& err);
     // Разобрать аргументы key/code в последовательность кодов КОИ-7 (с префиксом
     // РУС/ЛАТ, если нужен). present=false, если ни key, ни code не заданы.
