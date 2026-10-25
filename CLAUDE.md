@@ -444,6 +444,12 @@ Key cross-cutting facts to know before editing the CPU or screen:
   access to CSR/DR, which is then served (AZ337 writes DR right after its `0110`). Network disks
   in AZ.INI hold the BK in reset during MCU boot (`Board::runLoop`, `Azbk::holdCpu`). End-to-end
   test without root: `unshare -rn` + tap + dnsmasq (docs/azbk.md, «Сеть»).
+- **Mouse «Марсианка»** (`src/core/MarsMouse.h`, optional: `--mouse`, GUI «Машина», MCP `bk_mouse`): on
+  0177714 OR-ed with the joystick — 001 up, 002 right, 004 down, 010 left, 040/0100 buttons (pinout of the
+  TheGWBV PS/2→MARS adapter; CSI-DOS 3 decodes the same). Direction flip-flops stay set while ball steps are
+  pending; a FALLING edge of bit 3 of a 0177714 write (ВД03 «СБРОС») consumes one step per axis (CSI-DOS polls
+  `MOV @#177714,R2 / CLR / MOV #10`); without that edge steps drain one per frame (games reading it as a
+  joystick). GUI: host-mouse motion over GlScreen (event filter) → steps, middle button = grab.
 - **Tape recorder** (`src/core/Tape.{h,cpp}`, `docs/tape.md`): a .WAV cassette goes through
   an input-comparator model (`tapeBinarize`: envelopes + hysteresis) into 1 bit per sample; the
   `Tape` deck maps CPU ticks to samples (exact for 3 and 4 MHz) and feeds bit 5 of 0177716

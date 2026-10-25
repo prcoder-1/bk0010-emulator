@@ -47,6 +47,8 @@
 #include <QSignalBlocker>
 #include <QProxyStyle>
 #include <QVBoxLayout>
+#include <QMouseEvent>
+#include <QCursor>
 #include <cstdio>
 
 bool MainWindow::savedAzbk(bool bk11) {
@@ -305,6 +307,30 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
         ? QString::fromStdString("Подключён: " + gamepad_.name())
         : QString::fromUtf8("Геймпад не найден"));
     joyStatus->setEnabled(false);
+    // Мышь «Марсианка» (УВК-01): тот же порт 0177714, вход — мышь ПК над экраном БК.
+    QMenu* mouseMenu = mach->addMenu("&Мышь «Марсианка»");
+    mouseAction_ = mouseMenu->addAction("&Подключена (порт 0177714, мышь ПК над экраном)");
+    mouseAction_->setCheckable(true);
+    connect(mouseAction_, &QAction::toggled, this, [this](bool on) { setMarsMouse(on); });
+    mouseMenu->addSeparator();
+    auto* scaleGroup = new QActionGroup(this);
+    marsScale_ = std::clamp(QSettings().value("marsMouseScale", 4).toInt(), 1, 16);
+    for (int sc : {1, 2, 4, 8}) {
+        QAction* a = mouseMenu->addAction(QString("Шаг шара — %1 точ%2 экрана ПК").arg(sc)
+                                          .arg(sc == 1 ? "ка" : sc < 5 ? "ки" : "ек"));
+        a->setCheckable(true);
+        a->setChecked(sc == marsScale_);
+        scaleGroup->addAction(a);
+        connect(a, &QAction::triggered, this, [this, sc] {
+            marsScale_ = sc;
+            QSettings().setValue("marsMouseScale", sc);
+        });
+    }
+    mouseMenu->addSeparator();
+    QAction* mouseHelp = mouseMenu->addAction("Средняя кнопка — захват мыши (и отпустить)");
+    mouseHelp->setEnabled(false);
+    screen_->installEventFilter(this);
+    setMarsMouse(QSettings().value("marsMouse", false).toBool(), false);
     syncMachineMenu();
 
     // Запись экрана в видео. Кодек и размер кадра — настройки, действуют со следующей
@@ -664,6 +690,95 @@ void MainWindow::openTape() {
     if (!path.isEmpty()) insertTape(path);
 }
 
+void MainWindow::setMarsMouse(bool on, bool save) {
+    board_->mouse().setEnabled(on);
+    if (save) QSettings().setValue("marsMouse", on);
+    if (mouseAction_ && mouseAction_->isChecked() != on) {
+        const QSignalBlocker b(mouseAction_);
+        mouseAction_->setChecked(on);
+    }
+    screen_->setMouseTracking(on);
+    marsHaveLast_ = false;
+    marsAccX_ = marsAccY_ = 0;
+    if (!on) setMarsGrab(false);
+    if (status_)
+        status_->setText(on ? QString("Мышь «Марсианка» подключена: движение и кнопки мыши над экраном БК, "
+                                      "средняя кнопка — захват")
+                            : QString("Мышь «Марсианка» отключена"));
+}
+
+// Захват: курсор спрятан и возвращается в центр экрана, движение считается от центра —
+// мышь не упирается в край окна. Отпускает средняя кнопка, отладчик и потеря фокуса.
+void MainWindow::setMarsGrab(bool on) {
+    if (on == marsGrab_) return;
+    marsGrab_ = on;
+    marsHaveLast_ = false;
+    if (on) {
+        screen_->setCursor(Qt::BlankCursor);
+        screen_->grabMouse();
+        QCursor::setPos(screen_->mapToGlobal(screen_->rect().center()));
+        status_->setText("Мышь захвачена — отпустить: средняя кнопка");
+    } else {
+        screen_->releaseMouse();
+        screen_->unsetCursor();
+        board_->mouse().setButtons(false, false);
+    }
+}
+
+void MainWindow::changeEvent(QEvent* e) {
+    if (e->type() == QEvent::ActivationChange && !isActiveWindow()) setMarsGrab(false);
+    QMainWindow::changeEvent(e);
+}
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
+    if (obj != screen_ || !board_->mouse().enabled() || paused_ || suspended_)
+        return QMainWindow::eventFilter(obj, e);
+    switch (e->type()) {
+    case QEvent::MouseMove: {
+        const QPoint p = static_cast<QMouseEvent*>(e)->position().toPoint();
+        QPoint d;
+        if (marsGrab_) {
+            const QPoint c = screen_->rect().center();
+            d = p - c;
+            if (d.isNull()) return true;
+            QCursor::setPos(screen_->mapToGlobal(c));
+        } else {
+            if (marsHaveLast_) d = p - marsLast_;
+            marsLast_ = p;
+            marsHaveLast_ = true;
+        }
+        // Дробные остатки копятся: медленное движение тоже доходит до шара.
+        marsAccX_ += double(d.x()) / marsScale_;
+        marsAccY_ += double(d.y()) / marsScale_;
+        const int sx = int(marsAccX_), sy = int(marsAccY_);
+        marsAccX_ -= sx;
+        marsAccY_ -= sy;
+        if (sx || sy) board_->mouse().move(sx, sy);
+        return true;
+    }
+    case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonRelease: {
+        auto* me = static_cast<QMouseEvent*>(e);
+        if (me->button() == Qt::MiddleButton) {
+            if (e->type() == QEvent::MouseButtonPress) setMarsGrab(!marsGrab_);
+            return true;
+        }
+        const Qt::MouseButtons b = me->buttons();
+        board_->mouse().setButtons(b & Qt::LeftButton, b & Qt::RightButton);
+        return true;
+    }
+    case QEvent::Leave:
+        marsHaveLast_ = false;
+        break;
+    case QEvent::FocusOut:
+        setMarsGrab(false);
+        break;
+    default:
+        break;
+    }
+    return QMainWindow::eventFilter(obj, e);
+}
+
 void MainWindow::syncKeyboardKind() {
     if (!vk_) return;
     vk_->setKind(board_->membraneKeyboard() ? BkKeyboardWidget::Kind::Membrane : BkKeyboardWidget::Kind::Buttons);
@@ -759,6 +874,7 @@ QString MainWindow::chooseTapeProgram(const QString& wav) {
 
 void MainWindow::setPaused(bool paused) {
     paused_ = paused;
+    if (paused_) setMarsGrab(false);
     phase_ = 0;                     // start the next run at a fresh frame boundary
     if (paused_) {
         overlay_->snapshotRegs();   // baseline for the changed-register highlight

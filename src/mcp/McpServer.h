@@ -22,7 +22,7 @@
     X(bk_backtrace) X(bk_search_mem) X(bk_diff_mem) X(bk_type) X(bk_callers) X(bk_callees) \
     X(bk_frames) X(bk_coverage) X(bk_profile_reset) X(bk_calltree) X(bk_profile) X(bk_vram) \
     X(bk_ocr) X(bk_emt_log) X(bk_xrefs) X(bk_io_state) X(bk_io_log) X(bk_joy_probe) \
-    X(bk_tape)
+    X(bk_tape) X(bk_mouse)
 
 // Minimal Model Context Protocol server (JSON-RPC 2.0 over newline-delimited
 // stdio) exposing the BK-0010 emulator as debugging tools for an MCP client

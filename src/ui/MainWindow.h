@@ -72,6 +72,9 @@ public:
     // Вставить кассету (.wav) в магнитофон. play — сразу «Воспроизведение»; remote — ДУ
     // двигателем на этот запуск (-1 — настройка).
     bool insertTape(const QString& path, bool play = false, int remote = -1);
+    // Мышь «Марсианка» (УВК-01) на порту 0177714 от мыши ПК. save — запомнить в настройках
+    // (ключ --mouse включает её на один запуск).
+    void setMarsMouse(bool on, bool save = true);
     // Вставить образ диска и, для привода A, отдать управление автозагрузчику
     // ПЗУ контроллера. Тем же путём идут и меню, и образ из командной строки.
     bool insertDiskAndBoot(const QString& path, int drive = 0);
@@ -112,6 +115,8 @@ public:
 
 protected:
     bool event(QEvent* e) override;
+    bool eventFilter(QObject* obj, QEvent* e) override;   // мышь над экраном БК
+    void changeEvent(QEvent* e) override;                 // окно неактивно — захват мыши отпустить
     void keyPressEvent(QKeyEvent* e) override;
     void keyReleaseEvent(QKeyEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
@@ -154,6 +159,14 @@ private:
     void syncKeyboardKind();
     void virtualKey(uint16_t code, bool down);   // нажатие с экранной клавиатуры
     class TapeDialog* tapeDialog_ = nullptr;
+    // Мышь «Марсианка»: движение мыши ПК над экраном → шаги шара (marsScale_ точек экрана
+    // на шаг); средняя кнопка — захват (курсор спрятан, движение относительное).
+    QAction* mouseAction_ = nullptr;
+    int marsScale_ = 4;
+    double marsAccX_ = 0, marsAccY_ = 0;
+    QPoint marsLast_;
+    bool marsHaveLast_ = false, marsGrab_ = false;
+    void setMarsGrab(bool on);
     QLabel* tapeLabel_ = nullptr;
     QAction* tapePlayAction_ = nullptr;
     QString tapeLabelText_;

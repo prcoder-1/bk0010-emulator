@@ -675,6 +675,22 @@ QJsonArray McpServer::toolDefs() const {
                 {"remote", P("boolean", "Remote control: the motor bit gates the tape (default false)")},
                 {"autostart", P("boolean", "Start the tape when the ROM driver reads it (default true)")},
                 {"invert", P("boolean", "Invert the signal polarity (default false)")}})));
+    t.append(tool("bk_mouse", "Mouse «Марсианка» (УВК-01, МОКБ «Марс»), a ball manipulator on the parallel port "
+                  "0177714 (OR-ed with the joystick). Read bits: 001 up, 002 right, 004 down, 010 left, 040 left "
+                  "button, 0100 right button. The ball's direction flip-flops stay set while steps are pending; "
+                  "the program clears them with a falling edge of bit 3 of a write to 0177714 (its «СБРОС», as "
+                  "CSI-DOS does: read, CLR, MOV #10), one step per axis per edge; without that edge the steps "
+                  "drain one per frame (games reading it as a joystick). `enable` plugs it in (off by default); "
+                  "dx/dy add ball steps (dx>0 right, dy>0 down; at most 64 pending per axis, as the GUI caps "
+                  "a fast hand); left/right set the buttons (sticky until "
+                  "changed or `release`); frames runs that many frames afterwards.",
+        schema({{"enable", P("boolean", "Plug the mouse in / out (default: keep)")},
+                {"dx", P("integer", "Ball steps along X (>0 right)")},
+                {"dy", P("integer", "Ball steps along Y (>0 down)")},
+                {"left", P("boolean", "Left button held")},
+                {"right", P("boolean", "Right button held")},
+                {"release", P("boolean", "Release both buttons")},
+                {"frames", P("integer", "Run this many frames afterwards (default 0)")}})));
     t.append(tool("bk_emt_log", "List intercepted EMT 36 tape/disk file operations (which files the "
                   "game loaded/saved, load address, length, and result). Useful for multi-part loaders.",
         schema({{"count", P("integer", "How many recent ops to show (default 40)")}})));
@@ -2363,6 +2379,30 @@ QJsonObject McpServer::tool_bk_tape(const QJsonObject& args) {
     }
     QString out = prefix + tapeText();
     if (catalogue && tp.loaded()) out += "\n" + QString::fromStdString(bk::tapeCatalog(*tp.image()));
+    return textContent(out);
+}
+
+QJsonObject McpServer::tool_bk_mouse(const QJsonObject& args) {
+    bk::MarsMouse& m = board_.mouse();
+    if (args.contains("enable")) m.setEnabled(args.value("enable").toBool());
+    const bool input = args.contains("dx") || args.contains("dy") || args.contains("left")
+                       || args.contains("right") || args.contains("release");
+    if (input && !m.enabled()) return fail("мышь не подключена — {\"enable\": true}");
+    m.move(args.value("dx").toInt(0), args.value("dy").toInt(0));
+    bool left = m.buttons() & 040, right = m.buttons() & 0100;
+    if (args.contains("left")) left = args.value("left").toBool();
+    if (args.contains("right")) right = args.value("right").toBool();
+    if (args.value("release").toBool(false)) left = right = false;
+    m.setButtons(left, right);
+    QString out;
+    if (const int frames = args.value("frames").toInt(0); frames > 0) out = runText(runFrames(frames)) + "\n";
+    out += m.enabled()
+        ? QString("Мышь «Марсианка» подключена: в запасе шагов X %1, Y %2; кнопки: %3; на чтении порта "
+                  "0177714 сейчас %4 (вместе с джойстиком).")
+              .arg(m.pendingX()).arg(m.pendingY())
+              .arg(left && right ? "обе" : left ? "левая" : right ? "правая" : "отпущены")
+              .arg(oct6(board_.peekReg(0177714)))
+        : QString("Мышь «Марсианка» не подключена.");
     return textContent(out);
 }
 
