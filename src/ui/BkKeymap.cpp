@@ -30,7 +30,10 @@ static uint16_t specialCode(int key) {
     case Qt::Key_F4:        return 0026;   // |<==
     case Qt::Key_F5:        return 0027;   // |==>
     case Qt::Key_F6:        return 0202;   // ИНД СУ
-    // F7/F8/F10/F12 are reserved by the debugger / screen-mode UI.
+    case Qt::Key_F7:        return 0204;   // БЛОК РЕД
+    case Qt::Key_F8:        return 0220;   // ШАГ
+    case Qt::Key_F9:        return 0014;   // СБР
+    // F10 — СТОП (не код, MainWindow), F11/F12 — экран и отладчик.
     default:                return bk::BK_KEY_NONE;
     }
 }

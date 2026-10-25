@@ -148,13 +148,13 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
 
     QMenu* emu = menuBar()->addMenu("&Эмуляция");
     emu->addAction("&Сброс", this, &MainWindow::resetMachine, QKeySequence("Ctrl+R"));
-    emu->addAction("Режим &цвет/ч-б", this, &MainWindow::toggleColorMode, QKeySequence("F10"));
+    emu->addAction("Режим &цвет/ч-б", this, &MainWindow::toggleColorMode, QKeySequence("F11"));
     // Пиксель БК шире, чем выше: кадр ложится на телевизионное поле 4:3. Включённый
     // режим рисует пиксель цветного режима блоком 4x3 точек, выключённый — квадратом.
     aspectAction_ = emu->addAction("Пиксели &3:4 (как на телевизоре)");
     aspectAction_->setCheckable(true);
     aspectAction_->setChecked(aspect34);
-    aspectAction_->setShortcut(QKeySequence("F11"));
+    aspectAction_->setShortcut(QKeySequence("Ctrl+F11"));
     connect(aspectAction_, &QAction::toggled, this, &MainWindow::setPixelAspect34);
     // С AZБК на экране — его VGA; переключатель показывает экран самой БК (её ТВ-выход).
     azVgaAction_ = emu->addAction("Экран &VGA платы AZБК (иначе — экран БК)");
@@ -1159,10 +1159,12 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         }
     }
 
-    // Esc при выключенном отладчике — клавиша «СТОП» БК. Она вынесена из матрицы
-    // и кода не даёт, поэтому идёт мимо BkKeymap: внеприоритетное прерывание по
-    // вектору 4. (Внутри отладчика Esc по-прежнему «продолжить»/«отменить ввод».)
-    if (e->key() == Qt::Key_Escape) {
+    // Esc при выключенном отладчике ничего не делает (в отладчике — «продолжить»).
+    if (e->key() == Qt::Key_Escape) { e->accept(); return; }
+
+    // F10 — клавиша «СТОП» БК. Она вынесена из матрицы и кода не даёт, поэтому идёт
+    // мимо BkKeymap: внеприоритетное прерывание по вектору 4.
+    if (e->key() == Qt::Key_F10) {
         board_->pressStop();
         status_->setText(QString::fromUtf8("Клавиша СТОП (прерывание по вектору 4)"));
         e->accept();

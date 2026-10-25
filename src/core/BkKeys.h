@@ -47,6 +47,9 @@ inline constexpr BkKeyName kBkKeys[] = {
     { "f4", 026 },
     { "f5", 027 },
     { "indsu", 0202 },    { "инд су", 0202 },   { "f6", 0202 },
+    { "blokred", 0204 },  { "блок ред", 0204 }, { "f7", 0204 },
+    { "shag", 0220 },     { "шаг", 0220 },      { "f8", 0220 },
+    { "f9", 014 },
     { "rus", BK_CODE_RUS }, { "рус", BK_CODE_RUS },
     { "lat", BK_CODE_LAT }, { "лат", BK_CODE_LAT },
 };
