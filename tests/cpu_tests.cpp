@@ -875,6 +875,7 @@ int main(int argc, char** argv) {
         CHECK(bkKeyByName("рус") == BK_CODE_RUS, "рус -> 016");
         CHECK(bkKeyByName("right") == 031 && bkKeyByName("up") == 032, "стрелки");
         CHECK(bkKeyByName("нетакой") == BK_KEY_NONE, "неизвестное имя");
+        CHECK(bkKeyByName("БЛОК РЕД") == 0204 && bkKeyByName("шаг") == 0220 && bkKeyByName("f9") == 014, "БЛОК РЕД, ШАГ, F9=СБР");
         CHECK(std::string(bkKeyName(012)) == "enter", "обратный поиск имени");
 
         // АР2: код той же клавиши плюс бит 0200 (вектор 0274).

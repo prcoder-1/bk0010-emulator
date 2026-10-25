@@ -306,7 +306,7 @@ Key cross-cutting facts to know before editing the CPU or screen:
   lines × 64 bytes. Color mode = 2 bits/pixel (256 wide, doubled to 512); mono = 1
   bit/pixel (512 wide), LSB first. Palette 0 = {black, blue, green, red}.
 - **The BK pixel is not square, and that lives only in `GlScreen`.** The core buffer is
-  always 512×256; by default (`F11` / `--no-aspect34` turn it off) the window draws one
+  always 512×256; by default (`Ctrl+F11` / `--no-aspect34` turn it off) the window draws one
   colour-mode pixel as a **4×3** block of host pixels (texel = 2×3, frame = 1024×768 —
   the 4:3 TV field the raster geometry implies). The scale is always an integer multiple
   (`GlScreen::applyViewport`, recomputed in `paintGL` so the toggle works without a

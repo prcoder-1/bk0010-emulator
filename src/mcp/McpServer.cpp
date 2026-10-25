@@ -484,7 +484,7 @@ QJsonArray McpServer::toolDefs() const {
         schema({{"addr", addrArg}, {"all", P("boolean", "Remove all breakpoints")}})));
     t.append(tool("bk_breakpoints", "List active breakpoints.", schema({})));
     t.append(tool("bk_key", "Press a BK-0010 key. Prefer `key` with a NAME (enter, space, left, right, "
-                  "up, down, backspace, delete, f1..f6, рус, лат) or a single character — including "
+                  "up, down, backspace, delete, f1..f9, рус, лат) or a single character — including "
                   "Cyrillic, for which the РУС/ЛАТ switch is inserted automatically. "
                   "АР2 combos: \"ар2+X\" (or ar2+/alt+), e.g. \"ар2+;\" toggles 32/64 columns, "
                   "\"ар2+!\" red, \"ар2+\\\"\" green (АР2/●/1, АР2/●/2) — the key code with bit 0200, "
@@ -850,7 +850,7 @@ bool McpServer::resolveKey(const QJsonObject& args, std::vector<uint16_t>& codes
             if (codes.empty()) { err = "непредставимый символ: '" + ks + "'"; return false; }
         } else {
             err = "неизвестная клавиша '" + ks + "' (имя из списка: enter, space, left, right, "
-                  "up, down, backspace, delete, home, tab, f1..f6, повт, кт, рус, лат — "
+                  "up, down, backspace, delete, home, tab, f1..f9, повт, кт, блок ред, шаг, рус, лат — "
                   "либо ОДИН символ, с АР2 — \"ар2+клавиша\"; для строки используйте bk_type)";
             return false;
         }
