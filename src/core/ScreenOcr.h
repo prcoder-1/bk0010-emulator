@@ -33,7 +33,7 @@ enum : uint16_t {
     BK_FONT_ADDR = 0112036,   // адрес глифа кода 020 в ПЗУ монитора
     BK_FONT_BASE = 020,       // код первого глифа таблицы
 };
-enum : int { BK_FONT_HEIGHT = 10 };
+enum : int { BK_FONT_HEIGHT = 10, BK_SERVICE_ROWS = 16 };   // служебная строка монитора — 16 точечных строк
 
 // UTF-8 для 8-битного экранного кода БК. Нераспознаваемые коды -> "{0NNN}".
 std::string bkScreenCodeToUtf8(uint16_t code);
@@ -87,6 +87,7 @@ struct OcrResult {
     // распозналось» нельзя — у узкого режима их вдвое больше, и мусорных совпадений
     // тоже вдвое больше.
     long residual = 0;
+    long residualBody = 0;            // то же без служебной строки (знакоместа выше BK_SERVICE_ROWS)
     std::string text(char unknownChar = '?') const;   // строки UTF-8, \n между
 };
 

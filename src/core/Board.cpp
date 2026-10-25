@@ -641,9 +641,24 @@ bool Board::loadRoms(const std::string& romDir) {
     }
     bool ok = true;
     ok &= mem_.loadRomFile(ADDR_ROM_MON, (romDir + "/monit10.rom").c_str(), 8192);
-    // BASIC is optional for running games but harmless; load if present.
-    mem_.loadRomFile(ADDR_ROM_BASIC, (romDir + "/basic10.rom").c_str(), 24576);
+    if (focalRoms()) {
+        // БК-0010 и блок МСТД: Фокал (БИС 018, код 010) и тесты (019, код 000); у розетки
+        // 0140000 микросхемы нет — чтение оттуда зависает (вектор 4), как и без Бейсика.
+        mem_.loadRomFile(0120000, (romDir + "/bk10_018_focal.rom").c_str(), 8192);
+        mem_.loadRomFile(0160000, (romDir + "/bk10_019_mstd.rom").c_str(), 8064);
+        mem_.setAbsent10(1u << 6);
+    } else {
+        // BASIC is optional for running games but harmless; load if present.
+        mem_.loadRomFile(ADDR_ROM_BASIC, (romDir + "/basic10.rom").c_str(), 24576);
+        mem_.setAbsent10(0);
+    }
     return ok;
+}
+
+void Board::setMstd(bool on) {
+    if (on == mem_.mstd()) return;
+    mem_.setMstd(on);
+    if (!bk11() && !romDir_.empty()) loadRoms(romDir_);
 }
 
 void Board::reset() {
@@ -1027,8 +1042,14 @@ void Board::detachHdd(int unit) {
 
 bool Board::parseMachineChoice(const std::string& s, MachineChoice& out) {
     std::string v;
-    for (char c : s) v += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (v == "auto" || v == "авто" || v == "Авто" || v == "АВТО") out = MachineChoice::Auto;
+    for (char c : s) if (c != '-' && c != '_' && c != ' ') v += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto is = [&](std::initializer_list<const char*> names) {
+        for (const char* n : names) if (v == n) return true;
+        return false;
+    };
+    if (is({"auto", "авто", "Авто", "АВТО"})) out = MachineChoice::Auto;
+    else if (is({"bk10f", "bk0010", "0010", "focal", "фокал", "Фокал", "ФОКАЛ", "бк0010", "БК0010"}))
+        out = MachineChoice::Bk0010Focal;
     else if (v.find("11") != std::string::npos) out = MachineChoice::Bk0011m;
     else if (v.find("10") != std::string::npos) out = MachineChoice::Bk0010;
     else return false;
@@ -1037,16 +1058,18 @@ bool Board::parseMachineChoice(const std::string& s, MachineChoice& out) {
 
 const char* Board::machineChoiceName(MachineChoice c) {
     switch (c) {
-    case MachineChoice::Bk0010:  return "bk10";
-    case MachineChoice::Bk0011m: return "bk11m";
-    default:                     return "auto";
+    case MachineChoice::Bk0010:      return "bk10";
+    case MachineChoice::Bk0010Focal: return "bk10f";
+    case MachineChoice::Bk0011m:     return "bk11m";
+    default:                         return "auto";
     }
 }
 
 Machine Board::machineFor(MachineChoice c, const std::string& binPath) {
     switch (c) {
-    case MachineChoice::Bk0010:  return Machine::Bk0010;
-    case MachineChoice::Bk0011m: return Machine::Bk0011m;
+    case MachineChoice::Bk0010:      return Machine::Bk0010;
+    case MachineChoice::Bk0010Focal: return Machine::Bk0010Focal;
+    case MachineChoice::Bk0011m:     return Machine::Bk0011m;
     default:
         return !binPath.empty() && !binTargetsBk11(binPath) ? Machine::Bk0010 : Machine::Bk0011m;
     }
@@ -1422,6 +1445,8 @@ void Board::saveStateExt(std::vector<uint8_t>& out) const {
                            totalTicks_ - timerStart_};
     put(t, sizeof t);
     tape_.saveState(p, totalTicks_);      // позиция ленты, кнопки, двигатель (кассета — нет)
+    // Набор ПЗУ семейства БК-0010 (ПЗУ в снимок не входит): 1 — блок МСТД, 2 — БК-0010.
+    put8((mem_.mstd() ? 1 : 0) | (machine_ == Machine::Bk0010Focal ? 2 : 0));
     auto tail = [&](const char* tag, const std::vector<uint8_t>& body) {
         const uint32_t len = static_cast<uint32_t>(body.size());
         out.insert(out.end(), tag, tag + 4);
@@ -1524,6 +1549,16 @@ void Board::loadBkx1(const std::vector<uint8_t>& in, size_t off, size_t end) {
     timerStart_ = totalTicks_ - t[2];   // по модулю 2^64: timerCheck считает разность
     uint8_t ts[Tape::STATE_SIZE];
     if (get(ts, sizeof ts)) tape_.loadState(ts, sizeof ts, totalTicks_);
+    uint8_t var = 0;
+    if (get(&var, 1) && !bk11()) {
+        // Только ПЗУ: звук, плата и прочее уже пришли из снимка (setMachine их бы сбросил).
+        const Machine want = (var & 2) ? Machine::Bk0010Focal : Machine::Bk0010;
+        if (want != machine_ || bool(var & 1) != mem_.mstd()) {
+            machine_ = want;
+            mem_.setMstd(var & 1);
+            if (!romDir_.empty()) loadRoms(romDir_);
+        }
+    }
 }
 
 bool Board::saveState(const std::string& path) {

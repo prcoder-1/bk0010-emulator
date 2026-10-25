@@ -27,15 +27,18 @@ namespace bk {
 enum class DataType : uint8_t { Byte = 0, Word = 1, String = 2, Ptr = 3 };
 struct DataItem { DataType type; uint16_t len; };
 
-// Эмулируемая машина. БК-0011М отличается всем, что вокруг процессора: 4 МГц,
-// 128 Кбайт страничного ОЗУ, свои ПЗУ (БОС с 0140000), регистр палитры/экрана
-// 0177662 на запись, кадровое прерывание с запретом. См. docs/bk0011m.md.
-enum class Machine : uint8_t { Bk0010 = 0, Bk0011m = 1 };
+// Эмулируемая машина. Bk0010 — БК-0010-01 (Бейсик в ПЗУ). Bk0010Focal — исходная
+// БК-0010 1985 г.: то же железо, но в розетках Фокал (018, 0120000) и тесты МСТД (019,
+// 0160000), розетка 0140000 пуста, клавиатура плёночная (docs/bk0010.md). БК-0011М
+// отличается всем, что вокруг процессора: 4 МГц, 128 Кбайт страничного ОЗУ, свои ПЗУ
+// (БОС с 0140000), регистр палитры/экрана 0177662 на запись, кадровое прерывание с
+// запретом. См. docs/bk0011m.md.
+enum class Machine : uint8_t { Bk0010 = 0, Bk0011m = 1, Bk0010Focal = 2 };
 
 // Выбор машины в настройках GUI, ключе --machine и MCP. Auto — машину выбирает
-// программа (.BIN, Board::binTargetsBk11), без программы — БК-0011М. Явный выбор
-// программу не проверяет: что выбрано, то и работает.
-enum class MachineChoice : uint8_t { Auto, Bk0010, Bk0011m };
+// программа (.BIN, Board::binTargetsBk11) между БК-0010-01 и БК-0011М, без программы —
+// БК-0011М. Явный выбор программу не проверяет: что выбрано, то и работает.
+enum class MachineChoice : uint8_t { Auto, Bk0010, Bk0011m, Bk0010Focal };
 
 // The BK-0010 "motherboard": wires the CPU, memory, screen and the internal
 // I/O registers together and drives the emulation. Pure C++ (no Qt) so it can
@@ -50,11 +53,19 @@ public:
     void setMachine(Machine m);
     Machine machine() const { return machine_; }
     bool bk11() const { return machine_ == Machine::Bk0011m; }
-    static const char* machineName(Machine m) { return m == Machine::Bk0011m ? "БК-0011М" : "БК-0010-01"; }
-    // Выбор машины из ключа или аргумента: auto / авто; bk10 / 0010 / bk0010 — БК-0010-01;
-    // bk11m / 0011m / bk0011m — БК-0011М (латиница — в любом регистре). false — не опознано.
+    // ПЗУ Фокала и тестов МСТД вместо Бейсика: БК-0010 или БК-0010-01 с блоком МСТД.
+    bool focalRoms() const { return !bk11() && (machine_ == Machine::Bk0010Focal || mem_.mstd()); }
+    // Плёночная клавиатура БК-0010: лишние клавиши ГРАФ, ЗАП, СТИР, УСТ ТАБ, СБР ТАБ,
+    // ГТ, диагональные стрелки (та же матрица ВП1-014, занято больше позиций).
+    bool membraneKeyboard() const { return machine_ == Machine::Bk0010Focal; }
+    static const char* machineName(Machine m) {
+        return m == Machine::Bk0011m ? "БК-0011М" : m == Machine::Bk0010Focal ? "БК-0010" : "БК-0010-01";
+    }
+    // Выбор машины из ключа или аргумента: auto / авто; bk10 / bk0010-01 / bk001001 —
+    // БК-0010-01; bk10f / bk0010 / focal / фокал — БК-0010 (Фокал, плёночная клавиатура);
+    // bk11m / bk0011m / 11m — БК-0011М (латиница — в любом регистре). false — не опознано.
     static bool parseMachineChoice(const std::string& s, MachineChoice& out);
-    static const char* machineChoiceName(MachineChoice c);    // "auto" / "bk10" / "bk11m"
+    static const char* machineChoiceName(MachineChoice c);    // "auto" / "bk10" / "bk10f" / "bk11m"
     // Машина для выбора c: явный — он сам; Auto — по программе binPath (пусто — БК-0011М).
     static Machine machineFor(MachineChoice c, const std::string& binPath = {});
     int  cpuFreqHz() const { return cpuFreqHz_; }
@@ -275,7 +286,10 @@ public:
     uint16_t reg716tap() const { return reg716tap_; }  // 0177716 (бит 11 = 0): лента/динамик
     // Блок МСТД (ПЗУ 330) в окне 0160000. Его первое слово 000240, поэтому БОС
     // при пуске отдаёт ему управление — по умолчанию блок не вставлен.
-    void setMstd(bool on) { mem_.setMstd(on); }
+    // Блок МСТД: на БК-0011М — тесты (ПЗУ 330) в 0160000; на БК-0010-01 — Фокал и тесты
+    // вместо Бейсика (контакт А14 «БЛОК» снимает его ПЗУ). У БК-0010 они стоят всегда.
+    void setMstd(bool on);
+    bool mstd() const { return mem_.mstd(); }
     // Звуковой сопроцессор AY-3-8910 / YM2149 на параллельном порту 0177714.
     void setAy(bool on) { ayOn_ = on; syncSound(); }
     // Плата на два AY («2AY», docs/sound.md). Чип выбирается двумя способами сразу,

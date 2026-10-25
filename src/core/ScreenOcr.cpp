@@ -271,6 +271,7 @@ OcrResult ocrScreen(const Memory& mem, const std::vector<uint8_t>& bits, const O
             c.inverted = inv;
             c.ok = dist <= opt.tolerance;
             res.residual += dist;
+            if (y >= BK_SERVICE_ROWS) res.residualBody += dist;
             if (empty) continue;                      // пустые в статистику не идут
             if (c.ok) { ++res.recognised; if (inv) ++res.inverted; }
             else      { ++res.unknown; }
@@ -296,9 +297,11 @@ OcrResult ocrAuto(const Memory& mem, const std::vector<uint8_t>& bits, OcrOption
             o.y0 = fixedY0 ? base.y0 : dy;
             OcrResult r = ocrScreen(mem, bits, o);
             // Меньше остаточных точек — вернее сетка; при равенстве побеждает та,
-            // где распознано больше знакомест.
-            if (!haveBest || r.residual < best.residual ||
-                (r.residual == best.residual && r.recognised > best.recognised)) {
+            // где распознано больше знакомест. Служебная строка монитора в оценку не
+            // идёт: её индикаторы всегда широкие, и при узком тексте под ней (Фокал БК-0010)
+            // она перетягивала выбор на широкую сетку.
+            if (!haveBest || r.residualBody < best.residualBody ||
+                (r.residualBody == best.residualBody && r.recognised > best.recognised)) {
                 best = std::move(r);
                 haveBest = true;
             }

@@ -6,9 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A BK-0010-01 (Soviet PDP-11 clone, K1801VM1 CPU) emulator-debugger in C++17/Qt6
 with OpenGL screen output and a Soft-ICE style debugger. Loads and runs `.BIN`
-game files. Also emulates the **BK-0011M**. The machine is a three-way CHOICE
-(`bk::MachineChoice`: auto / bk10 / bk11m) in the GUI menu «Машина» (setting `machineMode`),
-`--machine auto|bk10|bk11m` and MCP `bk_machine`/`bk_reset {machine}`; the default is AUTO.
+game files. Also emulates the **BK-0011M** and the original **BK-0010** of 1985
+(`Machine::Bk0010Focal`: FOCAL 018 at 0120000, МСТД tests 019 at 0160000, empty socket
+0140000 = bus error, membrane keyboard; same core as the -01, `docs/bk0010.md`). The machine is a CHOICE
+(`bk::MachineChoice`: auto / bk10 / bk10f / bk11m) in the GUI menu «Машина» (setting `machineMode`),
+`--machine auto|bk10|bk10f|bk11m` (`bk0010` = bk10f) and MCP `bk_machine`/`bk_reset {machine}`; the default is AUTO
+(it never picks bk10f).
 Only auto looks at the program: `Board::machineFor(choice, bin)` — a `.BIN` (CLI, GUI «Файл»,
 MCP `bk_load`) picks the machine, no program (or a disk/HDD) → the BK-0011M, with the AY on.
 An explicit bk10/bk11m is used as is: no program check, ever (GUI `loadBinFromPath`, MCP
@@ -37,7 +40,7 @@ ctest --test-dir build                 # same, via ctest
   `Speaker` (core) generates samples, `AudioOut` (a `QIODevice` feeding a
   `QAudioSink` in pull mode) plays them. Without Multimedia the app still builds;
   audio is simply skipped and `Speaker` is disabled to avoid buffering.
-- ROMs (`monit10.rom`, `basic10.rom`; for the 11M `bk11m_324_bos.rom`, `bk11m_325_ext.rom`,
+- ROMs (`monit10.rom`, `basic10.rom`; for the BK-0010 `bk10_018_focal.rom`, `bk10_019_mstd.rom`; for the 11M `bk11m_324_bos.rom`, `bk11m_325_ext.rom`,
   `bk11m_327..329_basic*.rom`, `bk11m_330_mstd.rom`) live in `roms/`; the path is baked in via
   `BK_DEFAULT_ROM_DIR`, overridable with `--roms <dir>` or `BK_ROM_DIR`.
 
@@ -53,14 +56,15 @@ Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
 `--no-arb037` (disable the КР1801ВП1-037 DRAM-window model, on by default),
 `--cpu-phase 0|1` (CPU clock phase vs the 037 window, see below),
 `--smk` / `--no-smk` (СМК-512 memory-expansion board, ON by default in the GUI, headless and
-MCP since 2026-10-16; `Board` itself still starts without it. On the BK-0010 it covers the BASIC
+MCP since 2026-10-16, except on bk10f where it would cover FOCAL; `Board` itself still starts without it. On the BK-0010-01 it covers the BASIC
 ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, overclk — need
 `--no-smk`),
 `--hdd <img.hdi>` / `--hdd-b` / `--hdd-rw` / `--hdd-ctl auto|smk|samara` (IDE hard disk on
 the СМК-512 or the «Самара» controller, `docs/hdd.md`),
-`--machine auto|bk10|bk11m` (`--bk10`, `--bk11m`; default auto), `--az` / `--az-sd <dir>` /
+`--machine auto|bk10|bk10f|bk11m` (`--bk10`, `--bk10f`, `--bk11m`; default auto), `--mstd` (МСТД block: on the
+-01 FOCAL+tests instead of BASIC, on the 11M the test ROM), `--az` / `--az-sd <dir>` /
 `--az-unit N=<img>` / `--az-rw` / `--az-037` / `--az-net tap:IF|macvtap:IF|/dev/tapN` (AZБК controller, `docs/azbk.md`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
-for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default), `--mstd` (11M test ROM block),
+for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default),
 `--video <file.avi|.mp4>` / `--video-codec zmbv|h264` (default: by extension) / `--video-size 1024x768|512x256` /
 `--video-audio` / `--no-video-audio` (screen capture with sound, GUI and headless, `docs/video.md`),
 `--tape <file.wav>` / `--tape-play` / `--tape-remote` (cassette in the tape recorder) and
@@ -133,6 +137,12 @@ Two layers, deliberately decoupled:
   memory windows derive from `HexPageWindow` (`src/ui/HexPageView`); octal/count formatting
   for the UI and MCP is `src/ui/QtFormat.h`.
 
+- **Key codes follow the 1801ВП1-014 netlist** (`~/OneChipBook/ocbk/sim/ref014`, all 80 matrix
+  positions probed): ТАБ = 0211, ШАГ = 0200, `=|=>` = 0213 (raw 011/000/013 via vector 0274; the
+  monitor turns them into 0211/0220/0231 — do not send the monitor's codes). The BK-0010 membrane
+  keyboard only populates more matrix positions (ГРАФ 0205, ЗАП 0206, СТИР 0207, УСТ ТАБ 015,
+  СБР ТАБ 020, ГТ 024, ⇱ 022, diagonals 034–037); `src/ui/BkKeyboardWidget` is the on-screen
+  keyboard (membrane for BK-0010, buttons otherwise) with the chip's modifier logic.
 - **Shared input tables** live in the core as header-only files so the GUI, the MCP
   server and `cpu_tests` (which links only `bkcore`) all agree: `src/core/Joystick.h`
   (the four joystick layouts + name↔bit helpers; `Gamepad::Standard` is just an alias

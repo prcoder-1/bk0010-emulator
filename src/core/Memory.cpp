@@ -52,7 +52,8 @@ void Memory::setPageMap(uint16_t reg) {
 void Memory::applyMap() {
     if (!bk11_) {
         for (int i = 0; i < 8; ++i) { blk_[i] = mem_.data() + i * ROM11_BYTES; attr_[i] = Ram; }
-        if (romsOff_) for (int i = 5; i < 8; ++i) { blk_[i] = zero_.data(); attr_[i] = Absent; }
+        for (int i = 5; i < 8; ++i)
+            if (romsOff_ || (absent10_ >> i & 1)) { blk_[i] = zero_.data(); attr_[i] = Absent; }
         return;
     }
     auto ramBlk = [&](int i, int page, int half) {

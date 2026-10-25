@@ -360,9 +360,13 @@ int main(int argc, char** argv) {
         MachineChoice c = MachineChoice::Bk0010;
         const bool parsed = Board::parseMachineChoice("auto", c) && c == MachineChoice::Auto
             && Board::parseMachineChoice("BK11M", c) && c == MachineChoice::Bk0011m
-            && Board::parseMachineChoice("bk0010", c) && c == MachineChoice::Bk0010
+            && Board::parseMachineChoice("bk10", c) && c == MachineChoice::Bk0010
+            && Board::parseMachineChoice("BK0010-01", c) && c == MachineChoice::Bk0010
+            && Board::parseMachineChoice("bk0010", c) && c == MachineChoice::Bk0010Focal
+            && Board::parseMachineChoice("bk10f", c) && c == MachineChoice::Bk0010Focal
+            && Board::parseMachineChoice("Фокал", c) && c == MachineChoice::Bk0010Focal
             && !Board::parseMachineChoice("zx", c);
-        CHECK(parsed, "выбор машины: auto / bk10 / bk11m разбираются, прочее — нет");
+        CHECK(parsed, "выбор машины: auto / bk10 / bk10f (bk0010) / bk11m разбираются, прочее — нет");
         CHECK(Board::machineFor(MachineChoice::Auto, b11) == Machine::Bk0011m
               && Board::machineFor(MachineChoice::Auto, b10) == Machine::Bk0010
               && Board::machineFor(MachineChoice::Auto) == Machine::Bk0011m,
@@ -993,7 +997,12 @@ int main(int argc, char** argv) {
         CHECK(bkKeyByName("рус") == BK_CODE_RUS, "рус -> 016");
         CHECK(bkKeyByName("right") == 031 && bkKeyByName("up") == 032, "стрелки");
         CHECK(bkKeyByName("нетакой") == BK_KEY_NONE, "неизвестное имя");
-        CHECK(bkKeyByName("БЛОК РЕД") == 0204 && bkKeyByName("шаг") == 0220 && bkKeyByName("f9") == 014, "БЛОК РЕД, ШАГ, F9=СБР");
+        CHECK(bkKeyByName("БЛОК РЕД") == 0204 && bkKeyByName("шаг") == 0200 && bkKeyByName("f9") == 014, "БЛОК РЕД, ШАГ, F9=СБР");
+        // Коды клавиш — по позициям матрицы ВП1-014 (нетлист): ТАБ — 011, «=|=>» — 013, ШАГ —
+        // 000, все через вектор 0274; плёночные ГРАФ/ЗАП/СТИР — 005/006/007 через 0274.
+        CHECK(bkKeyByName("tab") == 0211 && bkKeyByName("f3") == 0213 && bkKeyByName("граф") == 0205
+              && bkKeyByName("стир") == 0207 && bkKeyByName("уст таб") == 015 && bkKeyByName("вверх-влево") == 034,
+              "коды ТАБ, =|=>, ГРАФ, СТИР, УСТ ТАБ, диагонали");
         CHECK(std::string(bkKeyName(012)) == "enter", "обратный поиск имени");
 
         // АР2: код той же клавиши плюс бит 0200 (вектор 0274).
@@ -4443,6 +4452,75 @@ int main(int argc, char** argv) {
                   "Лента: снимок — позиция и «Воспроизведение»");
         }
         std::filesystem::remove_all(dir);
+    }
+
+    SECTION("БК-0010: Фокал и тесты МСТД вместо Бейсика, пустая розетка 0140000, снимок, МСТД на БК-0010-01")
+    {
+        auto romWord = [](const char* name, size_t off) {
+            std::ifstream f(std::string(BK_DEFAULT_ROM_DIR) + "/" + name, std::ios::binary);
+            uint8_t b2[2] = {0, 0};
+            f.seekg(off); f.read(reinterpret_cast<char*>(b2), 2);
+            return static_cast<uint16_t>(b2[0] | (b2[1] << 8));
+        };
+        const uint16_t focal0 = romWord("bk10_018_focal.rom", 0), mstd0 = romWord("bk10_019_mstd.rom", 0);
+        const uint16_t basic0 = romWord("basic10.rom", 0);
+        auto screen = [](Board& b) {
+            std::vector<uint8_t> bits;
+            screenBitmap(b.memory(), b.peekReg(0177664), bits);
+            return ocrAuto(b.memory(), bits, OcrOptions{}).text();
+        };
+        // Набор: код, удержание пару кадров, отпускание — как пальцем.
+        auto type = [](Board& b, const char* text) {
+            bool cyr = false;
+            for (uint16_t c : bkEncodeText(text, cyr)) {
+                b.pressKey(c); b.setKeyHeld(true);
+                for (int i = 0; i < 3; ++i) b.runFrame();
+                b.setKeyHeld(false);
+                for (int i = 0; i < 3; ++i) b.runFrame();
+            }
+            for (int i = 0; i < 20; ++i) b.runFrame();
+        };
+        Board b;
+        b.setMachine(Machine::Bk0010Focal);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.reset();
+        for (int i = 0; i < 80; ++i) b.runFrame();
+        CHECK(std::string(Board::machineName(b.machine())) == "БК-0010" && b.focalRoms() && b.membraneKeyboard()
+              && !b.bk11() && b.cpuFreqHz() == 3000000, "БК-0010: машина, 3 МГц, Фокал, плёночная клавиатура");
+        CHECK(b.memory().peekWord(0120000) == focal0 && b.memory().peekWord(0160000) == mstd0,
+              "БК-0010: Фокал (018) в 0120000, тесты МСТД (019) в 0160000");
+        const std::string boot = screen(b);
+        CHECK(boot.find("ГОТОВНОСТЬ К РАБОТЕ") != std::string::npos, "БК-0010: монитор передал управление Фокалу");
+        type(b, "T 2+2,!\n");
+        CHECK(screen(b).find("4.0000") != std::string::npos, "БК-0010: Фокал считает 2+2");
+        // Розетка 0140000 пуста: чтение — зависание (вектор 4).
+        Memory& m = b.memory();
+        loadProg(m, 01000, {012737, 01030, 04, 012737, 0340, 06, 013700, 0140000, 000777});
+        loadProg(m, 01030, {012701, 0123, 000777});
+        b.cpu().r[1] = 0; b.cpu().r[6] = 01000; b.cpu().r[7] = 01000;
+        b.runUntil(01034, 61440);
+        CHECK(b.cpu().r[1] == 0123, "БК-0010: чтение пустой розетки 0140000 — прерывание по вектору 4");
+        // Снимок помнит набор ПЗУ: грузим его в БК-0010-01.
+        std::vector<uint8_t> st;
+        b.saveStateMem(st);
+        Board c;
+        c.setMachine(Machine::Bk0010);
+        c.loadRoms(BK_DEFAULT_ROM_DIR);
+        c.reset();
+        CHECK(c.memory().peekWord(0120000) == basic0, "БК-0010-01: Бейсик в 0120000");
+        CHECK(c.loadStateMem(st) && c.machine() == Machine::Bk0010Focal && c.memory().peekWord(0120000) == focal0,
+              "снимок БК-0010 возвращает машину и ПЗУ Фокала");
+        // БК-0010-01 с блоком МСТД — те же ПЗУ, что у БК-0010; блок вынули — снова Бейсик.
+        Board d;
+        d.setMachine(Machine::Bk0010);
+        d.loadRoms(BK_DEFAULT_ROM_DIR);
+        d.setMstd(true);
+        d.reset();
+        CHECK(d.focalRoms() && !d.membraneKeyboard() && d.memory().peekWord(0120000) == focal0,
+              "БК-0010-01 + МСТД: Фокал вместо Бейсика");
+        d.setMstd(false);
+        CHECK(!d.focalRoms() && d.memory().peekWord(0120000) == basic0 && d.memory().peekWord(0140000) != 0,
+              "БК-0010-01 без МСТД: Бейсик и его вторая БИС вернулись");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

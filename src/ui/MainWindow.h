@@ -138,6 +138,7 @@ private slots:
     void loadState();
     void openTape();
     void showTapeCatalog();
+    void openKeyboard();
 
 private:
     void updateTitle();
@@ -147,6 +148,11 @@ private:
     // Какой файл кассеты грузить программой: один — он, несколько — спросить.
     // Пусто — отказались или на кассете нечего грузить.
     QString chooseTapeProgram(const QString& wav);
+    // Экранная клавиатура: плёночная у БК-0010, кнопочная у остальных.
+    class BkKeyboardWidget* vk_ = nullptr;
+    QWidget* vkWindow_ = nullptr;
+    void syncKeyboardKind();
+    void virtualKey(uint16_t code, bool down);   // нажатие с экранной клавиатуры
     class TapeDialog* tapeDialog_ = nullptr;
     QLabel* tapeLabel_ = nullptr;
     QAction* tapePlayAction_ = nullptr;
@@ -194,6 +200,7 @@ private:
     QAction* machineAutoAction_ = nullptr; // радиопункты меню «Машина»
     QAction* machine10Action_ = nullptr;
     QAction* machine11Action_ = nullptr;
+    QAction* machine10fAction_ = nullptr;   // БК-0010 (Фокал, плёночная клавиатура)
     bk::MachineChoice machineChoice_ = bk::MachineChoice::Auto;
     // Включить другую машину — как выключить одну и включить другую: ПЗУ, частота, карта
     // памяти, звук и плата по её настройкам; загруженная программа забывается.
@@ -205,8 +212,12 @@ private:
     QString soundKey(const char* base) const { return QString(base) + ((board_ && board_->bk11()) ? "11m" : "10"); }
     void applySoundSettings(int ayOverride = -1, int ay2Override = -1, int covoxOverride = -1);
     int  scanlineOverride_ = -1;
-    // Ключ настройки «плата СМК-512 стоит» — свой у каждой машины.
-    QString smkKey() const { return (board_ && board_->bk11()) ? "smk512_11m" : "smk512"; }
+    // Ключ настройки «плата СМК-512 стоит» — свой у каждой машины; у БК-0010 1985 года
+    // платы по умолчанию нет (она закрыла бы Фокал).
+    QString smkKey() const {
+        return !board_ ? "smk512" : board_->bk11() ? "smk512_11m" : board_->membraneKeyboard() ? "smk512_10f" : "smk512";
+    }
+    bool smkDefault() const { return !(board_ && board_->membraneKeyboard()); }
     void applyScanline();
     // AZБК: настройка «плата стоит» своя у каждой машины; карта SD, диск AZ0 и доработка
     // 037 — общие. Ключи командной строки перекрывают их на запуск.
