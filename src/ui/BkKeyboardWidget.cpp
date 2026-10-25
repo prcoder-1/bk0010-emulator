@@ -121,34 +121,37 @@ const K kMembrane[] = {
     { 958, 333, 1020, 397, Reserved, 0, false, Yellow, "",         "", "" },
 };
 
-// Кнопочная клавиатура БК-0010-01.
+// Кнопочная клавиатура БК-0010-01. Надписи — как на колпачках (фото computer-museum.ru):
+// кириллица и латиница чёрные, латиница курсивом; «{» под нулём и «}» на «Ъ» — только
+// надписи, код клавиши от них не зависит (ПР+0 у ВП1-014 даёт пробел). "\x01" + буква —
+// полая стрелка-пиктограмма (drawPictogram).
 const K kButtons[] = {
     {   5,   5,  100,  68, Reg,   0001, true,  Dark,   "ПОВТ",     "", "" },
     { 102,   5,  199,  68, Reg,   0003, false, Dark,   "КТ",       "", "" },
-    { 201,   5,  297,  68, Reg,   0013, true,  Dark,   "=|=>",     "", "" },
-    { 299,   5,  396,  68, Reg,   0026, false, Dark,   "|<==",     "", "" },
-    { 398,   5,  494,  68, Reg,   0027, false, Dark,   "|==>",     "", "" },
+    { 201,   5,  297,  68, Reg,   0013, true,  Dark,   "\x01" "B", "", "" },   // =|=>
+    { 299,   5,  396,  68, Reg,   0026, false, Dark,   "\x01" "L", "", "" },   // |<==
+    { 398,   5,  494,  68, Reg,   0027, false, Dark,   "\x01" "R", "", "" },   // ==>
     { 496,   5,  593,  68, Reg,   0002, true,  Dark,   "ИНД\nСУ",  "", "" },
     { 595,   5,  691,  68, Reg,   0004, true,  Dark,   "БЛОК\nРЕД", "", "" },
     { 693,   5,  789,  68, Reg,   0000, true,  Dark,   "ШАГ",      "", "" },
     { 792,   5,  904,  68, Reg,   0014, false, Dark,   "СБР",      "", "" },
     { 906,   5, 1019,  68, Stop,  0,    false, Red,    "СТОП",     "", "" },
 
-    {   5,  70,   68, 134, Shift, 0,    false, Dark,   "⇩",        "", "" },
+    {   5,  70,   68, 134, Shift, 0,    false, Dark,   "\x01" "s", "", "" },   // ⇩ ПР
     {  70,  70,  134, 134, Reg,   0073, false, Light,  ";\n+",      "", "" },
     { 136,  70,  200, 134, Reg,   0061, false, Light,  "1\n!",      "", "" },
-    { 201,  70,  265, 134, Reg,   0062, false, Light,  "2\n\"",     "", "" },
+    { 201,  70,  265, 134, Reg,   0062, false, Light,  "2\n″",      "", "" },
     { 267,  70,  331, 134, Reg,   0063, false, Light,  "3\n#",      "", "" },
     { 333,  70,  396, 134, Reg,   0064, false, Light,  "4\n¤",      "", "" },
     { 398,  70,  462, 134, Reg,   0065, false, Light,  "5\n%",      "", "" },
     { 464,  70,  528, 134, Reg,   0066, false, Light,  "6\n&",      "", "" },
-    { 530,  70,  593, 134, Reg,   0067, false, Light,  "7\n'",      "", "" },
+    { 530,  70,  593, 134, Reg,   0067, false, Light,  "7\n◢",      "", "" },
     { 595,  70,  659, 134, Reg,   0070, false, Light,  "8\n(",      "", "" },
     { 661,  70,  725, 134, Reg,   0071, false, Light,  "9\n)",      "", "" },
-    { 726,  70,  790, 134, Reg,   0060, false, Light,  "0",        "", "" },
-    { 792,  70,  856, 134, Reg,   0055, false, Light,  "-\n=",      "", "" },
+    { 726,  70,  790, 134, Reg,   0060, false, Light,  "0\n{",      "", "" },
+    { 792,  70,  856, 134, Reg,   0055, false, Light,  "−\n=",      "", "" },
     { 857,  70,  921, 134, Reg,   0072, false, Light,  ":\n*",      "", "" },
-    { 923,  70, 1019, 134, Reg,   0030, false, Dark,   "⟸",        "", "" },
+    { 923,  70, 1019, 134, Reg,   0030, false, Dark,   "\x01" "S", "", "" },   // ⟸ ЗАБ
 
     {   5, 136,  100, 200, Reg,   0011, true,  Dark,   "ТАБ",      "", "" },
     { 102, 136,  166, 200, Reg,   0112, false, Light,  "J",        "Й", "" },
@@ -162,8 +165,8 @@ const K kButtons[] = {
     { 628, 136,  691, 200, Reg,   0135, false, Light,  "]",        "Щ", "" },
     { 693, 136,  757, 200, Reg,   0132, false, Light,  "Z",        "З", "" },
     { 759, 136,  823, 200, Reg,   0110, false, Light,  "H",        "Х", "" },
-    { 825, 136,  888, 200, Reg,   0137, false, Light,  "_",        "Ъ", "" },
-    { 890, 136,  954, 200, Reg,   0057, false, Light,  "/ ?",      "", "" },
+    { 825, 136,  888, 200, Reg,   0137, false, Light,  "}",        "Ъ", "" },
+    { 890, 136,  954, 200, Reg,   0057, false, Light,  "/\n?",      "", "" },
     { 956, 136, 1019, 200, Reg,   0023, false, Dark,   "ВС",       "", "" },
 
     {   5, 202,  117, 265, Ctrl,  0,    false, Dark,   "СУ",       "", "" },
@@ -178,8 +181,8 @@ const K kButtons[] = {
     { 644, 202,  708, 265, Reg,   0104, false, Light,  "D",        "Д", "" },
     { 710, 202,  773, 265, Reg,   0126, false, Light,  "V",        "Ж", "" },
     { 775, 202,  839, 265, Reg,   0134, false, Light,  "\\",       "Э", "" },
-    { 841, 202,  905, 265, Reg,   0056, false, Light,  ". >",      "", "" },
-    { 906, 202, 1019, 265, Reg,   0012, false, Dark,   "ВВОД",     "", "" },
+    { 841, 202,  905, 265, Reg,   0056, false, Light,  ".\n>",      "", "" },
+    { 906, 202, 1019, 265, Reg,   0012, false, Dark,   "\x01" "E", "", "" },   // ВВОД
 
     {   5, 267,   85, 331, Caps,  0,    false, Dark,   "ЗАГЛ",     "", "" },
     {  87, 267,  150, 331, Lower, 0,    false, Dark,   "СТР",      "", "" },
@@ -192,16 +195,16 @@ const K kButtons[] = {
     { 546, 267,  610, 331, Reg,   0130, false, Light,  "X",        "Ь", "" },
     { 612, 267,  676, 331, Reg,   0102, false, Light,  "B",        "Б", "" },
     { 678, 267,  741, 331, Reg,   0100, false, Light,  "@",        "Ю", "" },
-    { 743, 267,  823, 331, Reg,   0054, false, Light,  ", <",      "", "" },
-    { 824, 267,  888, 396, Reg,   0010, false, Dark,   "←",        "", "" },
-    { 890, 267,  954, 331, Reg,   0032, false, Dark,   "↑",        "", "" },
-    { 956, 267, 1019, 396, Reg,   0031, false, Dark,   "→",        "", "" },
+    { 743, 267,  823, 331, Reg,   0054, false, Light,  ",\n<",      "", "" },
+    { 824, 267,  888, 396, Reg,   0010, false, Dark,   "\x01" "l", "", "" },
+    { 890, 267,  954, 331, Reg,   0032, false, Dark,   "\x01" "u", "", "" },
+    { 956, 267, 1019, 396, Reg,   0031, false, Dark,   "\x01" "r", "", "" },
 
     {   5, 333,  134, 396, Reg,   0016, false, Dark,   "РУС",      "", "" },
     { 136, 333,  216, 396, Ar2,   0,    false, Dark,   "АР2",      "", "" },
     { 218, 333,  691, 396, Reg,   0040, false, Light,  "",         "", "" },
     { 693, 333,  822, 396, Reg,   0017, false, Dark,   "ЛАТ",      "", "" },
-    { 890, 333,  954, 396, Reg,   0033, false, Dark,   "↓",        "", "" },
+    { 890, 333,  954, 396, Reg,   0033, false, Dark,   "\x01" "d", "", "" },
 };
 
 QColor face(uint8_t c) {
@@ -210,9 +213,67 @@ QColor face(uint8_t c) {
     case Pink:   return QColor(0xF5, 0x9C, 0x9C);
     case Blue:   return QColor(0x9F, 0xA8, 0xF5);
     case Yellow: return QColor(0xFA, 0xF7, 0x9E);
-    case Dark:   return QColor(0x70, 0x72, 0x76);
-    case Light:  return QColor(0xD8, 0xD4, 0xC4);
-    default:     return QColor(0xB4, 0x1E, 0x1E);
+    case Dark:   return QColor(0x96, 0x96, 0x98);
+    case Light:  return QColor(0xF0, 0xED, 0xE4);
+    default:     return QColor(0xD2, 0x22, 0x22);
+    }
+}
+
+// Полая стрелка: along — вдоль (0 — хвост, 1 — остриё), across — поперёк (±0.5 — край рамки).
+QPolygonF arrowShape(const QRectF& b, char dir, double st, double hh, double hl) {
+    const QPointF k[] = {{0, -st}, {1 - hl, -st}, {1 - hl, -hh}, {1, 0}, {1 - hl, hh}, {1 - hl, st}, {0, st}};
+    QPolygonF poly;
+    for (const QPointF& q : k) {
+        const double a = q.x(), c = q.y();
+        switch (dir) {
+        case 'r': poly << QPointF(b.left() + a * b.width(), b.center().y() + c * b.height()); break;
+        case 'l': poly << QPointF(b.right() - a * b.width(), b.center().y() + c * b.height()); break;
+        case 'd': poly << QPointF(b.center().x() + c * b.width(), b.top() + a * b.height()); break;
+        default:  poly << QPointF(b.center().x() + c * b.width(), b.bottom() - a * b.height()); break;
+        }
+    }
+    return poly;
+}
+
+// Пиктограммы кнопочной клавиатуры: стрелки курсора и ПР, ЗАБ, ВВОД, =|=>, |<==, ==>.
+void drawPictogram(QPainter& p, const QRectF& in, char what, double s) {
+    p.setBrush(Qt::NoBrush);
+    auto box = [&](double w, double h) {
+        return QRectF(in.center().x() - w / 2, in.center().y() - h / 2, w, h);
+    };
+    switch (what) {
+    case 'l': case 'r': p.drawPolygon(arrowShape(box(std::min(in.width() * 0.7, 46 * s), 30 * s), what, 0.18, 0.5, 0.42)); break;
+    case 'u': case 'd': case 's':
+        p.drawPolygon(arrowShape(box(30 * s, std::min(in.height() * 0.8, 40 * s)), what == 's' ? 'd' : what, 0.18, 0.5, 0.42));
+        break;
+    case 'S': p.drawPolygon(arrowShape(box(in.width() * 0.62, 26 * s), 'l', 0.17, 0.5, 0.28)); break;
+    case 'R': p.drawPolygon(arrowShape(box(in.width() * 0.7, 26 * s), 'r', 0.17, 0.5, 0.28)); break;
+    case 'B': {                                        // =|=>: черта поперёк стержня
+        const QRectF b = box(in.width() * 0.7, 26 * s);
+        p.drawPolygon(arrowShape(b, 'r', 0.17, 0.5, 0.36));
+        const double x = b.left() + b.width() * 0.28;
+        p.drawRect(QRectF(x - 2.5 * s, b.top() + b.height() * 0.08, 5 * s, b.height() * 0.84));
+        break;
+    }
+    case 'L': {                                        // |<==: черта у острия
+        const QRectF b = box(in.width() * 0.7, 26 * s);
+        p.drawLine(QPointF(b.left(), b.top()), QPointF(b.left(), b.bottom()));
+        p.drawPolygon(arrowShape(b.adjusted(4 * s, 0, 0, 0), 'l', 0.17, 0.5, 0.36));
+        break;
+    }
+    case 'E': {                                        // ВВОД: стрелка влево с крюком вверх
+        const QRectF b = box(in.width() * 0.6, in.height() * 0.62);
+        const double W = b.width(), H = b.height(), y = b.top() + H * 0.66;
+        const double st = H * 0.13, hh = H * 0.32, hl = W * 0.28, sw = W * 0.13;
+        QPolygonF poly;
+        poly << QPointF(b.left(), y) << QPointF(b.left() + hl, y - hh) << QPointF(b.left() + hl, y - st)
+             << QPointF(b.right() - sw, y - st) << QPointF(b.right() - sw, b.top())
+             << QPointF(b.right(), b.top()) << QPointF(b.right(), y + st)
+             << QPointF(b.left() + hl, y + st) << QPointF(b.left() + hl, y + hh);
+        p.drawPolygon(poly);
+        break;
+    }
+    default: break;
     }
 }
 }
@@ -299,7 +360,7 @@ void BkKeyboardWidget::mouseReleaseEvent(QMouseEvent*) {
 void BkKeyboardWidget::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    p.fillRect(rect(), kind_ == Kind::Membrane ? QColor(0x80, 0x80, 0x80) : QColor(0x3A, 0x3A, 0x3C));
+    p.fillRect(rect(), kind_ == Kind::Membrane ? QColor(0x80, 0x80, 0x80) : QColor(0x2E, 0x2E, 0x30));
     const double s = std::min(width() / 1024.0, height() / 401.0);
     QFont big = font(), small = font();
     big.setPixelSize(std::max(7, int(17 * s)));
@@ -316,7 +377,7 @@ void BkKeyboardWidget::paintEvent(QPaintEvent*) {
         p.fillPath(path, f);
         p.setPen(QPen(on ? QColor(0xFF, 0xE0, 0x40) : f.darker(150), on ? 2.5 : 1));
         p.drawPath(path);
-        const QColor ink = k.color == Dark || k.color == Red ? QColor(0xF0, 0xF0, 0xF0) : QColor(0x10, 0x10, 0x10);
+        const QColor ink(0x10, 0x10, 0x10);
         const QString lab = QString::fromUtf8(k.lab), cyr = QString::fromUtf8(k.cyr), sub = QString::fromUtf8(k.sub);
         const QRectF in = r.adjusted(4 * s, 3 * s, -4 * s, -3 * s);
         p.setFont(big);
@@ -325,13 +386,18 @@ void BkKeyboardWidget::paintEvent(QPaintEvent*) {
                 p.setPen(ink);
                 p.drawText(in, Qt::AlignHCenter | Qt::AlignTop, cyr + "  " + lab);
             } else {
-                p.setPen(QColor(0xC0, 0x10, 0x10));
-                p.drawText(in, Qt::AlignLeft | Qt::AlignTop, cyr);
                 p.setPen(ink);
-                p.drawText(in, Qt::AlignRight | Qt::AlignBottom, lab);
+                p.drawText(in, Qt::AlignLeft | Qt::AlignTop, cyr);
+                QFont it = big;
+                it.setItalic(true);
+                p.setFont(it);
+                p.drawText(in, Qt::AlignHCenter | Qt::AlignBottom, lab);
             }
+        } else if (lab.size() == 2 && lab[0] == QChar(1)) {
+            p.setPen(QPen(ink, std::max(1.2, 1.7 * s)));
+            drawPictogram(p, in, static_cast<char>(lab[1].unicode()), s);
         } else if (kind_ == Kind::Buttons && lab.size() <= 3 && lab.contains('\n')) {
-            // Ряд цифр кнопочной клавиатуры: второй знак — под первым, как на клавише.
+            // Двузначные клавиши кнопочной клавиатуры: второй знак — под первым, как на колпачке.
             p.setPen(ink);
             p.setFont(big);
             const QStringList two = lab.split('\n');
@@ -339,7 +405,8 @@ void BkKeyboardWidget::paintEvent(QPaintEvent*) {
             p.drawText(in, Qt::AlignBottom | Qt::AlignHCenter, two[1]);
         } else {
             p.setPen(ink);
-            p.setFont(lab.contains('\n') || lab.size() > 4 ? small : big);
+            // На колпачках кнопочной клавиатуры и двухстрочные надписи крупные.
+            p.setFont(kind_ == Kind::Buttons || (!lab.contains('\n') && lab.size() <= 4) ? big : small);
             p.drawText(in, (sub.isEmpty() ? Qt::AlignVCenter : Qt::AlignTop) | Qt::AlignHCenter, lab);
         }
         if (!sub.isEmpty()) {
