@@ -15,6 +15,7 @@
 #include "Hdd.h"
 #include "Az.h"
 #include "Tape.h"
+#include "MarsMouse.h"
 #include "Trace.h"
 #include "Symbols.h"
 
@@ -224,6 +225,7 @@ public:
         Machine machine = Machine::Bk0011m;
         int  ay = -1, ay2 = -1, covox = -1, scanline = -1;
         bool smk = true, mstd = false, arb037 = true;
+        bool mouse = false;                          // мышь «Марсианка» на 0177714
         int  cpuPhase = 0;
         std::string diskRom;                         // пусто — прошивка по конфигурации
         HddController hddCtl = HddController::Auto;
@@ -332,6 +334,9 @@ public:
     // геймпада (SDL2), выбранная раскладка — в классе Gamepad.
     void setJoystick(uint16_t bits) { joystick_ = bits; }
     uint16_t joystick() const { return joystick_; }
+    // Мышь «Марсианка» на том же порту (включается отдельно; её линии — ИЛИ с джойстиком).
+    MarsMouse& mouse() { return mouse_; }
+    const MarsMouse& mouse() const { return mouse_; }
     // Последнее значение, записанное программой в 0177714 (отдельный выходной
     // регистр: принтер / ковокс). Чтение порта отдаёт джойстик, а не это.
     uint16_t portOut() const { return portOut_; }
@@ -543,6 +548,7 @@ private:
     Vp037  vp037_;                 // видеоконтроллер 037: арбитраж доступа к ДОЗУ
     Smk512 smk_;                   // блок расширения памяти в разъёме МПИ
     Tape   tape_;                  // магнитофон
+    MarsMouse mouse_;              // мышь «Марсианка» на 0177714
     bool   smkOn_ = false;         // плата СМК-512 установлена
     // Есть ли на шине прошивка контроллера, перехватывающая пуск (smk512.rom): тогда
     // режим после включения и «СТОП» ставит она сама.

@@ -18,6 +18,7 @@
 #include "AzCrypto.h"
 #include "NetPort.h"
 #include "Tape.h"
+#include "MarsMouse.h"
 #ifdef BK_HAVE_FFMPEG
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -4521,6 +4522,55 @@ int main(int argc, char** argv) {
         d.setMstd(false);
         CHECK(!d.focalRoms() && d.memory().peekWord(0120000) == basic0 && d.memory().peekWord(0140000) != 0,
               "БК-0010-01 без МСТД: Бейсик и его вторая БИС вернулись");
+    }
+
+    SECTION("Мышь «Марсианка»: шаги, «СБРОС» спадом разряда 3, кнопки, расход без сброса")
+    {
+        MarsMouse m;
+        CHECK(m.bits() == 0, "мышь: отключена — порт молчит");
+        m.setEnabled(true);
+        m.move(3, -1);
+        CHECK(m.bits() == (002 | 001), "мышь: вправо и вверх");
+        m.write(010); m.write(0);                    // спад разряда 3 — шаг израсходован
+        CHECK(m.pendingX() == 2 && m.pendingY() == 0 && m.bits() == 002, "мышь: «СБРОС» расходует шаг по оси");
+        m.write(0);                                  // без фронта — ничего
+        CHECK(m.pendingX() == 2, "мышь: запись без спада разряда 3 шаг не тратит");
+        m.setButtons(true, false);
+        CHECK(m.bits() == (040 | 002), "мышь: левая кнопка — 040");
+        m.setButtons(false, true);
+        CHECK((m.bits() & 0140) == 0100, "мышь: правая кнопка — 0100");
+        m.setButtons(false, false);
+        m.move(-5, 4);
+        CHECK(m.bits() == (004 | 010), "мышь: влево и вниз (накопленные шаги складываются)");
+        for (int i = 0; i < 10; ++i) m.frame();      // программа «СБРОС» не даёт — шаги уходят сами
+        CHECK(m.bits() == 0, "мышь: без «СБРОСа» шаги расходуются по кадру");
+
+        // Через порт 0177714 на живом процессоре: цикл опроса как у CSI-DOS 3
+        // (MOV @#177714,R2 / CLR @#177714 / MOV #10,@#177714), R3 копит «вправо».
+        Board b;
+        b.setMachine(Machine::Bk0010);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.reset();
+        b.ensureMonitorBooted();
+        b.mouse().setEnabled(true);
+        b.mouse().move(5, 0);
+        b.mouse().setButtons(true, false);
+        loadProg(b.memory(), 01000, {
+            0012737, 010, 0177714,    // MOV #10,@#177714 — «СБРОС» отпущен (CSI-DOS при запуске)
+            0012705, 10,              // MOV #10,R5
+            0005003,                  // CLR R3
+            0013702, 0177714,         // 1: MOV @#177714,R2
+            0005037, 0177714,         //    CLR @#177714
+            0012737, 010, 0177714,    //    MOV #10,@#177714
+            0032702, 002,             //    BIT #2,R2
+            0001401,                  //    BEQ 2
+            0005203,                  //    INC R3
+            0077514,                  // 2: SOB R5,1
+            0000777});                //    BR .
+        b.cpu().r[6] = 01000; b.cpu().r[7] = 01000;
+        b.runUntil(01044, 61440);
+        CHECK(b.cpu().pc() == 01044 && b.cpu().r[3] == 5, "мышь: 5 шагов вправо — ровно 5 опросов с «вправо»");
+        CHECK((b.peekReg(0177714) & 0140) == 040 && (b.cpu().r[2] & 040), "мышь: левая кнопка видна на порту");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

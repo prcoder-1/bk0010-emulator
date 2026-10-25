@@ -154,6 +154,7 @@ void Board::beginFrame() {
     // Команда 037 контроллера AZБК: перезапуск машины — на границе кадра, вне команды.
     if (azResetPending_) reset();
     tape_.poll(totalTicks_);
+    mouse_.frame();
     const uint64_t T = static_cast<uint64_t>(ticksPerFrame());
     uint64_t start = frameEnd_;
     if (totalTicks_ < frameEnd_ || totalTicks_ - frameEnd_ >= T) {
@@ -719,6 +720,7 @@ void Board::reset() {
     timerCsr_ = 0;
     timerCount_ = 0177777;
     timerLimit_ = 0177777;
+    mouse_.clear();
     tape_.rebase(totalTicks_);         // кассета и позиция остаются, двигатель обесточен
     tape_.setMotor(false, 0);
     totalTicks_ = 0;
@@ -1097,6 +1099,7 @@ bool Board::powerOn(const Setup& s, const std::string& romDir) {
     setSmk512(s.smk);                                // при AZ лишь запомнится до снятия платы
     if (!s.diskRom.empty()) setDiskRom(s.diskRom);
     setHddController(s.hddCtl);
+    mouse_.setEnabled(s.mouse);
     bool ok = loadRoms(romDir);
     if (s.az) {
         std::string err;
@@ -2263,7 +2266,7 @@ bool Board::regValue(uint16_t addr, uint16_t& value) const {
     case REG_CPU_MODE:   value = 0177740 | (cpuMode_ & 7); return true;
     case REG_CPU_IVEC:   value = 0177777; return true;     // только запись; читается как все единицы
     case REG_CPU_ERROR:  value = 0177440; return true;     // флаги сбрасываются на выборке каждой команды
-    case REG_PORT:       value = joystick_; return true;   // джойстик на парал. порту
+    case REG_PORT:       value = joystick_ | mouse_.bits(); return true;   // джойстик и мышь на парал. порту
     case REG_SYS:
         // Старший байт — адрес пуска: 0100000 у БК-0010, 0140000 (БОС) у БК-0011М
         // (БК-docs §20.3); бит 7 всегда 1 (у БК-0010 — линия ИРПС в покое). Бит 6 —
@@ -2486,6 +2489,7 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
         // (входные линии), запись защёлкивается отдельно (принтер/ковокс/AY).
         // Раньше запись просто проглатывалась, и отладчику её видно не было.
         portOut_ = value;
+        mouse_.write(value);   // разряд 3 — «СБРОС» триггеров мыши
         if (ayOn_) {
             // AY-3-8910 на порту (GID devemu/Board.cpp:1184-1193, AYSnd.cpp): запись
             // словом — номер регистра, байтом — данные; линии инверсные. Байт по

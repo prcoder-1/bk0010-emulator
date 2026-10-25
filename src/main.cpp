@@ -113,6 +113,7 @@ struct CliOptions {
     QString diskRom;                      // --disk-rom smk|326|<файл>: прошивка контроллера
     QString tape, wav2bin;                // кассета в магнитофон; извлечь файлы кассеты
     bool tapeRemote = false, tapePlay = false;
+    int  mouse = -1;                      // мышь «Марсианка»: -1 — настройка GUI
     bk::Board::HddController hddCtl = bk::Board::HddController::Auto;
     // Запись видео: --video-codec, --video-size, --video-audio перекрывают настройки GUI.
     QString video, videoCodec;
@@ -132,6 +133,7 @@ struct CliOptions {
         // По умолчанию плата стоит; у БК-0010 1985 года её нет — она закрыла бы Фокал.
         st.smk = smk < 0 ? machine != bk::Machine::Bk0010Focal : smk != 0;
         st.mstd = mstd; st.arb037 = arb037; st.cpuPhase = cpuPhase;
+        st.mouse = mouse > 0;
         st.diskRom = diskRom.toStdString();
         st.hddCtl = hddCtl;
         st.az = az > 0;
@@ -239,6 +241,8 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
             const QString v = args[++i];
             o.diskRom = (v == "smk") ? "smk512.rom" : (v == "326") ? "disk326.rom" : v;
         }
+        else if (a == "--mouse") o.mouse = 1;
+        else if (a == "--no-mouse") o.mouse = 0;
         else if (a == "--tape" && hasVal) o.tape = args[++i];
         else if (a == "--tape-remote") o.tapeRemote = true;
         else if (a == "--tape-play") o.tapePlay = true;
@@ -724,6 +728,9 @@ static void printHelp(const char* prog) {
         "  --covox, --no-covox    Covox — ЦАП на порту 0177714 (то же по умолчанию)\n"
         "  --smk, --no-smk        блок расширения памяти СМК-512 (512 Кбайт; по умолчанию вкл,\n"
         "                         у БК-0010 — выкл)\n"
+        "  --mouse, --no-mouse    мышь «Марсианка» (УВК-01) на порту 0177714: в GUI — от мыши\n"
+        "                         ПК над экраном БК (средняя кнопка — захват), в MCP — bk_mouse\n"
+        "                         (GUI по умолчанию — по настройке, меню «Машина»)\n"
         "  --mstd                 блок МСТД: на БК-0010-01 — Фокал и тесты вместо Бейсика,\n"
         "                         на БК-0011М — тесты в окне 0160000\n"
         "\n"
@@ -898,6 +905,7 @@ int main(int argc, char** argv) {
     else if (!o.bin.isEmpty()) w.loadBinFromPath(o.bin);
     if (!o.diskB.isEmpty()) w.insertDiskAndBoot(o.diskB, 1);
     if (!o.tape.isEmpty()) w.insertTape(o.tape, o.tapePlay, o.tapeRemote ? 1 : -1);
+    if (o.mouse >= 0) w.setMarsMouse(o.mouse > 0, false);
     w.setHddWritable(o.hddRw);
     w.setHddController(o.hddCtl);
     if (!o.video.isEmpty()) w.startVideo(o.video, o.videoCodec, o.videoAspect, o.videoAudio);
