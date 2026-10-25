@@ -135,19 +135,19 @@ const K kButtons[] = {
     { 906,   5, 1019,  68, Stop,  0,    false, Red,    "СТОП",     "", "" },
 
     {   5,  70,   68, 134, Shift, 0,    false, Dark,   "⇩",        "", "" },
-    {  70,  70,  134, 134, Reg,   0073, false, Light,  "; +",      "", "" },
-    { 136,  70,  200, 134, Reg,   0061, false, Light,  "1 !",      "", "" },
-    { 201,  70,  265, 134, Reg,   0062, false, Light,  "2 \"",     "", "" },
-    { 267,  70,  331, 134, Reg,   0063, false, Light,  "3 #",      "", "" },
-    { 333,  70,  396, 134, Reg,   0064, false, Light,  "4 ¤",      "", "" },
-    { 398,  70,  462, 134, Reg,   0065, false, Light,  "5 %",      "", "" },
-    { 464,  70,  528, 134, Reg,   0066, false, Light,  "6 &",      "", "" },
-    { 530,  70,  593, 134, Reg,   0067, false, Light,  "7 '",      "", "" },
-    { 595,  70,  659, 134, Reg,   0070, false, Light,  "8 (",      "", "" },
-    { 661,  70,  725, 134, Reg,   0071, false, Light,  "9 )",      "", "" },
+    {  70,  70,  134, 134, Reg,   0073, false, Light,  ";\n+",      "", "" },
+    { 136,  70,  200, 134, Reg,   0061, false, Light,  "1\n!",      "", "" },
+    { 201,  70,  265, 134, Reg,   0062, false, Light,  "2\n\"",     "", "" },
+    { 267,  70,  331, 134, Reg,   0063, false, Light,  "3\n#",      "", "" },
+    { 333,  70,  396, 134, Reg,   0064, false, Light,  "4\n¤",      "", "" },
+    { 398,  70,  462, 134, Reg,   0065, false, Light,  "5\n%",      "", "" },
+    { 464,  70,  528, 134, Reg,   0066, false, Light,  "6\n&",      "", "" },
+    { 530,  70,  593, 134, Reg,   0067, false, Light,  "7\n'",      "", "" },
+    { 595,  70,  659, 134, Reg,   0070, false, Light,  "8\n(",      "", "" },
+    { 661,  70,  725, 134, Reg,   0071, false, Light,  "9\n)",      "", "" },
     { 726,  70,  790, 134, Reg,   0060, false, Light,  "0",        "", "" },
-    { 792,  70,  856, 134, Reg,   0055, false, Light,  "- =",      "", "" },
-    { 857,  70,  921, 134, Reg,   0072, false, Light,  ": *",      "", "" },
+    { 792,  70,  856, 134, Reg,   0055, false, Light,  "-\n=",      "", "" },
+    { 857,  70,  921, 134, Reg,   0072, false, Light,  ":\n*",      "", "" },
     { 923,  70, 1019, 134, Reg,   0030, false, Dark,   "⟸",        "", "" },
 
     {   5, 136,  100, 200, Reg,   0011, true,  Dark,   "ТАБ",      "", "" },
@@ -330,6 +330,13 @@ void BkKeyboardWidget::paintEvent(QPaintEvent*) {
                 p.setPen(ink);
                 p.drawText(in, Qt::AlignRight | Qt::AlignBottom, lab);
             }
+        } else if (kind_ == Kind::Buttons && lab.size() <= 3 && lab.contains('\n')) {
+            // Ряд цифр кнопочной клавиатуры: второй знак — под первым, как на клавише.
+            p.setPen(ink);
+            p.setFont(big);
+            const QStringList two = lab.split('\n');
+            p.drawText(in, Qt::AlignTop | Qt::AlignHCenter, two[0]);
+            p.drawText(in, Qt::AlignBottom | Qt::AlignHCenter, two[1]);
         } else {
             p.setPen(ink);
             p.setFont(lab.contains('\n') || lab.size() > 4 ? small : big);
