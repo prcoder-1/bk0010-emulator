@@ -2301,7 +2301,10 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
         // читает код и тут же перепроверяет готовность, на железе видит её ещё раз.
         if (!kbdReadyClearAt_) kbdReadyClearAt_ = totalTicks_ + KBD_READY_CLEAR_TICKS;
         break;
-    case REG_PORT: portReadAt_ = totalTicks_ + 1; break;   // для Covox: порт опрашивают
+    case REG_PORT:
+        portReadAt_ = totalTicks_ + 1;   // для Covox: порт опрашивают
+        mouse_.noteRead();
+        break;
     case REG_SYS:
         sysWriteFlag_ = false;
         if (tape_.loaded()) tape_.noteRead(totalTicks_, inTapeDriver(curInstrPc_));

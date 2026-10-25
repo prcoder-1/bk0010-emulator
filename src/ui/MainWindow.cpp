@@ -313,19 +313,28 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     mouseAction_->setCheckable(true);
     connect(mouseAction_, &QAction::toggled, this, [this](bool on) { setMarsMouse(on); });
     mouseMenu->addSeparator();
-    auto* scaleGroup = new QActionGroup(this);
-    marsScale_ = std::clamp(QSettings().value("marsMouseScale", 4).toInt(), 1, 16);
-    for (int sc : {1, 2, 4, 8}) {
-        QAction* a = mouseMenu->addAction(QString("Шаг шара — %1 точ%2 экрана ПК").arg(sc)
-                                          .arg(sc == 1 ? "ка" : sc < 5 ? "ки" : "ек"));
-        a->setCheckable(true);
-        a->setChecked(sc == marsScale_);
-        scaleGroup->addAction(a);
-        connect(a, &QAction::triggered, this, [this, sc] {
-            marsScale_ = sc;
-            QSettings().setValue("marsMouseScale", sc);
-        });
-    }
+    // Шаг шара в точках экрана ПК — свой по каждой оси. Шар у «Марсианки» один на обе оси,
+    // но программы двигают курсор неодинаково: CSI-DOS — байт экрана (4 цветные точки) по
+    // горизонтали и две строки по вертикали, в окне это 16 и 6 точек ПК. Значения по
+    // умолчанию (8 и 3) выравнивают такой курсор.
+    auto scaleMenu = [&](const QString& title, const char* key, int def, int& var) {
+        QMenu* m = mouseMenu->addMenu(title);
+        auto* group = new QActionGroup(this);
+        var = std::clamp(QSettings().value(key, def).toInt(), 1, 32);
+        for (int sc : {1, 2, 3, 4, 6, 8, 12, 16}) {
+            QAction* a = m->addAction(QString("%1 точ%2 экрана ПК на шаг шара").arg(sc)
+                                      .arg(sc == 1 ? "ка" : sc < 5 ? "ки" : "ек"));
+            a->setCheckable(true);
+            a->setChecked(sc == var);
+            group->addAction(a);
+            connect(a, &QAction::triggered, this, [&var, key, sc] {
+                var = sc;
+                QSettings().setValue(key, sc);
+            });
+        }
+    };
+    scaleMenu("Чувствительность по &горизонтали", "marsMouseScaleX", 8, marsScaleX_);
+    scaleMenu("Чувствительность по &вертикали", "marsMouseScaleY", 3, marsScaleY_);
     mouseMenu->addSeparator();
     QAction* mouseHelp = mouseMenu->addAction("Средняя кнопка — захват мыши (и отпустить)");
     mouseHelp->setEnabled(false);
@@ -748,8 +757,8 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
             marsHaveLast_ = true;
         }
         // Дробные остатки копятся: медленное движение тоже доходит до шара.
-        marsAccX_ += double(d.x()) / marsScale_;
-        marsAccY_ += double(d.y()) / marsScale_;
+        marsAccX_ += double(d.x()) / marsScaleX_;
+        marsAccY_ += double(d.y()) / marsScaleY_;
         const int sx = int(marsAccX_), sy = int(marsAccY_);
         marsAccX_ -= sx;
         marsAccY_ -= sy;

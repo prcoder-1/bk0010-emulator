@@ -448,8 +448,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
   0177714 OR-ed with the joystick — 001 up, 002 right, 004 down, 010 left, 040/0100 buttons (pinout of the
   TheGWBV PS/2→MARS adapter; CSI-DOS 3 decodes the same). Direction flip-flops stay set while ball steps are
   pending; a FALLING edge of bit 3 of a 0177714 write (ВД03 «СБРОС») consumes one step per axis (CSI-DOS polls
-  `MOV @#177714,R2 / CLR / MOV #10`); without that edge steps drain one per frame (games reading it as a
-  joystick). GUI: host-mouse motion over GlScreen (event filter) → steps, middle button = grab.
+  `MOV @#177714,R2 / CLR / MOV #10`); without that edge (games reading it as a joystick, MANIAC) a step
+  is consumed one frame after a read that saw it — never per frame blindly: MANIAC polls every 2–3 frames.
+  Once a program has given an edge, steps never drain without one (Chess Club waits for input without it). GUI: host-mouse motion over GlScreen (event filter) → steps, middle button = grab; host px per
+  step is set per axis (default X 8, Y 3: CSI-DOS moves a byte = 4 colour px per X step but 2 lines per Y step).
 - **Tape recorder** (`src/core/Tape.{h,cpp}`, `docs/tape.md`): a .WAV cassette goes through
   an input-comparator model (`tapeBinarize`: envelopes + hysteresis) into 1 bit per sample; the
   `Tape` deck maps CPU ticks to samples (exact for 3 and 4 MHz) and feeds bit 5 of 0177716
