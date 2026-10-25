@@ -22,6 +22,8 @@ public:
     std::vector<uint16_t> translate(QKeyEvent* e);
 
     void reset() { cyrillic_ = false; }
+    bool cyrillic() const { return cyrillic_; }
+    void setCyrillic(bool on) { cyrillic_ = on; }   // РУС/ЛАТ нажаты мимо хоста (экранная клавиатура)
 
 private:
     std::vector<uint16_t> translateAr2(QKeyEvent* e);

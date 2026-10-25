@@ -107,7 +107,7 @@ private:
     QString regsText();
     // Включить другую машину (как выключить одну и включить другую): ПЗУ, частота, карта
     // памяти, отрисовка по лучу на 11М, сброс. false — машина уже такая.
-    bool    switchMachine(bool want11);
+    bool    switchMachine(bk::Machine m);
     QString machineText();              // сводка: модель, частота, AY, СМК, диск
     QString disasmText(uint16_t addr, int count);
 };

@@ -10,8 +10,23 @@ static const QString kCyrH1 = QString::fromUtf8(bk::kKoi7H1Utf8);
 // Control codes for switching the register (as sent by the РУС/ЛАТ keys).
 enum : uint16_t { CODE_LAT = bk::BK_CODE_LAT, CODE_RUS = bk::BK_CODE_RUS };
 
-// Special keys (authoritative BK codes; bit 0200 => vector 0274).
-static uint16_t specialCode(int key) {
+// Special keys (authoritative BK codes; bit 0200 => vector 0274). Коды — по позициям
+// матрицы ВП1-014 (её нетлист: ТАБ, ШАГ, «=|=>» идут через вектор 0274 с кодами 011,
+// 000, 013; монитор сам делает из них 0211, 0220, 0231).
+static uint16_t specialCode(int key, bool keypad, bool ctrl) {
+    // Цифровой блок без NumLock — диагональные стрелки и «⇱» плёночной клавиатуры.
+    if (keypad) {
+        switch (key) {
+        case Qt::Key_Home:     return 0034;   // ↖
+        case Qt::Key_PageUp:   return 0035;   // ↗
+        case Qt::Key_PageDown: return 0036;   // ↘
+        case Qt::Key_End:      return 0037;   // ↙
+        case Qt::Key_Clear:    return 0022;   // ⇱ курсор в начало экрана
+        default: break;
+        }
+    }
+    if (ctrl && key == Qt::Key_Tab)    return 0015;   // УСТ ТАБ
+    if (ctrl && key == Qt::Key_Delete) return 0020;   // СБР ТАБ
     switch (key) {
     case Qt::Key_Down:      return 0033;
     case Qt::Key_Up:        return 0032;
@@ -19,20 +34,25 @@ static uint16_t specialCode(int key) {
     case Qt::Key_Right:     return 0031;
     case Qt::Key_Return:
     case Qt::Key_Enter:     return 0012;   // ВВОД
-    case Qt::Key_Tab:       return 0015;
+    case Qt::Key_Tab:       return 0211;   // ТАБ
     case Qt::Key_Space:     return 0040;
     case Qt::Key_Backspace: return 0030;   // ЗАБ
     case Qt::Key_Home:      return 0023;   // ВС
     case Qt::Key_Delete:    return 0014;   // СБР
     case Qt::Key_F1:        return 0201;   // ПОВТ
     case Qt::Key_F2:        return 0003;   // КТ
-    case Qt::Key_F3:        return 0231;   // =|=>
+    case Qt::Key_F3:        return 0213;   // =|=> (СБР конца строки)
     case Qt::Key_F4:        return 0026;   // |<==
     case Qt::Key_F5:        return 0027;   // |==>
     case Qt::Key_F6:        return 0202;   // ИНД СУ
     case Qt::Key_F7:        return 0204;   // БЛОК РЕД
-    case Qt::Key_F8:        return 0220;   // ШАГ
+    case Qt::Key_F8:        return 0200;   // ШАГ
     case Qt::Key_F9:        return 0014;   // СБР
+    // Плёночная клавиатура БК-0010.
+    case Qt::Key_Insert:    return 0205;   // ГРАФ
+    case Qt::Key_PageUp:    return 0206;   // ЗАП
+    case Qt::Key_PageDown:  return 0207;   // СТИР
+    case Qt::Key_End:       return 0024;   // ГТ
     // F10 — СТОП (не код, MainWindow), F11/F12 — экран и отладчик.
     default:                return bk::BK_KEY_NONE;
     }
@@ -43,7 +63,7 @@ static uint16_t specialCode(int key) {
 // ни префикса РУС/ЛАТ, ни смены регистра: Shift под Alt — это АР2+РУС/ЛАТ.
 // Под Alt текст может оказаться пустым — тогда берём код Qt-клавиши.
 std::vector<uint16_t> BkKeymap::translateAr2(QKeyEvent* e) {
-    uint16_t c = specialCode(e->key());
+    uint16_t c = specialCode(e->key(), e->modifiers() & Qt::KeypadModifier, false);
     if (c == bk::BK_KEY_NONE && e->key() == Qt::Key_Shift)
         c = (e->nativeVirtualKey() == 0xffe2) ? CODE_LAT : CODE_RUS;
     if (c == bk::BK_KEY_NONE) {
@@ -62,7 +82,9 @@ std::vector<uint16_t> BkKeymap::translateAr2(QKeyEvent* e) {
 std::vector<uint16_t> BkKeymap::translate(QKeyEvent* e) {
     if (e->modifiers() & Qt::AltModifier) return translateAr2(e);
 
-    if (const uint16_t c = specialCode(e->key()); c != bk::BK_KEY_NONE) return {c};
+    if (const uint16_t c = specialCode(e->key(), e->modifiers() & Qt::KeypadModifier,
+                                       e->modifiers() & Qt::ControlModifier);
+        c != bk::BK_KEY_NONE) return {c};
 
     // ---- РУС / ЛАТ register keys, mapped to the two Shift keys ----
     // Besides switching the BK letter register, games use them as fire-left /

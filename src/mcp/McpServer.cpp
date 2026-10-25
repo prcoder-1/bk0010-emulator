@@ -112,10 +112,13 @@ McpServer::McpServer(std::string romDir, const bk::Board::Setup& setup, const bk
         if (!described.contains(n)) std::cerr << "mcp: у обработчика " << n.toStdString() << " нет описания\n";
 }
 
-bool McpServer::switchMachine(bool want11) {
-    if (want11 == board_.bk11()) return false;
-    board_.setMachine(want11 ? bk::Machine::Bk0011m : bk::Machine::Bk0010);
+bool McpServer::switchMachine(bk::Machine m) {
+    if (m == board_.machine()) return false;
+    const bool want11 = m == bk::Machine::Bk0011m;
+    board_.setMachine(m);
     board_.setScanlineRender(want11);    // палитры 11М меняются по ходу кадра
+    // БК-0010 1985 года — без платы СМК-512: та закрыла бы Фокал (smk в bk_reset ставит её).
+    if (m == bk::Machine::Bk0010Focal) board_.setSmk512(false);
     romsOk_ = board_.loadRoms(romDir_);
     board_.reset();
     cyrState_ = false;
@@ -382,7 +385,7 @@ QJsonArray McpServer::toolDefs() const {
                   "With the AZБК board on, the file goes into the RUNNING system (boot a DOS from AZ0 "
                   "first), as a DOS would load it: no reset, no machine switch, through the mapper windows.",
         schema({{"path", P("string", "Path to the .BIN file (or a .wav cassette, x.wav#N)")},
-                {"machine", P("string", "\"auto\", \"bk10\" or \"bk11m\" for this load (default: the server's machine mode)")},
+                {"machine", P("string", "\"auto\", \"bk10\", \"bk10f\" or \"bk11m\" for this load (default: the server's machine mode)")},
                 {"run", P("boolean", "Set PC to the entry point and start (default true)")},
                 {"reset", P("boolean", "Power-on reset + re-boot the monitor first (default false)")},
                 {"frames", P("integer", "Run this many frames after loading (default 0)")}}, {"path"})));
@@ -396,7 +399,9 @@ QJsonArray McpServer::toolDefs() const {
         schema({{"path", P("string", "Output image path (default: the attached file itself)")},
                 {"drive", P("integer", "Drive 0..3 (default 0)")}})));
     t.append(tool("bk_reset", "Power-on reset the machine. `machine` switches the emulated model: "
-                  "\"bk10\" (БК-0010-01, 3 MHz) or \"bk11m\" (БК-0011М, 4 MHz, 128 KB paged RAM, 16 palettes, "
+                  "\"bk10\" (БК-0010-01, 3 MHz, BASIC ROM), \"bk10f\" (БК-0010 of 1985: FOCAL and the МСТД test ROM "
+                  "instead of BASIC, membrane keyboard; boots into FOCAL; the СМК-512 is taken out unless `smk`) "
+                  "or \"bk11m\" (БК-0011М, 4 MHz, 128 KB paged RAM, 16 palettes, "
                   "BOS ROM; floppy boot is done by BOS itself). `ay` turns the AY-3-8910 sound chip on 0177714 "
                   "on/off (default: on for bk11m, off for bk10). `cpu_phase` (0/1) picks the CPU-clock phase "
                   "relative to the 037 DRAM window that a real BK draws at random on power-up: 0 (default) "
@@ -409,7 +414,7 @@ QJsonArray McpServer::toolDefs() const {
                   "layout goes to the Samara controller (0177620–0177656, samara.rom in the floppy "
                   "controller, no memory board needed), anything else to the СМК-512 board (0177740–0177757, "
                   "installing the board and its smk512.rom firmware).",
-        schema({{"machine", P("string", "Machine mode: \"auto\" (keep the machine, bk_load picks it by the program), \"bk10\" or \"bk11m\" (default: keep)")},
+        schema({{"machine", P("string", "Machine mode: \"auto\" (keep the machine, bk_load picks it by the program), \"bk10\" (БК-0010-01), \"bk10f\" (БК-0010: Фокал, МСТД, плёночная клавиатура) or \"bk11m\" (default: keep)")},
                 {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: keep)")},
                 {"ay2", P("boolean", "Second AY (\"2AY\" board: TurboSound and Gryphon chip select) on/off (default: keep)")},
                 {"covox", P("boolean", "Covox DAC on 0177714 on/off (default: keep)")},
@@ -432,14 +437,14 @@ QJsonArray McpServer::toolDefs() const {
                   "it reports the current model (БК-0010-01 or БК-0011М), the mode, CPU clock, frame length, "
                   "AY / СМК-512 state and the inserted floppy. `machine` = \"auto\" (the default mode): "
                   "bk_load picks the machine by the program, and an already loaded program is reloaded on "
-                  "its machine if that differs. With \"bk10\" or \"bk11m\" the mode becomes explicit "
+                  "its machine if that differs. With \"bk10\", \"bk10f\" or \"bk11m\" the mode becomes explicit "
                   "(programs are not checked any more) and it powers on that machine: "
                   "ROMs, 3/4 MHz clock, memory map and per-scanline rendering change, RAM is cleared and the CPU "
                   "starts from the ROM (switching to the current model does nothing). An inserted floppy stays "
                   "in drive A and is booted (BOS boots it on the 11M by itself). The AY chip follows the "
                   "machine's default (on for bk11m) unless `ay` is given; so do the second AY (`ay2`, \"2AY\" "
                   "board) and the Covox DAC (`covox`) — both on for bk11m by default.",
-        schema({{"machine", P("string", "\"auto\", \"bk10\" (БК-0010-01) or \"bk11m\" (БК-0011М); omit to just report")},
+        schema({{"machine", P("string", "\"auto\", \"bk10\" (БК-0010-01), \"bk10f\" (БК-0010: Фокал, тесты МСТД, плёночная клавиатура, без СМК-512) or \"bk11m\" (БК-0011М); omit to just report")},
                 {"ay", P("boolean", "AY-3-8910 on 0177714 on/off (default: the machine's default when switching, else keep)")},
                 {"ay2", P("boolean", "Second AY (\"2AY\") on/off (default: the machine's default when switching, else keep)")},
                 {"covox", P("boolean", "Covox DAC on 0177714 on/off (default: the machine's default when switching, else keep)")},
@@ -487,7 +492,7 @@ QJsonArray McpServer::toolDefs() const {
         schema({{"addr", addrArg}, {"all", P("boolean", "Remove all breakpoints")}})));
     t.append(tool("bk_breakpoints", "List active breakpoints.", schema({})));
     t.append(tool("bk_key", "Press a BK-0010 key. Prefer `key` with a NAME (enter, space, left, right, "
-                  "up, down, backspace, delete, f1..f9, рус, лат) or a single character — including "
+                  "up, down, backspace, delete, f1..f9, рус, лат; membrane-keyboard keys граф, зап, стир, уст таб, сбр таб, гт, в начало, вверх-влево…) or a single character — including "
                   "Cyrillic, for which the РУС/ЛАТ switch is inserted automatically. "
                   "АР2 combos: \"ар2+X\" (or ar2+/alt+), e.g. \"ар2+;\" toggles 32/64 columns, "
                   "\"ар2+!\" red, \"ар2+\\\"\" green (АР2/●/1, АР2/●/2) — the key code with bit 0200, "
@@ -878,7 +883,7 @@ bool McpServer::resolveKey(const QJsonObject& args, std::vector<uint16_t>& codes
             if (codes.empty()) { err = "непредставимый символ: '" + ks + "'"; return false; }
         } else {
             err = "неизвестная клавиша '" + ks + "' (имя из списка: enter, space, left, right, "
-                  "up, down, backspace, delete, home, tab, f1..f9, повт, кт, блок ред, шаг, рус, лат — "
+                  "up, down, backspace, delete, home, tab, f1..f9, повт, кт, блок ред, шаг, рус, лат, граф, зап, стир, уст таб, сбр таб, гт, в начало, вверх-влево, вверх-вправо, вниз-влево, вниз-вправо — "
                   "либо ОДИН символ, с АР2 — \"ар2+клавиша\"; для строки используйте bk_type)";
             return false;
         }
@@ -1037,10 +1042,11 @@ QJsonObject McpServer::tool_bk_load(const QJsonObject& args) {
     bk::MachineChoice choice = choice_;
     if (args.contains("machine")
         && !bk::Board::parseMachineChoice(args.value("machine").toString().toStdString(), choice))
-        return fail("machine must be \"auto\", \"bk10\" or \"bk11m\"");
-    const bool want11 = bk::Board::machineFor(choice, path.toStdString()) == bk::Machine::Bk0011m;
+        return fail("machine must be \"auto\", \"bk10\", \"bk10f\" or \"bk11m\"");
+    const bk::Machine wantM = bk::Board::machineFor(choice, path.toStdString());
+    const bool want11 = wantM == bk::Machine::Bk0011m;
     QString switched;
-    if (switchMachine(want11))
+    if (switchMachine(wantM))
         switched = QString("Машина переключена на %1%2. ")
             .arg(QString::fromUtf8(bk::Board::machineName(board_.machine())))
             .arg(choice != bk::MachineChoice::Auto ? QString() : want11
@@ -1107,7 +1113,7 @@ QJsonObject McpServer::tool_bk_machine(const QJsonObject& args) {
     if (args.contains("machine")) {
         bk::MachineChoice c;
         if (!bk::Board::parseMachineChoice(args.value("machine").toString().toStdString(), c))
-            return fail("machine must be \"auto\", \"bk10\" or \"bk11m\"");
+            return fail("machine must be \"auto\", \"bk10\", \"bk10f\" or \"bk11m\"");
         choice_ = c;
         if (c == bk::MachineChoice::Auto) {
             // Авто: машину выбирает загруженная программа; нет её — машину выберет следующая.
@@ -1116,7 +1122,7 @@ QJsonObject McpServer::tool_bk_machine(const QJsonObject& args) {
             if (bin.isEmpty()) {
                 head = "Выбор машины: auto — её выберет следующая программа (bk_load).";
             } else if (m != board_.machine()) {
-                switchMachine(m == bk::Machine::Bk0011m);
+                switchMachine(m);
                 board_.ensureMonitorBooted();
                 if (board_.loadBin(bin.toStdString(), true)) lastBin_ = bin;
                 head = QString("Выбор машины: auto. Программа %1 — для %2: машина переключена, программа "
@@ -1124,7 +1130,7 @@ QJsonObject McpServer::tool_bk_machine(const QJsonObject& args) {
             } else {
                 head = QString("Выбор машины: auto. Программа %1 подходит этой машине.").arg(lastBin_);
             }
-        } else if (switchMachine(c == bk::MachineChoice::Bk0011m)) {
+        } else if (switchMachine(bk::Board::machineFor(c))) {
             head = "Машина переключена, питание включено заново.";
             if (board_.diskAttached(0) && !board_.bk11()) {
                 // БК-0010: сначала монитор, потом автозагрузчик контроллера (на 11М это делает БОС).
@@ -1150,9 +1156,9 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
     if (args.contains("machine")) {
         bk::MachineChoice c;
         if (!bk::Board::parseMachineChoice(args.value("machine").toString().toStdString(), c))
-            return fail("machine must be \"auto\", \"bk10\" or \"bk11m\"");
+            return fail("machine must be \"auto\", \"bk10\", \"bk10f\" or \"bk11m\"");
         choice_ = c;                                    // auto — машина остаётся, её выберет bk_load
-        if (c != bk::MachineChoice::Auto) switchMachine(c == bk::MachineChoice::Bk0011m);
+        if (c != bk::MachineChoice::Auto) switchMachine(bk::Board::machineFor(c));
     }
     if (args.contains("ay")) board_.setAy(args.value("ay").toBool());
     if (args.contains("ay2")) board_.setAy2(args.value("ay2").toBool());

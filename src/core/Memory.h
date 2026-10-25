@@ -150,6 +150,8 @@ public:
     // БК-0010: ПЗУ Бейсика (0120000–0177577) заблокировано платой в разъёме МПИ (AZБК
     // управляет памятью с 0120000). Монитор остаётся. На БК-0011М ничего не делает.
     void setBasicOff(bool off) { if (off != romsOff_) { romsOff_ = off; applyMap(); } }
+    // БК-0010: блоки по 8 Кбайт без микросхемы ПЗУ (бит i — блок i) — чтение зависает.
+    void setAbsent10(uint8_t mask) { if (mask != absent10_) { absent10_ = mask; applyMap(); } }
     bool basicOff() const { return romsOff_; }
     bool mstd() const { return mstd_; }
     void setPageMap(uint16_t reg);            // запись в 0177716 с битом 11
@@ -208,7 +210,8 @@ private:
 
     enum : uint8_t { Ram = 0, Rom = 1, Absent = 2 };
     uint8_t* blk_[8];                    // текущая карта: 8 блоков по 8 Кбайт
-    uint8_t  attr_[8] = {0};             // Ram / Rom / Absent (только для БК-0011М)
+    uint8_t  attr_[8] = {0};             // Ram / Rom / Absent
+    uint8_t  absent10_ = 0;              // БК-0010: пустые розетки ПЗУ (setAbsent10)
     bool     bk11_ = false;
     bool     mstd_ = false;
     bool     win1Off_ = false;           // окно 1 отключено сигналом ВЭД (СМК-512)

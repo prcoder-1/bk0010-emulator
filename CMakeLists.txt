@@ -87,6 +87,7 @@ set(APP_SOURCES
     src/ui/BkKeymap.cpp
     src/ui/Gamepad.cpp
     src/ui/TapeDialog.cpp
+    src/ui/BkKeyboardWidget.cpp
     src/mcp/McpServer.cpp
 )
 

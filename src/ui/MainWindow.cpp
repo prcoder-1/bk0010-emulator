@@ -18,6 +18,7 @@
 #include "VideoCapture.h"
 #include "VideoSink.h"
 #include "TapeDialog.h"
+#include "BkKeyboardWidget.h"
 #include <QDateTime>
 #include <QStandardPaths>
 #include <vector>
@@ -45,6 +46,7 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QProxyStyle>
+#include <QVBoxLayout>
 #include <cstdio>
 
 bool MainWindow::savedAzbk(bool bk11) {
@@ -72,7 +74,7 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     // Блок расширения памяти СМК-512: настройка запоминается между запусками,
     // ключ --smk/--no-smk перекрывает её на один запуск.
     const bool smkOn = smkOverride >= 0 ? smkOverride > 0
-                                        : QSettings().value(smkKey(), true).toBool();
+                                        : QSettings().value(smkKey(), smkDefault()).toBool();
     board_->setSmk512(smkOn);
     if (board_->smk512()) {
         // Стоит сказать вслух: с платой карта верхней половины адресов не штатная
@@ -86,6 +88,7 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
             QString("Не удалось загрузить ПЗУ из:\n%1\nПоложите в эту папку %2.")
                 .arg(romDir).arg(board_->bk11()
                     ? "bk11m_324_bos.rom (и bk11m_325_ext, bk11m_327..329_basic*.rom)"
+                    : board_->focalRoms() ? "monit10.rom (и bk10_018_focal.rom, bk10_019_mstd.rom)"
                     : "monit10.rom (и basic10.rom)"));
     }
     // Контроллер AZБК: настройка своя у каждой машины, ключ --az/--no-az её перекрывает.
@@ -209,6 +212,7 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     connect(azVgaAction_, &QAction::toggled, this, &MainWindow::setAzVga);
     emu->addAction("&Пауза", this, [this]{ setSuspended(!suspended_); }, QKeySequence(Qt::Key_Pause));
     emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_); }, QKeySequence("F12"));
+    emu->addAction("Экранная &клавиатура БК…", this, &MainWindow::openKeyboard);
 
     // --- Машина: БК-0010-01 или БК-0011М и её оборудование: СМК-512, AY, джойстик ---
     QMenu* mach = menuBar()->addMenu("&Машина");
@@ -216,15 +220,17 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     machGroup->setExclusive(true);
     // Авто — машину выбирает программа (.BIN), явный выбор программу не проверяет.
     machineAutoAction_ = mach->addAction("&Автоматически — по программе");
-    machine10Action_ = mach->addAction("БК-00&10-01 (3 МГц, 32 Кбайт ОЗУ)");
+    machine10fAction_ = mach->addAction("БК-00&10 (Фокал, тесты МСТД, плёночная клавиатура)");
+    machine10Action_ = mach->addAction("БК-0010-0&1 (3 МГц, 32 Кбайт ОЗУ, Бейсик)");
     machine11Action_ = mach->addAction("БК-00&11М (4 МГц, 128 Кбайт ОЗУ, 16 палитр)");
-    for (auto* a : {machineAutoAction_, machine10Action_, machine11Action_}) {
+    for (auto* a : {machineAutoAction_, machine10fAction_, machine10Action_, machine11Action_}) {
         a->setCheckable(true);
         machGroup->addAction(a);
     }
     connect(machineAutoAction_, &QAction::triggered, this, [this] { setMachineChoice(bk::MachineChoice::Auto); });
     connect(machine10Action_, &QAction::triggered, this, [this] { setMachineChoice(bk::MachineChoice::Bk0010); });
     connect(machine11Action_, &QAction::triggered, this, [this] { setMachineChoice(bk::MachineChoice::Bk0011m); });
+    connect(machine10fAction_, &QAction::triggered, this, [this] { setMachineChoice(bk::MachineChoice::Bk0010Focal); });
     mach->addSeparator();
     // Блок расширения памяти СМК-512 («АльтПро») в разъёме МПИ. На живой машине
     // плату ставят только при выключенном питании, поэтому переключатель
@@ -656,6 +662,54 @@ void MainWindow::openTape() {
     const QString path = QFileDialog::getOpenFileName(this, "Вставить кассету", lastTape_.isEmpty() ? lastBin_ : lastTape_,
                                                       "Кассеты БК (*.wav *.WAV *.Wav);;Все файлы (*)");
     if (!path.isEmpty()) insertTape(path);
+}
+
+void MainWindow::syncKeyboardKind() {
+    if (!vk_) return;
+    vk_->setKind(board_->membraneKeyboard() ? BkKeyboardWidget::Kind::Membrane : BkKeyboardWidget::Kind::Buttons);
+    vkWindow_->setWindowTitle(QString("Клавиатура %1 (%2)")
+        .arg(QString::fromUtf8(bk::Board::machineName(board_->machine())))
+        .arg(board_->membraneKeyboard() ? "плёночная" : "кнопочная"));
+}
+
+void MainWindow::openKeyboard() {
+    if (!vk_) {
+        vkWindow_ = new QWidget(this, Qt::Tool);
+        auto* lay = new QVBoxLayout(vkWindow_);
+        lay->setContentsMargins(0, 0, 0, 0);
+        vk_ = new BkKeyboardWidget(vkWindow_);
+        lay->addWidget(vk_);
+        vk_->isRussian = [this] { return keymap_.cyrillic(); };
+        connect(vk_, &BkKeyboardWidget::keyDown, this, [this](uint16_t c) { virtualKey(c, true); });
+        connect(vk_, &BkKeyboardWidget::keyUp, this, [this] { virtualKey(0, false); });
+        connect(vk_, &BkKeyboardWidget::registerSwitched, this, [this](bool rus) { keymap_.setCyrillic(rus); });
+        connect(vk_, &BkKeyboardWidget::stopPressed, this, [this] {
+            if (paused_ || suspended_) return;
+            board_->pressStop();
+            status_->setText(QString::fromUtf8("Клавиша СТОП (прерывание по вектору 4)"));
+        });
+        vkWindow_->resize(860, 337);
+        syncKeyboardKind();
+    }
+    vkWindow_->show();
+    vkWindow_->raise();
+}
+
+// Как нажатие клавиши матрицы с клавиатуры хоста: бит «нажата» держится, пока нажата
+// кнопка мыши; второе нажатие при уже нажатой клавише кода не даёт (ВП1-014).
+void MainWindow::virtualKey(uint16_t code, bool down) {
+    static constexpr int kVirtualKey = -1;     // не совпадает ни с одним Qt::Key
+    if (paused_ || suspended_) return;
+    if (down) {
+        const bool busy = !heldKeys_.empty();
+        heldKeys_.insert(kVirtualKey);
+        board_->setKeyHeld(true);
+        if (busy) return;
+        if (keyFeed_.empty()) board_->pressKey(code);
+        else keyFeed_.push_back(code);
+    } else if (heldKeys_.erase(kVirtualKey) && heldKeys_.empty()) {
+        board_->setKeyHeld(false);
+    }
 }
 
 void MainWindow::showTapeCatalog() {
@@ -1101,7 +1155,7 @@ void MainWindow::setAzbk(bool on) {
     azCli_.on = -1;
     if (!applyAz(on)) return;                         // машина не тронута, галка вернулась
     QSettings().setValue(azKey(), on);
-    if (!on) board_->setSmk512(QSettings().value(smkKey(), true).toBool());
+    if (!on) board_->setSmk512(QSettings().value(smkKey(), smkDefault()).toBool());
     resetMachine();
     status_->setText(on ? "Контроллер AZБК установлен, машина перезапущена" : "Контроллер AZБК снят, машина перезапущена");
 }
@@ -1166,13 +1220,14 @@ void MainWindow::applyScanline() {
 }
 
 void MainWindow::syncMachineMenu() {
-    for (QAction* a : {machineAutoAction_, machine10Action_, machine11Action_, ayAction_, ay2Action_,
-                       covoxAction_, smkAction_})
+    for (QAction* a : {machineAutoAction_, machine10Action_, machine11Action_, machine10fAction_, ayAction_,
+                       ay2Action_, covoxAction_, smkAction_})
         if (!a) return;
     QSignalBlocker b0(machineAutoAction_), b1(machine10Action_), b2(machine11Action_), b3(ayAction_),
-                   b4(smkAction_), b5(ay2Action_), b6(covoxAction_);
+                   b4(smkAction_), b5(ay2Action_), b6(covoxAction_), b7(machine10fAction_);
     machineAutoAction_->setChecked(machineChoice_ == bk::MachineChoice::Auto);
     machine10Action_->setChecked(machineChoice_ == bk::MachineChoice::Bk0010);
+    machine10fAction_->setChecked(machineChoice_ == bk::MachineChoice::Bk0010Focal);
     machine11Action_->setChecked(machineChoice_ == bk::MachineChoice::Bk0011m);
     machineAutoAction_->setText(QString("&Автоматически — по программе (сейчас %1)")
                                     .arg(QString::fromUtf8(bk::Board::machineName(board_->machine()))));
@@ -1212,11 +1267,12 @@ void MainWindow::switchMachine(bk::Machine m) {
     board_->setMachine(m);
     applySoundSettings();
     // Плата — своя настройка у каждой машины (на БК-0011М её ставят реже).
-    board_->setSmk512(QSettings().value(smkKey(), true).toBool());
+    board_->setSmk512(QSettings().value(smkKey(), smkDefault()).toBool());
     applyAz(QSettings().value(azKey(), false).toBool());
     applyScanline();
     forgetBin();                       // .BIN другой машины перезапускать нельзя
     syncMachineMenu();
+    syncKeyboardKind();
     resetMachine();
     updateTitle();
     status_->setText(QString("Машина: %1 — перезапущена").arg(QString::fromUtf8(bk::Board::machineName(board_->machine()))));
@@ -1583,6 +1639,7 @@ void MainWindow::loadState() {
         // или исчезнуть. Галку в меню синхронизируем без сигнала: иначе она тут же
         // перезапустила бы машину и стёрла только что восстановленное состояние.
         syncMachineMenu();
+        syncKeyboardKind();
         applyScanline();
         updateTitle();
         renderScreen();

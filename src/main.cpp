@@ -47,6 +47,12 @@ static int runKeyTest() {
         {Qt::Key_Left,  Qt::NoModifier, "",  "Left arrow"},
         {Qt::Key_Return,Qt::NoModifier, "\r","Enter"},
         {Qt::Key_C, Qt::ControlModifier, "\x03", "Ctrl+C"},
+        {Qt::Key_Tab,   Qt::NoModifier, "\t", "Tab -> ТАБ (0211)"},
+        {Qt::Key_F3,    Qt::NoModifier, "",  "F3 -> =|=> (0213)"},
+        {Qt::Key_F8,    Qt::NoModifier, "",  "F8 -> ШАГ (0200)"},
+        {Qt::Key_Insert,Qt::NoModifier, "",  "Insert -> ГРАФ (0205)"},
+        {Qt::Key_Home,  Qt::KeypadModifier, "", "Num7 -> вверх-влево (034)"},
+        {Qt::Key_Tab,   Qt::ControlModifier, "", "Ctrl+Tab -> УСТ ТАБ (015)"},
     };
     for (const auto& c : cases) {
         QKeyEvent e(QEvent::KeyPress, c.key, c.mods, QString::fromUtf8(c.text));
@@ -123,7 +129,8 @@ struct CliOptions {
         st.machine = machine;
         st.ay = ay; st.ay2 = ay2; st.covox = covox;
         st.scanline = scanline;
-        st.smk = smk != 0;                // по умолчанию плата стоит
+        // По умолчанию плата стоит; у БК-0010 1985 года её нет — она закрыла бы Фокал.
+        st.smk = smk < 0 ? machine != bk::Machine::Bk0010Focal : smk != 0;
         st.mstd = mstd; st.arb037 = arb037; st.cpuPhase = cpuPhase;
         st.diskRom = diskRom.toStdString();
         st.hddCtl = hddCtl;
@@ -190,6 +197,7 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
             o.machineGiven = true;
         }
         else if (a == "--bk10")  { o.machineChoice = bk::MachineChoice::Bk0010;  o.machineGiven = true; }
+        else if (a == "--bk10f") { o.machineChoice = bk::MachineChoice::Bk0010Focal; o.machineGiven = true; }
         else if (a == "--bk11m") { o.machineChoice = bk::MachineChoice::Bk0011m; o.machineGiven = true; }
         else if (a == "--ay") o.ay = 1;
         else if (a == "--no-ay") o.ay = 0;
@@ -321,7 +329,10 @@ static int resolveOptions(CliOptions& o) {
     // некуда грузить. Плата стоит по умолчанию, но в GUI могла быть снята
     // переключателем — тогда образ включает её сам на этот запуск, если ключ не задан
     // явно; --no-smk по-прежнему сильнее. Сохранённую настройку это не меняет.
-    const bool smkSaved = !gui || QSettings().value(effMachine == 1 ? "smk512_11m" : "smk512", true).toBool();
+    const bool focal = o.machine == bk::Machine::Bk0010Focal;
+    const bool smkSaved = gui ? QSettings().value(effMachine == 1 ? "smk512_11m" : focal ? "smk512_10f" : "smk512",
+                                                  !focal).toBool()
+                              : !focal;
     if (!o.disk.isEmpty() && o.smk < 0 && effMachine == 0 && !smkSaved) {
         o.smk = 1;
         std::fprintf(stderr, "Дискета: включён блок расширения памяти СМК-512 (отключить — ключом --no-smk)\n");
@@ -698,19 +709,23 @@ static void printHelp(const char* prog) {
         "остаётся в магнитофоне за этим файлом; любой другой файл — программа в формате .BIN.\n"
         "\n"
         "Машина:\n"
-        "  --machine auto|bk10|bk11m  эмулируемая машина. auto (по умолчанию; в GUI — выбор\n"
-        "                         из меню «Машина») — машину выбирает программа: .BIN, который\n"
-        "                         пишет в палитру 0177662 или зовёт БОС, — БК-0011М, иначе\n"
-        "                         БК-0010-01; без программы — БК-0011М. bk10 и bk11m — только\n"
-        "                         эта машина, программа не проверяется\n"
-        "  --bk10, --bk11m        то же, что --machine bk10 / bk11m\n"
+        "  --machine auto|bk10|bk10f|bk11m  эмулируемая машина. auto (по умолчанию; в GUI —\n"
+        "                         выбор из меню «Машина») — машину выбирает программа: .BIN,\n"
+        "                         который пишет в палитру 0177662 или зовёт БОС, — БК-0011М,\n"
+        "                         иначе БК-0010-01; без программы — БК-0011М. bk10 —\n"
+        "                         БК-0010-01 (Бейсик), bk10f (или bk0010) — БК-0010 1985 года:\n"
+        "                         Фокал и тесты МСТД в ПЗУ, плёночная клавиатура, без СМК-512;\n"
+        "                         bk11m — БК-0011М. Явная машина программу не проверяет\n"
+        "  --bk10, --bk10f, --bk11m  то же, что --machine bk10 / bk10f / bk11m\n"
         "  --ay, --no-ay          звуковой сопроцессор AY-3-8910 на порту 0177714\n"
         "                         (по умолчанию: на БК-0011М вкл, на БК-0010 выкл)\n"
         "  --2ay, --no-2ay        второй AY — плата «2AY», выбор чипа по TurboSound и\n"
         "                         «Грифону» (по умолчанию: на БК-0011М вкл, на БК-0010 выкл)\n"
         "  --covox, --no-covox    Covox — ЦАП на порту 0177714 (то же по умолчанию)\n"
-        "  --smk, --no-smk        блок расширения памяти СМК-512 (512 Кбайт; по умолчанию вкл)\n"
-        "  --mstd                 БК-0011М: вставить тестовый блок МСТД в окно 0160000\n"
+        "  --smk, --no-smk        блок расширения памяти СМК-512 (512 Кбайт; по умолчанию вкл,\n"
+        "                         у БК-0010 — выкл)\n"
+        "  --mstd                 блок МСТД: на БК-0010-01 — Фокал и тесты вместо Бейсика,\n"
+        "                         на БК-0011М — тесты в окне 0160000\n"
         "\n"
         "Контроллер AZБК (MAXIOL; VGA 1024x768, маппер 32 Мбайт, блиттер, звук, диски с SD):\n"
         "  --az, --no-az          установить контроллер (GUI — по умолчанию по настройке).\n"
