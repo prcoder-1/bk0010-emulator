@@ -153,6 +153,7 @@ void Board::beginFrameRaster(int over) {
 void Board::beginFrame() {
     // Команда 037 контроллера AZБК: перезапуск машины — на границе кадра, вне команды.
     if (azResetPending_) reset();
+    tape_.poll(totalTicks_);
     const uint64_t T = static_cast<uint64_t>(ticksPerFrame());
     uint64_t start = frameEnd_;
     if (totalTicks_ < frameEnd_ || totalTicks_ - frameEnd_ >= T) {
@@ -608,6 +609,7 @@ void Board::setMachine(Machine m) {
     busReqU_  = bk11() ? bus11Req_  : 15;
     busRespU_ = bk11() ? bus11Resp_ : 33;
     sound_.setCpuFreq(cpuFreqHz_);
+    tape_.setClock(cpuFreqHz_, totalTicks_);
     mem_.setBk11(bk11());
     az_.setMachine(bk11(), cpuFreqHz_);
     syncSmk11();
@@ -702,6 +704,8 @@ void Board::reset() {
     timerCsr_ = 0;
     timerCount_ = 0177777;
     timerLimit_ = 0177777;
+    tape_.rebase(totalTicks_);         // кассета и позиция остаются, двигатель обесточен
+    tape_.setMotor(false, 0);
     totalTicks_ = 0;
     frameEnd_ = 0;
     // Счёт тактов начинается заново — и вращение диска вместе с ним. Иначе следующий
@@ -1085,6 +1089,12 @@ bool Board::powerOn(const Setup& s, const std::string& romDir) {
 }
 
 bool Board::bootMedia(const Media& m, std::string& err) {
+    if (!m.tape.empty()) {
+        std::string why;
+        if (!insertTape(m.tape, why)) { err = "кассета не вставлена: " + why; return false; }
+        tape_.setRemote(m.tapeRemote, totalTicks_);
+        if (m.tapePlay) tape_.play(totalTicks_);
+    }
     if (!m.disk.empty() || !m.diskB.empty()) {
         ensureMonitorBooted();
         if (!m.diskB.empty() && !attachDisk(1, m.diskB, !m.diskRw, m.diskSides)) {
@@ -1411,6 +1421,7 @@ void Board::saveStateExt(std::vector<uint8_t>& out) const {
                            keyIntDeferAt_ > totalTicks_ ? keyIntDeferAt_ - totalTicks_ : 0,
                            totalTicks_ - timerStart_};
     put(t, sizeof t);
+    tape_.saveState(p, totalTicks_);      // позиция ленты, кнопки, двигатель (кассета — нет)
     auto tail = [&](const char* tag, const std::vector<uint8_t>& body) {
         const uint32_t len = static_cast<uint32_t>(body.size());
         out.insert(out.end(), tag, tag + 4);
@@ -1511,6 +1522,8 @@ void Board::loadBkx1(const std::vector<uint8_t>& in, size_t off, size_t end) {
     kbdReadyClearAt_ = t[0] ? totalTicks_ + t[0] : 0;
     keyIntDeferAt_ = totalTicks_ + t[1];
     timerStart_ = totalTicks_ - t[2];   // по модулю 2^64: timerCheck считает разность
+    uint8_t ts[Tape::STATE_SIZE];
+    if (get(ts, sizeof ts)) tape_.loadState(ts, sizeof ts, totalTicks_);
 }
 
 bool Board::saveState(const std::string& path) {
@@ -1752,8 +1765,35 @@ void Board::stepOver(int maxTicks) {
 }
 
 namespace {
-// .BIN: адрес загрузки, длина, данные. false — файла нет или он пуст.
+// Файл с кассеты «x.wav[#N]». false — не прочиталась кассета или на ней нет файла.
+bool readTapeProgram(const std::string& spec, std::shared_ptr<const TapeImage>& img, int& index) {
+    std::string path, err;
+    int n = 0;
+    if (!parseTapeSpec(spec, path, n)) return false;
+    img = loadTapeImage(path, err);
+    if (!img) { std::fprintf(stderr, "loadBin: %s\n", err.c_str()); return false; }
+    index = n ? n - 1 : img->mainProgram();
+    if (index < 0 || index >= static_cast<int>(img->files.size()) || img->files[index].data.empty()) {
+        std::fprintf(stderr, "loadBin: на кассете %s нет %s\n", path.c_str(),
+                     n ? ("файла " + std::to_string(n)).c_str() : "читаемых файлов");
+        return false;
+    }
+    return true;
+}
+
+// .BIN: адрес загрузки, длина, данные. false — файла нет или он пуст. Кассета .wav —
+// её программа (readTapeProgram).
 bool readBin(const std::string& path, uint16_t& addr, std::vector<uint8_t>& data) {
+    std::string wav;
+    int n = 0;
+    if (parseTapeSpec(path, wav, n)) {
+        std::shared_ptr<const TapeImage> img;
+        int i = 0;
+        if (!readTapeProgram(path, img, i)) return false;
+        addr = img->files[i].addr;
+        data = img->files[i].data;
+        return true;
+    }
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) { std::fprintf(stderr, "loadBin: cannot open '%s'\n", path.c_str()); return false; }
     uint8_t hdr[4];
@@ -1910,10 +1950,43 @@ bool Board::bootBosMonitor() {
     return hit;
 }
 
+bool Board::insertTape(const std::string& path, std::string& err) {
+    auto img = loadTapeImage(path, err);
+    if (!img) return false;
+    tape_.insert(img, totalTicks_);
+    return true;
+}
+
+bool Board::inTapeDriver(uint16_t pc) const {
+    if (mem_.isRam(pc)) return false;
+    // Чтение ленты: монитор 116640–117460 (EMT 36), БОС 155662–156502 (.BMB10 и др.).
+    return bk11() ? (pc >= 0155662 && pc < 0156504) : (pc >= 0116640 && pc < 0117462);
+}
+
 bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16_t* outLen) {
-    uint16_t addr = 0;
+    uint16_t addr = 0, entry = 0;
     std::vector<uint8_t> data;
-    if (!readBin(path, addr, data)) return false;
+    std::string wav;
+    int n = 0;
+    if (parseTapeSpec(path, wav, n)) {
+        std::shared_ptr<const TapeImage> img;
+        int i = 0;
+        if (!readTapeProgram(path, img, i)) return false;
+        const TapeFile& f = img->files[i];
+        addr = f.addr;
+        data = f.data;
+        if (f.kind == TapeFile::Kind::MaximTurbo) entry = f.entry;
+        if (!f.crcOk())
+            std::fprintf(stderr, "loadBin: файл %d кассеты %s %s\n", i + 1, wav.c_str(),
+                         f.complete ? "с неверной контрольной суммой" : "оборван");
+        // Кассета остаётся в магнитофоне за этим файлом. Загрузчик Maxim читает свой
+        // турбо-поток сразу — для него лента идёт.
+        tape_.insert(img, totalTicks_);
+        tape_.seek(f.end, totalTicks_);
+        if (f.maximLoader) tape_.play(totalTicks_);
+    } else if (!readBin(path, addr, data)) {
+        return false;
+    }
     const size_t got = data.size();
     // С AZБК файл кладётся в работающую систему (так его грузит ДОС с диска AZ): через
     // окна маппера, без монитора БОС.
@@ -1925,7 +1998,7 @@ bool Board::loadBin(const std::string& path, bool run, uint16_t* outAddr, uint16
     if (run) {
         cpu_.clearHalt();
         cpu_.clearWait();
-        const uint16_t start = binEntry(addr, data);
+        const uint16_t start = entry ? entry : binEntry(addr, data);
         cpu_.r[7] = start; // точка входа
         // Стек — как у пускового монитора (100260: MOV #1000,SP), откуда программу и
         // запускают. Иначе SP остаётся от того, где стоял монитор или Бейсик в момент
@@ -2036,6 +2109,8 @@ bool Board::handleEmt36() {
     // 034) и передаёт туда управление — на нерасшифрованном мусоре ЦП улетал в
     // ПЗУ драйвера НГМД и вис в ожидании флага TR.
     if (diskOn_) return false;
+    // Кассета в магнитофоне — файлы читает и пишет драйвер ПЗУ, с ленты.
+    if (tape_.loaded()) return false;
     // У БОС БК-0011М своя схема EMT (ленточный драйвер — по .BLOAD), формат
     // блока параметров монитора БК-0010 к ней не относится.
     if (bk11()) return false;
@@ -2160,10 +2235,11 @@ bool Board::regValue(uint16_t addr, uint16_t& value) const {
         // «нет нажатой клавиши», активный низкий: он следит за физическим нажатием (как
         // key_pressed эталонного bk), а не за флагом готовности — игра, опрашивающая
         // его, видит клавишу и после того, как ISR монитора забрал код. Бит 5 — вход с
-        // ленты (у нас 0). Бит 2 — «была запись в системный регистр» (внешняя схема
+        // ленты (магнитофон, Tape). Бит 2 — «была запись в системный регистр» (внешняя схема
         // ВР1, GID devemu/Board.cpp:1264-1268), гасится чтением.
         value = static_cast<uint16_t>((bk11() ? START_VECTOR11 : 0100000) | 0200
                                       | (keyHeld_ ? 0 : 0100) | (sysWriteFlag_ ? 004 : 0)
+                                      | (tape_.level(totalTicks_) ? 040 : 0)
                                       | (azOn_ ? az_.sel1() : 0));   // плата отвечает тоже (ИЛИ)
         return true;
     default:
@@ -2188,7 +2264,10 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
         if (!kbdReadyClearAt_) kbdReadyClearAt_ = totalTicks_ + KBD_READY_CLEAR_TICKS;
         break;
     case REG_PORT: portReadAt_ = totalTicks_ + 1; break;   // для Covox: порт опрашивают
-    case REG_SYS:  sysWriteFlag_ = false; break;
+    case REG_SYS:
+        sysWriteFlag_ = false;
+        if (tape_.loaded()) tape_.noteRead(totalTicks_, inTapeDriver(curInstrPc_));
+        break;
     default: break;
     }
     return true;
@@ -2354,10 +2433,12 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             } else {
                 reg716tap_ = static_cast<uint16_t>((reg716tap_ & ~010344) | (wide & 010344));
                 setSpeakerBits(reg716tap_);
+                tape_.setMotor(!(wide & 0200), totalTicks_);
             }
             return true;
         }
         setSpeakerBits(value);
+        tape_.setMotor(!(value & 0200), totalTicks_);   // разряд 7: 0 — двигатель включён
         return true;
     }
     case REG_CPU_MODE:

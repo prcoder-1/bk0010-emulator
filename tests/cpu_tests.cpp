@@ -17,6 +17,7 @@
 #include "VideoSink.h"
 #include "AzCrypto.h"
 #include "NetPort.h"
+#include "Tape.h"
 #ifdef BK_HAVE_FFMPEG
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -77,6 +78,123 @@ static void loadProg(Memory& m, uint16_t addr, std::initializer_list<uint16_t> w
     uint16_t a = addr;
     for (uint16_t w : words) { m.pokeWord(a, w); a += 2; }
 }
+
+// ---- Магнитофон: кассеты так, как их пишут конвертеры .BIN -> .WAV ----
+namespace tapesynth {
+// Файл с ленты в порядке записи: адрес, длина, имя (16), тело, КС.
+static std::vector<uint8_t> tapeRecord(uint16_t addr, const std::vector<uint8_t>& body, const char* name) {
+    std::vector<uint8_t> r = {uint8_t(addr), uint8_t(addr >> 8), uint8_t(body.size()), uint8_t(body.size() >> 8)};
+    for (int i = 0; i < 16; ++i) r.push_back(i < (int)std::strlen(name) ? uint8_t(name[i]) : uint8_t(' '));
+    r.insert(r.end(), body.begin(), body.end());
+    const uint16_t cs = tapeChecksum(body.data(), body.size());
+    r.push_back(uint8_t(cs)); r.push_back(uint8_t(cs >> 8));
+    return r;
+}
+// thesands.ru/bk0010/wav-converter (converter.html): 21428 Гц, «ускорение» — короткий синхроимпульс;
+// twice — каждый сэмпл дважды (загрузчик турбо-режима при 40000 Гц).
+static void thesands(std::vector<float>& o, const std::vector<uint8_t>& rec, bool boost, bool twice = false) {
+    const float H = (228 - 128) / 128.f, T = (216 - 128) / 128.f, L = (28 - 128) / 128.f;
+    auto put = [&](std::initializer_list<std::pair<float, int>> parts) {
+        for (auto& p : parts) for (int i = 0; i < p.second * (twice ? 2 : 1); ++i) o.push_back(p.first);
+    };
+    auto tune = [&](int n) { for (int i = 0; i < n; ++i) put({{T, 2}, {L, 2}}); };
+    auto after = [&] { put({{T, 8}, {L, 8}}); put({{H, 4}, {L, 4}}); };
+    tune(4096); after(); tune(10); after();
+    bool shortSync = boost;
+    for (size_t i = 0; i < rec.size(); ++i) {
+        if (i == 20) { tune(10); after(); }
+        else if (i == rec.size() - 2) shortSync = false;
+        for (int b = 0; b < 8; ++b) {
+            if (shortSync) put({{T, 2}, {L, 1}}); else put({{T, 2}, {L, 2}});
+            if (rec[i] >> b & 1) put({{H, 4}, {L, 4}}); else put({{H, 2}, {L, 2}});
+        }
+    }
+    if (!twice) tune(200);
+}
+// Турбо-режим того же конвертера: загрузчик Maxim штатным форматом (40000 Гц, сэмплы
+// удвоены), за ним турбо-поток. Тело дополняется до чётной длины.
+static const uint16_t kMaximLoader[99] = {
+    0000760, 0000302, 0001000, 0001000, 0001000, 0001000, 0001000, 0001000, 0001000, 0001000,
+    0012701, 0040000, 0012700, 0024102, 0010137, 0000322, 0010037, 0000324, 0012704, 0001106,
+    0012705, 0000400, 0012425, 0001376, 0005002, 0012703, 0000400, 0012704, 0177716, 0012705,
+    0000040, 0030514, 0001376, 0030514, 0001776, 0005202, 0030514, 0001375, 0077306, 0105002,
+    0000302, 0006302, 0006302, 0000137, 0000400, 0005003, 0030514, 0001776, 0005203, 0030514,
+    0001375, 0160203, 0100001, 0005403, 0020327, 0000006, 0003364, 0012703, 0000010, 0010302,
+    0030514, 0001776, 0030514, 0001410, 0030514, 0001406, 0030514, 0001404, 0030514, 0001376,
+    0000261, 0000401, 0000241, 0106011, 0077217, 0005201, 0077022, 0013705, 0000322, 0010503,
+    0013704, 0000324, 0162704, 0000002, 0005002, 0152502, 0060200, 0005500, 0077405, 0020041,
+    0001002, 0000137, 0001357, 0012701, 0100734, 0012702, 0000006, 0104020, 0000000};
+static std::vector<float> thesandsTurbo(uint16_t addr, std::vector<uint8_t> body, const char* name) {
+    if (body.size() & 1) body.push_back(0);
+    std::vector<uint8_t> ld;
+    for (uint16_t w : kMaximLoader) { ld.push_back(uint8_t(w)); ld.push_back(uint8_t(w >> 8)); }
+    auto setw = [&](size_t off, uint16_t v) { ld[off] = uint8_t(v); ld[off + 1] = uint8_t(v >> 8); };
+    setw(22, addr);
+    setw(26, uint16_t(body.size() + 2));
+    setw(2 * 92, addr);                                  // 001357 — адрес пуска
+    std::vector<float> o;
+    thesands(o, tapeRecord(0760, std::vector<uint8_t>(ld.begin() + 4, ld.end()), name), true, true);
+    const float H = (228 - 128) / 128.f, T = (216 - 128) / 128.f, L = (28 - 128) / 128.f;
+    auto put = [&](float v, int n) { for (int i = 0; i < n; ++i) o.push_back(v); };
+    for (int i = 0; i < 1024; ++i) { put(T, 3); put(L, 3); }
+    put(T, 12); put(L, 12);
+    const uint16_t cs = tapeChecksum(body.data(), body.size());
+    body.push_back(uint8_t(cs)); body.push_back(uint8_t(cs >> 8));
+    for (uint8_t v : body)
+        for (int b = 0; b < 8; ++b) { if (v >> b & 1) { put(H, 3); put(L, 2); } else { put(H, 1); put(L, 2); } }
+    for (int i = 0; i < 2; ++i) { put(T, 3); put(L, 3); }
+    return o;
+}
+// bk-wav/bkbin2wav.c: 11025 Гц, полупериод 2 сэмпла, период начинается с НИЗКОГО уровня.
+static std::vector<float> bkwavC(const std::vector<uint8_t>& rec) {
+    std::vector<float> o;
+    auto per = [&](int n) { for (int i = 0; i < 2 * n; ++i) o.push_back(-1.f); for (int i = 0; i < 2 * n; ++i) o.push_back(1.f); };
+    auto bit = [&](int b) { per(1 + (b & 1)); per(1); };
+    auto sync = [&](int n) { for (int i = 0; i < n; ++i) per(1); per(3); bit(1); };
+    auto bytes = [&](size_t from, size_t to) { for (size_t i = from; i < to; ++i) for (int b = 0; b < 8; ++b) bit(rec[i] >> b); };
+    sync(010000); sync(010); bytes(0, 20); sync(010); bytes(20, rec.size()); per(6); sync(0400);
+    return o;
+}
+// bkbin2wav.py (raydac): 11025 Гц, сэмплы-таблицы SND_PARTS.
+static std::vector<float> bkbin2wavPy(const std::vector<uint8_t>& rec) {
+    static const std::vector<std::vector<int>> P = {
+        {0x80,0xbf,0xbf,0x80,0x40,0x40,0x80,0xbf,0xbf,0x80,0x40,0x40},
+        {0x80,0xa0,0xb7,0xc0,0xb7,0xa0,0x80,0x5f,0x48,0x3f,0x48,0x5f,0x80,0xb7,0xb7,0x80,0x48,0x48},
+        {0x80,0xbf,0xbf,0x80,0x40,0x40,0x80,0xbf,0xbf,0x80,0x40,0x40,0x80,0xbf,0xbf,0x80,0x40,0x40,
+         0x80,0xbf,0xbf,0x80,0x40,0x40,0x80,0xbf,0xbf,0x80,0x40,0x40,0x80,0xbf,0xbf,0x80,0x40,0x40,
+         0x80,0xbf,0xbf,0x80,0x40,0x40,0x80,0xbf,0xbf,0x80,0x40,0x40},
+        {0x80,0x90,0x9d,0xa4,0xa6,0xa9,0xa9,0xaa,0xaa,0xaa,0xaa,0xaa,0x80,0x6f,0x62,0x5b,0x57,0x56,
+         0x55,0x55,0x55,0x55,0x55,0x6e,0x80,0x9a,0xa2,0xa6,0xa7,0xa9,0x80,0x6f,0x63,0x5c,0x59,0x59,
+         0x80,0xb7,0xb7,0x80,0x48,0x48},
+        {0x80,0x8f,0xa8,0xb5,0xbc,0xbf,0xc1,0xc1,0xc2,0xc2,0xc2,0xc2,0xc2,0xc1,0xc1,0xc1,0xc1,0xc1,
+         0xc0,0xc0,0xc0,0xc0,0xc0,0xbf,0xbf,0xbe,0xbe,0xbe,0xbd,0xbc,0xb2,0x80,0x59,0x48,0x40,0x3b,
+         0x39,0x38,0x37,0x37,0x37,0x37,0x37,0x38,0x38,0x38,0x38,0x39,0x39,0x39,0x39,0x39,0x3a,0x3a,
+         0x3a,0x3a,0x3a,0x3b,0x3b,0x3b,0x3b,0x3c,0x3e,0x7a}};
+    std::vector<float> o;
+    auto play = [&](int i, int n = 1) { while (n--) for (int v : P[i]) o.push_back((v - 128) / 128.f); };
+    auto bytes = [&](size_t from, size_t to) { for (size_t i = from; i < to; ++i) for (int b = 0; b < 8; ++b) play(rec[i] >> b & 1); };
+    play(2, 512); play(3); play(2); play(3); bytes(0, 20); play(2); play(3); bytes(20, rec.size());
+    play(4); play(2, 32); play(3);
+    return o;
+}
+// WAV-файл PCM 16 бит (каналов ch, второй канал — тот же сигнал) или 8 бит.
+static void writeWav(const std::string& path, const std::vector<float>& x, int rate, int bits, int ch) {
+    std::vector<uint8_t> d;
+    for (float v : x) for (int c = 0; c < ch; ++c) {
+        if (bits == 8) d.push_back(uint8_t(std::clamp(int(std::lround(v * 127 + 128)), 0, 255)));
+        else { const int16_t s = int16_t(std::clamp(int(std::lround(v * 32767)), -32768, 32767)); d.push_back(uint8_t(s)); d.push_back(uint8_t(s >> 8)); }
+    }
+    auto le = [](std::vector<uint8_t>& b, uint32_t v, int n) { for (int i = 0; i < n; ++i) b.push_back(uint8_t(v >> (8 * i))); };
+    std::vector<uint8_t> h = {'R','I','F','F'}; le(h, 36 + uint32_t(d.size()), 4);
+    for (char c : std::string("WAVEfmt ")) h.push_back(uint8_t(c));
+    le(h, 16, 4); le(h, 1, 2); le(h, ch, 2); le(h, rate, 4); le(h, rate * ch * bits / 8, 4); le(h, ch * bits / 8, 2); le(h, bits, 2);
+    for (char c : std::string("data")) h.push_back(uint8_t(c));
+    le(h, uint32_t(d.size()), 4);
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(h.data()), h.size());
+    f.write(reinterpret_cast<const char*>(d.data()), d.size());
+}
+} // namespace tapesynth
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) g_filters.push_back(argv[i]);
@@ -4185,6 +4303,147 @@ int main(int argc, char** argv) {
         }
     }
     fs::remove_all(azDir);
+
+    SECTION("Магнитофон: декодер кассет .WAV (thesands, bkbin2wav C/Python, Maxim) и разбор пути")
+    {
+        using namespace tapesynth;
+        std::vector<uint8_t> body;
+        for (int i = 0; i < 300; ++i) body.push_back(uint8_t(i * 37 + (i >> 3)));
+        const auto rec = tapeRecord(02000, body, "TEST");
+        auto one = [&](const std::vector<float>& x, int rate, const char* what, bool inverted) {
+            const auto img = makeTapeImage(x, rate);
+            char m[160];
+            std::snprintf(m, sizeof m, "Лента/%s: один файл, имя, адрес, тело и КС", what);
+            const bool ok = img->files.size() == 1 && img->files[0].name == "TEST" && img->files[0].addr == 02000
+                && img->files[0].data == body && img->files[0].crcOk();
+            CHECK(ok, m);
+            std::snprintf(m, sizeof m, "Лента/%s: фаза сигнала (ячейка 300)", what);
+            CHECK(ok && img->files[0].inverted == inverted, m);
+            CHECK(img->mainProgram() == 0, "Лента: программа для открытия .wav — первый файл");
+        };
+        std::vector<float> x;
+        thesands(x, rec, false); one(x, 21428, "thesands", false);
+        x.clear(); thesands(x, rec, true); one(x, 21428, "thesands с ускорением", false);
+        one(bkwavC(rec), 11025, "bkbin2wav C", true);
+        one(bkbin2wavPy(rec), 11025, "bkbin2wav.py", false);
+        // Запись с ленты: постоянная составляющая, медленный дрейф и шум.
+        x.clear(); thesands(x, rec, false);
+        uint32_t rnd = 1;
+        for (size_t i = 0; i < x.size(); ++i) {
+            rnd = rnd * 1103515245u + 12345u;
+            x[i] = 0.4f * x[i] + 0.15f + 0.1f * std::sin(i * 0.0003f) + 0.03f * ((rnd >> 16 & 0x7fff) / 32768.f - 0.5f);
+        }
+        one(x, 21428, "thesands с шумом и дрейфом", false);
+        // Инвертированная запись: драйвер определяет фазу по маркеру.
+        x.clear(); thesands(x, rec, false);
+        for (float& v : x) v = -v;
+        one(x, 21428, "thesands инверсный", true);
+        // Две записи подряд.
+        x.clear(); thesands(x, rec, false); thesands(x, tapeRecord(01000, {1, 2, 3}, "B"), false);
+        auto img2 = makeTapeImage(x, 21428);
+        CHECK(img2->files.size() == 2 && img2->files[1].name == "B" && img2->files[1].data == std::vector<uint8_t>({1, 2, 3})
+              && img2->files[0].end <= img2->files[1].start, "Лента: два файла подряд");
+        // Порча КС.
+        auto bad = rec; bad[30] ^= 1;
+        x.clear(); thesands(x, bad, false);
+        auto img3 = makeTapeImage(x, 21428);
+        CHECK(img3->files.size() == 1 && img3->files[0].complete && !img3->files[0].crcOk(), "Лента: неверная КС видна");
+        // Турбо Maxim: загрузчик штатным форматом + турбо-поток.
+        const auto tx = thesandsTurbo(02000, body, "TURBO");
+        auto ti = makeTapeImage(tx, 40000);
+        CHECK(ti->files.size() == 2 && ti->files[0].maximLoader && ti->files[0].addr == 0760,
+              "Лента/Maxim: загрузчик опознан");
+        CHECK(ti->files.size() == 2 && ti->files[1].kind == TapeFile::Kind::MaximTurbo && ti->files[1].addr == 02000
+              && ti->files[1].data == body && ti->files[1].crcOk() && ti->files[1].entry == 02000 && ti->files[1].name == "TURBO",
+              "Лента/Maxim: турбо-поток прочитан, адрес пуска из загрузчика");
+        CHECK(ti->mainProgram() == 1, "Лента/Maxim: открытие .wav грузит тело, а не загрузчик");
+        // WAV-файлы: 16 бит стерео и 8 бит моно.
+        const std::string dir = (std::filesystem::temp_directory_path() / "bk_tape_test").string();
+        std::filesystem::create_directories(dir);
+        x.clear(); thesands(x, rec, true);
+        writeWav(dir + "/s16.wav", x, 21428, 16, 2);
+        writeWav(dir + "/u8.wav", x, 21428, 8, 1);
+        for (const char* f : {"/s16.wav", "/u8.wav"}) {
+            std::string err;
+            const auto img = loadTapeImage(dir + f, err);
+            CHECK(img && img->rate == 21428 && img->files.size() == 1 && img->files[0].data == body,
+                  "Лента: WAV PCM 16 бит стерео / 8 бит моно");
+        }
+        std::string p; int n = -1;
+        CHECK(parseTapeSpec("a/Игра.WAV", p, n) && p == "a/Игра.WAV" && n == 0, "Лента: путь .WAV");
+        CHECK(parseTapeSpec("x.wav#2", p, n) && p == "x.wav" && n == 2, "Лента: x.wav#2 — второй файл");
+        CHECK(!parseTapeSpec("x.bin", p, n) && !parseTapeSpec("x.bin#2", p, n), "Лента: .bin — не кассета");
+    }
+
+    SECTION("Магнитофон: драйвер ПЗУ (EMT 36) и загрузчик Maxim читают сигнал; .wav как .BIN; снимок")
+    {
+        using namespace tapesynth;
+        const std::string dir = (std::filesystem::temp_directory_path() / "bk_tape_test").string();
+        std::filesystem::create_directories(dir);
+        std::vector<uint8_t> body;
+        for (int i = 0; i < 64; ++i) body.push_back(uint8_t(0200 + i));
+        std::vector<float> x;
+        thesands(x, tapeRecord(03000, body, "PROG"), true);
+        writeWav(dir + "/prog.wav", x, 21428, 8, 1);
+        // Программа в 020000: блок EMT 36 в 0320 (чтение «PROG» по адресу из заглавия), EMT 36, BR .
+        auto caller = [](Board& b, const char* name) {
+            Memory& m = b.memory();
+            for (int i = 0; i < 042; i += 2) m.pokeWord(uint16_t(0320 + i), 0);
+            m.pokeByte(0320, 3);
+            for (int i = 0; i < 16; ++i) m.pokeByte(uint16_t(0326 + i), i < (int)std::strlen(name) ? uint8_t(name[i]) : uint8_t(' '));
+            loadProg(m, 020000, {012706, 01000, 012701, 0320, 0104036, 000777});
+            b.cpu().r[7] = 020000;
+        };
+        {
+            Board b; b.setMachine(Machine::Bk0010); b.loadRoms(BK_DEFAULT_ROM_DIR); b.reset(); b.ensureMonitorBooted();
+            std::string err;
+            CHECK(b.insertTape(dir + "/prog.wav", err), "Лента/ПЗУ: кассета вставлена");
+            caller(b, "PROG");
+            const bool done = b.runUntil(020012, 61440 * 150) && b.cpu().pc() == 020012;
+            CHECK(done, "Лента/ПЗУ: EMT 36 вернулся (файл найден и прочитан с сигнала)");
+            bool same = true;
+            for (size_t i = 0; i < body.size(); ++i) same &= b.memory().peekByte(uint16_t(03000 + i)) == body[i];
+            CHECK(done && same && b.memory().peekByte(0321) == 0, "Лента/ПЗУ: тело на месте, ответ 0 (КС сошлась)");
+            CHECK(b.emtLog().empty(), "Лента/ПЗУ: с кассетой EMT 36 не перехватывается");
+            CHECK(!b.tape().playing() && b.tape().position(b.totalTicks()) >= b.tape().image()->files[0].end - 2000,
+                  "Лента/ПЗУ: автопуск при чтении драйвером, остановка по выключению двигателя");
+        }
+        {
+            // Загрузчик Maxim: штатный файл 0760–01302 затирает стек — возврат из EMT 36 уходит
+            // в 01000, загрузчик читает турбо-поток и прыгает на адрес пуска.
+            const uint16_t prog[] = {012737, 0123456, 03000, 000777};
+            std::vector<uint8_t> tb;
+            for (uint16_t w : prog) { tb.push_back(uint8_t(w)); tb.push_back(uint8_t(w >> 8)); }
+            for (int i = 0; i < 200; ++i) tb.push_back(uint8_t(i));
+            writeWav(dir + "/turbo.wav", thesandsTurbo(02000, tb, "MAXTEST"), 40000, 8, 1);
+            Board b; b.setMachine(Machine::Bk0010); b.loadRoms(BK_DEFAULT_ROM_DIR); b.reset(); b.ensureMonitorBooted();
+            std::string err;
+            CHECK(b.insertTape(dir + "/turbo.wav", err), "Лента/Maxim: кассета вставлена");
+            caller(b, "MAXTEST");
+            const bool done = b.runUntil(02006, 61440 * 200) && b.cpu().pc() == 02006;
+            CHECK(done && b.memory().peekWord(03000) == 0123456, "Лента/Maxim: загрузчик с ленты принял турбо-поток и запустил программу");
+        }
+        {
+            Board b; b.setMachine(Machine::Bk0010); b.loadRoms(BK_DEFAULT_ROM_DIR); b.reset(); b.ensureMonitorBooted();
+            uint16_t a = 0, l = 0;
+            CHECK(b.loadBin(dir + "/prog.wav", true, &a, &l) && a == 03000 && l == body.size() && b.cpu().pc() == 03000,
+                  "Лента: .wav грузится как .BIN");
+            CHECK(b.tape().loaded() && b.tape().position(b.totalTicks()) == b.tape().image()->files[0].end && !b.tape().playing(),
+                  "Лента: кассета остаётся за загруженным файлом");
+            CHECK(!b.loadBin(dir + "/prog.wav#2", true), "Лента: файла 2 нет");
+            CHECK(Board::machineFor(MachineChoice::Auto, dir + "/prog.wav") == Machine::Bk0010, "Лента: машину выбирает программа с кассеты");
+            // Снимок хранит позицию ленты и кнопки.
+            b.tape().seek(12345, b.totalTicks());
+            b.tape().play(b.totalTicks());
+            std::vector<uint8_t> st;
+            b.saveStateMem(st);
+            b.tape().stop(b.totalTicks());
+            b.tape().seek(0, b.totalTicks());
+            CHECK(b.loadStateMem(st) && b.tape().playing() && b.tape().position(b.totalTicks()) == 12345,
+                  "Лента: снимок — позиция и «Воспроизведение»");
+        }
+        std::filesystem::remove_all(dir);
+    }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;
