@@ -159,10 +159,10 @@ private:
     void syncKeyboardKind();
     void virtualKey(uint16_t code, bool down);   // нажатие с экранной клавиатуры
     class TapeDialog* tapeDialog_ = nullptr;
-    // Мышь «Марсианка»: движение мыши ПК над экраном → шаги шара (marsScale_ точек экрана
-    // на шаг); средняя кнопка — захват (курсор спрятан, движение относительное).
+    // Мышь «Марсианка»: движение мыши ПК над экраном → шаги шара (marsScaleX_/Y_ точек экрана
+    // на шаг по своей оси); средняя кнопка — захват (курсор спрятан, движение относительное).
     QAction* mouseAction_ = nullptr;
-    int marsScale_ = 4;
+    int marsScaleX_ = 8, marsScaleY_ = 3;
     double marsAccX_ = 0, marsAccY_ = 0;
     QPoint marsLast_;
     bool marsHaveLast_ = false, marsGrab_ = false;

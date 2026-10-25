@@ -679,8 +679,8 @@ QJsonArray McpServer::toolDefs() const {
                   "0177714 (OR-ed with the joystick). Read bits: 001 up, 002 right, 004 down, 010 left, 040 left "
                   "button, 0100 right button. The ball's direction flip-flops stay set while steps are pending; "
                   "the program clears them with a falling edge of bit 3 of a write to 0177714 (its «СБРОС», as "
-                  "CSI-DOS does: read, CLR, MOV #10), one step per axis per edge; without that edge the steps "
-                  "drain one per frame (games reading it as a joystick). `enable` plugs it in (off by default); "
+                  "CSI-DOS does: read, CLR, MOV #10), one step per axis per edge; a program that never gives "
+                  "that edge (reads it as a joystick) uses up a step one frame after a read that saw it. `enable` plugs it in (off by default); "
                   "dx/dy add ball steps (dx>0 right, dy>0 down; at most 64 pending per axis, as the GUI caps "
                   "a fast hand); left/right set the buttons (sticky until "
                   "changed or `release`); frames runs that many frames afterwards.",
