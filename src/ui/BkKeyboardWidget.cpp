@@ -3,6 +3,8 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <initializer_list>
+#include <string_view>
 
 // Геометрия — в координатах рисунка 1024x401 (как у экранных клавиатур GID); коды —
 // позиции матрицы ВП1-014 без модификаторов (буквы — в «заглавном» виде 0100–0137).
@@ -51,7 +53,7 @@ const K kMembrane[] = {
     { 450,  70,  511, 134, Reg,   0067, false, Green,  "7 '",      "", "К7" },
     { 513,  70,  574, 134, Reg,   0070, false, Green,  "8 (",      "", "К8" },
     { 576,  70,  638, 134, Reg,   0071, false, Green,  "9 )",      "", "К9" },
-    { 640,  70,  702, 134, Reg,   0060, false, Green,  "0",        "", "К10" },
+    { 640,  70,  702, 134, Reg,   0060, false, Green,  "Ø",        "", "К10" },
     { 704,  70,  766, 134, Reg,   0055, false, Green,  "- =",      "", "ИНВ Э." },
     { 768,  70,  829, 134, Reg,   0034, false, Yellow, "↖",        "", "" },
     { 831,  70,  893, 134, Reg,   0032, false, Yellow, "↑",        "", "" },
@@ -103,7 +105,7 @@ const K kMembrane[] = {
     { 513, 267,  574, 331, Reg,   0100, false, Green,  "@",        "Ю", "" },
     { 576, 267,  638, 331, Reg,   0054, false, Green,  ", <",      "", "ИНВ.С." },
     { 640, 267,  702, 331, Reg,   0057, false, Green,  "/ ?",      "", "ПОДЧ" },
-    { 704, 267,  766, 331, Reg,   0137, false, Green,  "_",        "Ъ", "ЗБ" },
+    { 704, 267,  766, 331, Reg,   0137, false, Green,  "_",        "ЗБ", "" },    // так на плёнке
     { 768, 267,  829, 331, Reg,   0026, false, Yellow, "⇤",        "", "" },
     { 831, 267,  893, 331, Reg,   0030, false, Yellow, "↔",        "", "РЕД" },
     { 896, 267,  956, 331, Reg,   0027, false, Yellow, "⇥",        "", "" },
@@ -276,6 +278,62 @@ void drawPictogram(QPainter& p, const QRectF& in, char what, double s) {
     default: break;
     }
 }
+
+// Псевдографика 0240–0277 («НР» + буквенная клавиша 0100–0137) под чертой плёночной клавиши.
+// Линии — плечи от центра: вверх, вниз, влево, вправо; 1 — одинарная, 2 — двойная. На плёнке
+// знак обведён рамкой; стрелки и ¶ — без рамки, ♠ ♣ ♦ ♥ не напечатаны (фото БК-0010).
+struct Pseudo { uint8_t u, d, l, r; const char* text; };
+const Pseudo kPseudo[32] = {
+    {0,0,0,0,"¶"}, {1,0,1,1,""}, {0,0,0,0,nullptr}, {0,1,1,0,""},    // ¶ ┴ ♥ ┐
+    {1,1,2,0,""},  {1,1,0,1,""}, {1,0,0,1,""},      {0,0,2,2,""},    // ╡ ├ └ ═
+    {0,1,2,2,""},  {0,0,0,0,nullptr}, {0,1,0,1,""}, {0,1,1,1,""},    // ╤ ♠ ┌ ┬
+    {2,0,1,1,""},  {0,0,0,0,"↓"}, {1,1,1,1,""},     {2,2,0,0,""},    // ╨ ↓ ┼ ║
+    {1,1,1,0,""},  {0,0,0,0,"←"}, {2,2,2,2,""},     {0,0,0,0,"↑"},   // ┤ ← ╬ ↑
+    {0,0,0,0,nullptr}, {0,0,1,1,""}, {2,2,1,1,""},  {1,1,0,0,""},    // ♣ ─ ╫ │
+    {0,0,0,0,nullptr}, {1,0,1,0,""}, {1,1,2,2,""},  {0,2,1,1,""},    // ♦ ┘ ╪ ╥
+    {1,0,2,2,""},  {1,1,0,2,""}, {0,0,0,0,"→"},     {0,0,0,0,"▓"},   // ╧ ╞ → ▓
+};
+
+void drawPseudo(QPainter& p, const QPointF& c, double a, int n) {
+    const Pseudo& g = kPseudo[n & 037];
+    if (!g.text) return;
+    if (*g.text && std::string_view(g.text) != "▓") {
+        QFont f = p.font();
+        f.setPixelSize(std::max(6, int(a * 1.3)));
+        p.setFont(f);
+        p.drawText(QRectF(c.x() - a, c.y() - a, 2 * a, 2 * a), Qt::AlignCenter, QString::fromUtf8(g.text));
+        return;
+    }
+    const QRectF b(c.x() - a / 2, c.y() - a / 2, a, a);
+    p.setBrush(Qt::NoBrush);
+    p.drawRect(b);
+    if (*g.text) {                                     // ▓: рамка со штриховкой
+        for (int i = 1; i < 4; ++i) p.drawLine(QPointF(b.left(), b.top() + a * i / 4), QPointF(b.right(), b.top() + a * i / 4));
+        return;
+    }
+    const double d = a * 0.17, cx = c.x(), cy = c.y();
+    const bool h2 = g.l == 2 || g.r == 2, v2 = g.u == 2 || g.d == 2;
+    // Горизонтальное плечо: до центра; двойное при двойной вертикали — до её ближней линии.
+    auto hArm = [&](int arm, double edge, double sign) {
+        if (!arm) return;
+        const double end = arm == 2 && v2 ? cx + sign * d : cx;
+        for (double off : arm == 2 ? std::initializer_list<double>{-d, d} : std::initializer_list<double>{0})
+            p.drawLine(QPointF(edge, cy + off), QPointF(end, cy + off));
+    };
+    // Одинарное плечо при двойной горизонтали без встречного плеча — до ближней линии.
+    auto vArm = [&](int arm, int opposite, double edge, double sign) {
+        if (!arm) return;
+        double end = cy;
+        if (arm == 2 && h2) end = cy + sign * d;
+        else if (arm == 1 && h2 && !opposite) end = cy + sign * d;
+        for (double off : arm == 2 ? std::initializer_list<double>{-d, d} : std::initializer_list<double>{0})
+            p.drawLine(QPointF(cx + off, edge), QPointF(cx + off, end));
+    };
+    hArm(g.l, b.left(), -1);
+    hArm(g.r, b.right(), 1);
+    vArm(g.u, g.d, b.top(), -1);
+    vArm(g.d, g.u, b.bottom(), 1);
+}
 }
 
 BkKeyboardWidget::BkKeyboardWidget(QWidget* parent) : QWidget(parent) {
@@ -380,19 +438,54 @@ void BkKeyboardWidget::paintEvent(QPaintEvent*) {
         const QColor ink(0x10, 0x10, 0x10);
         const QString lab = QString::fromUtf8(k.lab), cyr = QString::fromUtf8(k.cyr), sub = QString::fromUtf8(k.sub);
         const QRectF in = r.adjusted(4 * s, 3 * s, -4 * s, -3 * s);
+        // Знак с центром в точке (fx, fy) — доли ширины и высоты клавиши.
+        auto at = [&](double fx, double fy, const QString& t) {
+            const QPointF c(r.left() + fx * r.width(), r.top() + fy * r.height());
+            p.drawText(QRectF(c.x() - r.width() / 2, c.y() - r.height() / 2, r.width(), r.height()),
+                       Qt::AlignCenter, t);
+        };
+        // Белые клавиши кнопочной клавиатуры: оба знака на верхней грани колпачка, под ней
+        // скос — верхний знак на 1/4 высоты, нижний на 3/5 (сняты с фото БК-0010-01 и БК-0011М).
+        constexpr double kUpper = 0.25, kLower = 0.60;
+        // Плёнка: знаки и стрелки — над чертой, под ней надпись или пиктограмма «НР» + клавиша.
+        const bool split = kind_ == Kind::Membrane && k.type == Reg
+                           && (!sub.isEmpty() || (k.y1 > 4 && (k.color == Green || k.color == Yellow)
+                                                  && k.code != 040 && k.code != 0001));
+        if (split) {
+            p.setPen(QPen(ink, std::max(1.0, 1.1 * s)));
+            p.drawLine(QPointF(r.left() + 0.14 * r.width(), r.top() + 0.52 * r.height()),
+                       QPointF(r.right() - 0.14 * r.width(), r.top() + 0.52 * r.height()));
+            QFont top = big;
+            top.setPixelSize(std::max(7, int(15 * s)));
+            top.setWeight(QFont::DemiBold);
+            p.setFont(top);
+            const QStringList two = cyr.isEmpty() ? lab.split(' ') : QStringList{cyr, lab};
+            if (two.size() == 2) {
+                at(0.30, 0.30, two[0]);
+                at(0.71, 0.30, two[1]);
+            } else {
+                at(0.5, 0.30, lab);
+            }
+            if (!sub.isEmpty()) {
+                QFont f = small;
+                f.setPixelSize(std::max(6, int((sub.size() > 5 ? 9 : 11) * s)));
+                f.setWeight(QFont::DemiBold);
+                p.setFont(f);
+                at(0.5, 0.76, sub);
+            } else if (k.code >= 0100 && k.code <= 0137) {
+                p.setFont(small);
+                drawPseudo(p, QPointF(r.center().x(), r.top() + 0.76 * r.height()), 11 * s, k.code - 0100);
+            }
+            continue;
+        }
         p.setFont(big);
         if (!cyr.isEmpty()) {
-            if (kind_ == Kind::Membrane) {
-                p.setPen(ink);
-                p.drawText(in, Qt::AlignHCenter | Qt::AlignTop, cyr + "  " + lab);
-            } else {
-                p.setPen(ink);
-                p.drawText(in, Qt::AlignLeft | Qt::AlignTop, cyr);
-                QFont it = big;
-                it.setItalic(true);
-                p.setFont(it);
-                p.drawText(in, Qt::AlignHCenter | Qt::AlignBottom, lab);
-            }
+            p.setPen(ink);
+            at(0.29, kUpper, cyr);
+            QFont it = big;
+            it.setItalic(true);
+            p.setFont(it);
+            at(0.62, kLower, lab);
         } else if (lab.size() == 2 && lab[0] == QChar(1)) {
             p.setPen(QPen(ink, std::max(1.2, 1.7 * s)));
             drawPictogram(p, in, static_cast<char>(lab[1].unicode()), s);
@@ -401,8 +494,8 @@ void BkKeyboardWidget::paintEvent(QPaintEvent*) {
             p.setPen(ink);
             p.setFont(big);
             const QStringList two = lab.split('\n');
-            p.drawText(in, Qt::AlignTop | Qt::AlignHCenter, two[0]);
-            p.drawText(in, Qt::AlignBottom | Qt::AlignHCenter, two[1]);
+            at(0.5, kUpper, two[0]);
+            at(0.5, kLower, two[1]);
         } else {
             p.setPen(ink);
             // На колпачках кнопочной клавиатуры и двухстрочные надписи крупные.
