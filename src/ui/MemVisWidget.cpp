@@ -94,22 +94,22 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     // the remaining bytes are laid out contiguously and the image is scaled to
     // fill the whole window. So with the screen hidden, ROM (if shown) moves up to
     // occupy that space instead of leaving a blank gap.
-    // В режиме ДОЗУ прятать нечего: там сплошная память, и vis — просто её отрезок.
+    // В режимах ДОЗУ и 11М прятать нечего: там сплошная память, и видимые байты —
+    // просто её отрезок data[0..n) с началом from в линейном буфере.
     const int scrStart = 0040000, romStart = 0100000;
-    std::vector<int> vis;
+    std::vector<uint16_t> vis;       // только для адресов ЦП: индекс -> адрес БК
+    std::vector<uint8_t> bkBytes;
+    const uint8_t* data = nullptr;
+    int n = 0, from = 0;
     int scrBoundary = -1, romBoundary = -1; // compacted index where each region begins
     if (b11Mode) {
-        const size_t from = b11All ? 0 : static_cast<size_t>(std::clamp(page, 0, 7)) * M::PAGE11_BYTES;
-        const size_t to = b11All ? lin11Size : from + M::PAGE11_BYTES;
-        vis.reserve(to - from);
-        for (size_t o = from; o < to; ++o) vis.push_back(static_cast<int>(o));
+        from = b11All ? 0 : std::clamp(page, 0, 7) * static_cast<int>(M::PAGE11_BYTES);
+        n = b11All ? static_cast<int>(lin11Size) : static_cast<int>(M::PAGE11_BYTES);
+        data = lin11 + from;
     } else if (smkMode) {
-        const size_t from = (smkPage >= 0)
-                          ? static_cast<size_t>(smkPage) * bk::Smk512::PAGE_BYTES : 0;
-        const size_t to = (smkPage >= 0) ? from + bk::Smk512::PAGE_BYTES
-                                         : bk::Smk512::RAM_BYTES;
-        vis.reserve(to - from);
-        for (size_t o = from; o < to; ++o) vis.push_back(static_cast<int>(o));
+        from = (smkPage >= 0) ? smkPage * static_cast<int>(bk::Smk512::PAGE_BYTES) : 0;
+        n = static_cast<int>((smkPage >= 0) ? bk::Smk512::PAGE_BYTES : bk::Smk512::RAM_BYTES);
+        data = smkRam + from;
     } else {
         vis.reserve(static_cast<size_t>(0x10000 - startAddr));
         for (int a = startAddr; a < 0x10000; ++a) {
@@ -124,8 +124,12 @@ void MemCanvas::paintEvent(QPaintEvent*) {
             if (a16 == romStart) romBoundary = static_cast<int>(vis.size());
             vis.push_back(a16);
         }
+        bkBytes.resize(vis.size());
+        for (size_t i = 0; i < vis.size(); ++i) bkBytes[i] = mem.peekByte(vis[i]);
+        data = bkBytes.data();
+        n = static_cast<int>(vis.size());
     }
-    if (vis.empty()) return;
+    if (n <= 0) return;
 
     // Тепловая карта для ДОЗУ. Trace ведёт учёт по 16-разрядным адресам БК, то
     // есть «подогреть» можно только те байты платы, которые прямо сейчас выведены
@@ -179,11 +183,9 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         }
     }
 
-    int rows = (static_cast<int>(vis.size()) + bytesPerRow - 1) / bytesPerRow;
+    int rows = (n + bytesPerRow - 1) / bytesPerRow;
     if (rows < 1) rows = 1;
-    int imgH = rows;
-    QImage img(imgW, imgH, QImage::Format_RGB32);
-    img.fill(qRgb(0, 0, 0)); // trailing bytes of the last partial row stay black
+    const int imgH = rows;
 
     // Access-recency helpers (heatmap). The dim "recently touched" brightness glow
     // lingers (long FADE, sqrt curve); the coloured flash fades faster and sharper
@@ -217,15 +219,13 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         return qRgb(R, G, B);
     };
 
-    // Байт источника и «тепло» для него. У БК индекс — это и есть адрес; у ДОЗУ
-    // индекс линейный, и адрес у него есть только на подключённой странице и
-    // только там, где текущий режим открыл окно.
-    auto srcByte = [&](int i) -> uint8_t {
-        return b11Mode ? lin11[i] : smkMode ? smkRam[i] : mem.peekByte(static_cast<uint16_t>(i));
-    };
-    auto heatOf = [&](int i, double& hr, double& hw, double& he, double& act) {
-        if (!smkMode && !b11Mode) { heatAt(static_cast<uint16_t>(i), hr, hw, he, act); return; }
+    // «Тепло» байта idx. У БК адрес берётся из vis; у ДОЗУ и 11М индекс в буфере —
+    // from + idx, и адрес у него есть только на подключённой странице и только там,
+    // где текущий режим открыл окно.
+    auto heatOf = [&](int idx, double& hr, double& hw, double& he, double& act) {
+        if (!smkMode && !b11Mode) { heatAt(vis[idx], hr, hw, he, act); return; }
         hr = hw = he = act = 0.0;
+        const int i = from + idx;
         if (b11Mode) {
             if (alias11.empty()) return;
             for (int32_t a : alias11[i / HEAT_CH]) {
@@ -243,62 +243,73 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         if (a >= 0) heatAt(static_cast<uint16_t>(a), hr, hw, he, act);
     };
 
-    for (int idx = 0; idx < static_cast<int>(vis.size()); ++idx) {
-        int row = idx / bytesPerRow, bx = idx % bytesPerRow;
-        int si = vis[idx];
+    // Точки байта (1..8 бит/точку) — из таблицы lut[байт * pxPerByte + k]; cold[] — те
+    // же цвета без «тепла» (с тепловой картой нетронутая память вдвое темнее: ровно
+    // tint() с нулями). tint() считается только для байтов со следами обращений.
+    const int lutPx = word16 ? 0 : pxPerByte;
+    std::vector<QRgb> lut(static_cast<size_t>(256 * lutPx)), cold(lut.size());
+    static const QRgb kBkPal[4] = {qRgb(0,0,0), qRgb(0,0,255), qRgb(0,255,0), qRgb(255,0,0)};
+    for (int b = 0; b < 256 && lutPx > 0; ++b)
+        for (int k = 0; k < lutPx; ++k) {
+            QRgb c;
+            if (bpp == 1) {
+                const int v = (b >> k) & 1;
+                c = color ? colorMap(v ? 15 : 0) : (v ? qRgb(220,220,220) : qRgb(0,0,0));
+            } else if (bpp == 2) {
+                // Как цветной экран БК: 2 бита на точку, младшие биты слева, палитра 0
+                // (чёрный / синий / зелёный / красный). В этом режиме сразу видно
+                // спрайты и экранные буферы в том виде, в каком их рисует машина.
+                const int v = (b >> (k * 2)) & 3;
+                c = color ? kBkPal[v] : qRgb(v * 85, v * 85, v * 85);
+            } else if (bpp == 4) {
+                const int v = (b >> (k * 4)) & 15;
+                c = color ? colorMap(v) : qRgb(v * 17, v * 17, v * 17);
+            } else { // 8 bpp
+                c = color ? colorMap(b >> 4) : qRgb(b, b, b);
+            }
+            lut[b * lutPx + k] = c;
+            cold[b * lutPx + k] = heatmap ? (((c >> 1) & 0x7F7F7Fu) | 0xFF000000u) : c;
+        }
+
+    // Строка источника sy (bytesPerRow байт) -> out[0..imgW).
+    auto renderRow = [&](int sy, QRgb* out) {
+        std::fill(out, out + imgW, qRgb(0, 0, 0)); // trailing bytes of the last partial row stay black
+        const int i0 = sy * bytesPerRow, i1 = std::min(n, i0 + bytesPerRow);
         double hr, hw, he, act;
-
         if (word16) {                       // one pixel per 16-bit word
-            if (bx & 1) continue;           // odd byte handled with its even partner
-            if (bx / 2 >= imgW) continue;   // dangling byte of an odd-width row
-            heatOf(si, hr, hw, he, act);
-            uint8_t lo = srcByte(si), hi = 0;
-            if (bx + 1 < bytesPerRow && idx + 1 < static_cast<int>(vis.size())) {
-                int s2 = vis[idx + 1];
-                hi = srcByte(s2);
-                double hr2, hw2, he2, act2; // pixel heat = the hotter of the word's two bytes
-                heatOf(s2, hr2, hw2, he2, act2);
-                hr = std::max(hr, hr2); hw = std::max(hw, hw2);
-                he = std::max(he, he2); act = std::max(act, act2);
+            for (int i = i0; i < i1; i += 2) {
+                const int x = (i - i0) / 2;
+                if (x >= imgW) break;       // dangling byte of an odd-width row
+                heatOf(i, hr, hw, he, act);
+                uint8_t lo = data[i], hi = 0;
+                if (i + 1 < i1) {
+                    hi = data[i + 1];
+                    double hr2, hw2, he2, act2; // pixel heat = the hotter of the word's two bytes
+                    heatOf(i + 1, hr2, hw2, he2, act2);
+                    hr = std::max(hr, hr2); hw = std::max(hw, hw2);
+                    he = std::max(he, he2); act = std::max(act, act2);
+                }
+                uint16_t word = static_cast<uint16_t>(lo | (hi << 8));
+                QRgb base = color
+                    ? qRgb(((word >> 11) & 0x1F) << 3, ((word >> 5) & 0x3F) << 2, (word & 0x1F) << 3)
+                    : qRgb(word >> 8, word >> 8, word >> 8);   // Ч/Б: high byte as intensity
+                out[x] = tint(base, hr, hw, he, act);
             }
-            uint16_t word = static_cast<uint16_t>(lo | (hi << 8));
-            QRgb base = color
-                ? qRgb(((word >> 11) & 0x1F) << 3, ((word >> 5) & 0x3F) << 2, (word & 0x1F) << 3)
-                : qRgb(word >> 8, word >> 8, word >> 8);   // Ч/Б: high byte as intensity
-            img.setPixel(bx / 2, row, tint(base, hr, hw, he, act));
-            continue;
+            return;
         }
-
-        heatOf(si, hr, hw, he, act);
-        uint8_t byte = srcByte(si);
-        int px = bx * pxPerByte;
-        if (bpp == 1) {
-            for (int b = 0; b < 8; ++b) {
-                int v = (byte >> b) & 1;
-                QRgb base = color ? colorMap(v ? 15 : 0) : (v ? qRgb(220,220,220) : qRgb(0,0,0));
-                img.setPixel(px + b, row, tint(base, hr, hw, he, act));
+        for (int i = i0; i < i1; ++i) {
+            QRgb* o = out + (i - i0) * pxPerByte;
+            const int b = data[i] * pxPerByte;
+            if (heatmap) {
+                heatOf(i, hr, hw, he, act);
+                if (hr != 0 || hw != 0 || he != 0 || act != 0) {
+                    for (int k = 0; k < pxPerByte; ++k) o[k] = tint(lut[b + k], hr, hw, he, act);
+                    continue;
+                }
             }
-        } else if (bpp == 2) {
-            // Как цветной экран БК: 2 бита на точку, младшие биты слева, палитра 0
-            // (чёрный / синий / зелёный / красный). В этом режиме сразу видно
-            // спрайты и экранные буферы в том виде, в каком их рисует машина.
-            static const QRgb kBkPal[4] = {qRgb(0,0,0), qRgb(0,0,255), qRgb(0,255,0), qRgb(255,0,0)};
-            for (int n = 0; n < 4; ++n) {
-                const int v = (byte >> (n * 2)) & 3;
-                const QRgb base = color ? kBkPal[v] : qRgb(v * 85, v * 85, v * 85);
-                img.setPixel(px + n, row, tint(base, hr, hw, he, act));
-            }
-        } else if (bpp == 4) {
-            for (int n = 0; n < 2; ++n) {
-                int v = (byte >> (n * 4)) & 15;
-                QRgb base = color ? colorMap(v) : qRgb(v * 17, v * 17, v * 17);
-                img.setPixel(px + n, row, tint(base, hr, hw, he, act));
-            }
-        } else { // 8 bpp
-            QRgb base = color ? colorMap(byte >> 4) : qRgb(byte, byte, byte);
-            img.setPixel(px, row, tint(base, hr, hw, he, act));
+            std::memcpy(o, &cold[b], static_cast<size_t>(pxPerByte) * sizeof(QRgb));
         }
-    }
+    };
 
     // Fit the byte grid into the widget. Horizontally we scale to the width with
     // nearest-neighbour (keeps bytes crisp). Vertically we map every source row onto
@@ -310,6 +321,11 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     // source rows that map to it, so no byte is ever invisible and the last row always
     // reaches the bottom edge.
     //
+    // Сворачиваем по высоте сразу на ширине источника, строка за строкой, а по ширине
+    // растягиваем уже свёрнутое: выбор столбцов перестановочен с объединением строк.
+    // Целиком картинку не строим — у всего ДОЗУ СМК это 8192 строки, и её построение и
+    // растяжение 16 раз в секунду отнимали у эмуляции большую часть времени.
+    //
     // Строим целевое изображение в ФИЗИЧЕСКИХ пикселях (× devicePixelRatio) и помечаем
     // его этим коэффициентом. При масштабировании экрана (HiDPI, напр. Mint 150 %)
     // width()/height() — логические пиксели; если рисовать канву в логическом размере,
@@ -318,27 +334,32 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     const qreal dpr = devicePixelRatioF();
     const int Hd = std::max(1, static_cast<int>(std::lround(height() * dpr)));
     const int Wt = std::max(1, static_cast<int>(std::lround(width()  * dpr)));
-    QImage hs = (imgW == Wt) ? img
-              : img.scaled(Wt, imgH, Qt::IgnoreAspectRatio, Qt::FastTransformation);
-    const int Wd = hs.width();
-    QImage dst(Wd, Hd, QImage::Format_RGB32);
+    QImage fold(imgW, Hd, QImage::Format_RGB32);
+    std::vector<QRgb> tmp(static_cast<size_t>(imgW));
+    const size_t rowBytes = static_cast<size_t>(imgW) * sizeof(QRgb);
+    int prevS0 = -1;
     for (int dy = 0; dy < Hd; ++dy) {
         int s0 = static_cast<int>(static_cast<int64_t>(dy) * imgH / Hd);
         int s1 = static_cast<int>(static_cast<int64_t>(dy + 1) * imgH / Hd);
         if (s1 <= s0) s1 = s0 + 1;
         if (s1 > imgH) s1 = imgH;
-        auto* out = reinterpret_cast<QRgb*>(dst.scanLine(dy));
-        std::memcpy(out, hs.constScanLine(s0), static_cast<size_t>(Wd) * 4);
+        auto* out = reinterpret_cast<QRgb*>(fold.scanLine(dy));
+        if (s0 == prevS0) {                      // upscale: the same source row again
+            std::memcpy(out, fold.constScanLine(dy - 1), rowBytes);
+            continue;
+        }
+        prevS0 = s0;
+        renderRow(s0, out);
+        auto* o8 = reinterpret_cast<uint8_t*>(out);
+        const auto* t8 = reinterpret_cast<const uint8_t*>(tmp.data());
         for (int sy = s0 + 1; sy < s1; ++sy) {   // fold extra rows in (downscale only)
-            const auto* src = reinterpret_cast<const QRgb*>(hs.constScanLine(sy));
-            for (int x = 0; x < Wd; ++x) {
-                QRgb a = out[x], b = src[x];
-                out[x] = qRgb(std::max(qRed(a),   qRed(b)),
-                              std::max(qGreen(a), qGreen(b)),
-                              std::max(qBlue(a),  qBlue(b)));
-            }
+            renderRow(sy, tmp.data());
+            for (size_t k = 0; k < rowBytes; ++k) o8[k] = std::max(o8[k], t8[k]); // альфа 0xFF у всех
         }
     }
+    const QImage dst = (imgW == Wt) ? fold
+                     : fold.scaled(Wt, Hd, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    const int Wd = dst.width();
     // Явно растягиваем всё изображение на весь ЛОГИЧЕСКИЙ прямоугольник канвы
     // (target-версия drawImage), а не полагаемся на «естественный» размер картинки и
     // её devicePixelRatio. Так канва гарантированно заполняется целиком при любом
