@@ -14,6 +14,10 @@
 #include <QSpinBox>
 #include <QLabel>
 #include <QFontMetrics>
+#include <QMouseEvent>
+#include <QKeyEvent>
+#include <QPixmap>
+#include <QGuiApplication>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -31,6 +35,50 @@ static QRgb colorMap(int v /*0..15*/) {
     return c[v & 15];
 }
 
+// Точка (столбец или строка) d окна из dstN показывает элементы источника [s0, s1)
+// из srcN: при уменьшении — несколько (их объединяет самый яркий), при увеличении —
+// один. Общая для отрисовки и рисования мышью, чтобы мышь попадала ровно в видимое.
+static void srcSpan(int d, int srcN, int dstN, int& s0, int& s1) {
+    s0 = static_cast<int>(static_cast<int64_t>(d) * srcN / dstN);
+    s1 = static_cast<int>(static_cast<int64_t>(d + 1) * srcN / dstN);
+    if (s1 <= s0) s1 = s0 + 1;
+    if (s1 > srcN) s1 = srcN;
+}
+
+static inline QRgb maxRgb(QRgb a, QRgb b) {
+    return qRgb(std::max(qRed(a), qRed(b)), std::max(qGreen(a), qGreen(b)),
+                std::max(qBlue(a), qBlue(b)));
+}
+
+QRgb MemCanvas::pixelColor(int bpp, bool color, unsigned v) {
+    // 2 бита — как цветной экран БК: младшие биты слева, палитра 0 (чёрный / синий /
+    // зелёный / красный). В этом режиме сразу видно спрайты и экранные буферы в том
+    // виде, в каком их рисует машина.
+    static const QRgb kBkPal[4] = {qRgb(0,0,0), qRgb(0,0,255), qRgb(0,255,0), qRgb(255,0,0)};
+    switch (bpp) {
+    case 1:
+        v &= 1;
+        return color ? colorMap(v ? 15 : 0) : (v ? qRgb(220,220,220) : qRgb(0,0,0));
+    case 2: {
+        const int c = static_cast<int>(v & 3);
+        return color ? kBkPal[c] : qRgb(c * 85, c * 85, c * 85);
+    }
+    case 4: {
+        const int c = static_cast<int>(v & 15);
+        return color ? colorMap(c) : qRgb(c * 17, c * 17, c * 17);
+    }
+    case 16: {                                       // RGB565
+        const unsigned w = v & 0xFFFF;
+        return color ? qRgb(((w >> 11) & 0x1F) << 3, ((w >> 5) & 0x3F) << 2, (w & 0x1F) << 3)
+                     : qRgb(w >> 8, w >> 8, w >> 8); // Ч/Б: high byte as intensity
+    }
+    default: {                                       // 8 bpp
+        const int c = static_cast<int>(v & 0xFF);
+        return color ? colorMap(c >> 4) : qRgb(c, c, c);
+    }
+    }
+}
+
 MemCanvas::MemCanvas(Board* board, QWidget* parent)
     : QWidget(parent), board_(board) {
     // Небольшой минимум по высоте: раньше было 400, и в невысоком окне канва не могла
@@ -43,6 +91,7 @@ MemCanvas::MemCanvas(Board* board, QWidget* parent)
 void MemCanvas::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.fillRect(rect(), Qt::black);
+    lay_.kind = Layout::None;
 
     const bk::Memory& mem = board_->memory();
     bk::Trace& tr = board_->trace();
@@ -247,26 +296,11 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     // же цвета без «тепла» (с тепловой картой нетронутая память вдвое темнее: ровно
     // tint() с нулями). tint() считается только для байтов со следами обращений.
     const int lutPx = word16 ? 0 : pxPerByte;
+    const int bitsPx = word16 ? 16 : 8 / pxPerByte;
     std::vector<QRgb> lut(static_cast<size_t>(256 * lutPx)), cold(lut.size());
-    static const QRgb kBkPal[4] = {qRgb(0,0,0), qRgb(0,0,255), qRgb(0,255,0), qRgb(255,0,0)};
     for (int b = 0; b < 256 && lutPx > 0; ++b)
         for (int k = 0; k < lutPx; ++k) {
-            QRgb c;
-            if (bpp == 1) {
-                const int v = (b >> k) & 1;
-                c = color ? colorMap(v ? 15 : 0) : (v ? qRgb(220,220,220) : qRgb(0,0,0));
-            } else if (bpp == 2) {
-                // Как цветной экран БК: 2 бита на точку, младшие биты слева, палитра 0
-                // (чёрный / синий / зелёный / красный). В этом режиме сразу видно
-                // спрайты и экранные буферы в том виде, в каком их рисует машина.
-                const int v = (b >> (k * 2)) & 3;
-                c = color ? kBkPal[v] : qRgb(v * 85, v * 85, v * 85);
-            } else if (bpp == 4) {
-                const int v = (b >> (k * 4)) & 15;
-                c = color ? colorMap(v) : qRgb(v * 17, v * 17, v * 17);
-            } else { // 8 bpp
-                c = color ? colorMap(b >> 4) : qRgb(b, b, b);
-            }
+            const QRgb c = pixelColor(bpp, color, static_cast<unsigned>(b >> (k * bitsPx)));
             lut[b * lutPx + k] = c;
             cold[b * lutPx + k] = heatmap ? (((c >> 1) & 0x7F7F7Fu) | 0xFF000000u) : c;
         }
@@ -289,11 +323,7 @@ void MemCanvas::paintEvent(QPaintEvent*) {
                     hr = std::max(hr, hr2); hw = std::max(hw, hw2);
                     he = std::max(he, he2); act = std::max(act, act2);
                 }
-                uint16_t word = static_cast<uint16_t>(lo | (hi << 8));
-                QRgb base = color
-                    ? qRgb(((word >> 11) & 0x1F) << 3, ((word >> 5) & 0x3F) << 2, (word & 0x1F) << 3)
-                    : qRgb(word >> 8, word >> 8, word >> 8);   // Ч/Б: high byte as intensity
-                out[x] = tint(base, hr, hw, he, act);
+                out[x] = tint(pixelColor(16, color, lo | (hi << 8)), hr, hw, he, act);
             }
             return;
         }
@@ -311,20 +341,18 @@ void MemCanvas::paintEvent(QPaintEvent*) {
         }
     };
 
-    // Fit the byte grid into the widget. Horizontally we scale to the width with
-    // nearest-neighbour (keeps bytes crisp). Vertically we map every source row onto
-    // the window height ourselves instead of QImage::scaled: a plain nearest-neighbour
-    // downscale silently DROPS rows when there are more memory rows than pixels — and
-    // it never samples the very last row, so the highest-address memory (end of the
-    // shown range: last screen line, or end of ROM/I-O when ПЗУ is on) falls off the
-    // bottom of the window. Here each destination row OR-combines (brightest-wins) all
-    // source rows that map to it, so no byte is ever invisible and the last row always
-    // reaches the bottom edge.
+    // Fit the byte grid into the widget. Every destination pixel OR-combines
+    // (brightest-wins) all source pixels that map to it (srcSpan) — vertically and,
+    // for wide rows, horizontally — instead of QImage::scaled: a plain
+    // nearest-neighbour downscale silently DROPS rows when there are more memory rows
+    // than pixels — and it never samples the very last row, so the highest-address
+    // memory (end of the shown range: last screen line, or end of ROM/I-O when ПЗУ is
+    // on) falls off the bottom of the window. Here no byte is ever invisible and the
+    // last row always reaches the bottom edge; upscaling is plain nearest-neighbour.
     //
     // Сворачиваем по высоте сразу на ширине источника, строка за строкой, а по ширине
-    // растягиваем уже свёрнутое: выбор столбцов перестановочен с объединением строк.
-    // Целиком картинку не строим — у всего ДОЗУ СМК это 8192 строки, и её построение и
-    // растяжение 16 раз в секунду отнимали у эмуляции большую часть времени.
+    // — уже свёрнутое. Целиком картинку не строим — у всего ДОЗУ СМК это 8192 строки,
+    // и её построение 16 раз в секунду отнимало у эмуляции большую часть времени.
     //
     // Строим целевое изображение в ФИЗИЧЕСКИХ пикселях (× devicePixelRatio) и помечаем
     // его этим коэффициентом. При масштабировании экрана (HiDPI, напр. Mint 150 %)
@@ -333,38 +361,55 @@ void MemCanvas::paintEvent(QPaintEvent*) {
     // физически «пиксель-в-пиксель», и низ видеопамяти виден при любом масштабе.
     const qreal dpr = devicePixelRatioF();
     const int Hd = std::max(1, static_cast<int>(std::lround(height() * dpr)));
-    const int Wt = std::max(1, static_cast<int>(std::lround(width()  * dpr)));
-    QImage fold(imgW, Hd, QImage::Format_RGB32);
-    std::vector<QRgb> tmp(static_cast<size_t>(imgW));
-    const size_t rowBytes = static_cast<size_t>(imgW) * sizeof(QRgb);
+    const int Wd = std::max(1, static_cast<int>(std::lround(width()  * dpr)));
+    QImage dst(Wd, Hd, QImage::Format_RGB32);
+    std::vector<QRgb> vrow(static_cast<size_t>(imgW)), tmp(vrow.size());
+    std::vector<int> cx0(static_cast<size_t>(Wd)), cx1(cx0.size());
+    for (int x = 0; x < Wd; ++x) srcSpan(x, imgW, Wd, cx0[x], cx1[x]);
+    const size_t srcBytes = static_cast<size_t>(imgW) * sizeof(QRgb);
+    const size_t dstBytes = static_cast<size_t>(Wd) * sizeof(QRgb);
     int prevS0 = -1;
     for (int dy = 0; dy < Hd; ++dy) {
-        int s0 = static_cast<int>(static_cast<int64_t>(dy) * imgH / Hd);
-        int s1 = static_cast<int>(static_cast<int64_t>(dy + 1) * imgH / Hd);
-        if (s1 <= s0) s1 = s0 + 1;
-        if (s1 > imgH) s1 = imgH;
-        auto* out = reinterpret_cast<QRgb*>(fold.scanLine(dy));
+        int s0, s1;
+        srcSpan(dy, imgH, Hd, s0, s1);
+        auto* out = reinterpret_cast<QRgb*>(dst.scanLine(dy));
         if (s0 == prevS0) {                      // upscale: the same source row again
-            std::memcpy(out, fold.constScanLine(dy - 1), rowBytes);
+            std::memcpy(out, dst.constScanLine(dy - 1), dstBytes);
             continue;
         }
         prevS0 = s0;
-        renderRow(s0, out);
-        auto* o8 = reinterpret_cast<uint8_t*>(out);
+        QRgb* v = (imgW == Wd) ? out : vrow.data();
+        renderRow(s0, v);
+        auto* v8 = reinterpret_cast<uint8_t*>(v);
         const auto* t8 = reinterpret_cast<const uint8_t*>(tmp.data());
         for (int sy = s0 + 1; sy < s1; ++sy) {   // fold extra rows in (downscale only)
             renderRow(sy, tmp.data());
-            for (size_t k = 0; k < rowBytes; ++k) o8[k] = std::max(o8[k], t8[k]); // альфа 0xFF у всех
+            for (size_t k = 0; k < srcBytes; ++k) v8[k] = std::max(v8[k], t8[k]); // альфа 0xFF у всех
+        }
+        if (v == out) continue;
+        for (int x = 0; x < Wd; ++x) {
+            QRgb c = v[cx0[x]];
+            for (int sx = cx0[x] + 1; sx < cx1[x]; ++sx) c = maxRgb(c, v[sx]);
+            out[x] = c;
         }
     }
-    const QImage dst = (imgW == Wt) ? fold
-                     : fold.scaled(Wt, Hd, Qt::IgnoreAspectRatio, Qt::FastTransformation);
-    const int Wd = dst.width();
     // Явно растягиваем всё изображение на весь ЛОГИЧЕСКИЙ прямоугольник канвы
     // (target-версия drawImage), а не полагаемся на «естественный» размер картинки и
     // её devicePixelRatio. Так канва гарантированно заполняется целиком при любом
     // способе/дробности масштабирования дисплея — низ видеопамяти не обрезается.
     p.drawImage(QRectF(0, 0, width(), height()), dst, QRectF(0, 0, Wd, Hd));
+
+    lay_.kind = b11Mode ? Layout::Bk11 : smkMode ? Layout::Smk : Layout::Bk;
+    lay_.from = from;
+    lay_.n = n;
+    lay_.bytesPerRow = bytesPerRow;
+    lay_.pxPerByte = pxPerByte;
+    lay_.word16 = word16;
+    lay_.imgW = imgW;
+    lay_.imgH = imgH;
+    lay_.Wt = Wd;
+    lay_.Hd = Hd;
+    lay_.vis = std::move(vis);
 
     // Mark the region boundaries at their compacted positions: video RAM start
     // (blue) and ROM start (orange). Skipped regions have no boundary to draw.
@@ -447,6 +492,155 @@ void MemCanvas::drawMarks11(QPainter& p, const int* romLin, int imgH) {
     }
 }
 
+// ---- Рисование мышью ----
+
+void MemCanvas::syncCursor(Qt::KeyboardModifiers mods) {
+    if (!paintEnabled) { unsetCursor(); return; }
+    setCursor((mods & Qt::ControlModifier) ? Qt::CrossCursor : Qt::ArrowCursor);
+}
+
+// Точка картинки (в физических точках, как её строил paintEvent) под указателем.
+QPoint MemCanvas::toImage(QPointF pos) const {
+    const int x = static_cast<int>(std::floor(pos.x() * lay_.Wt / std::max(1, width())));
+    const int y = static_cast<int>(std::floor(pos.y() * lay_.Hd / std::max(1, height())));
+    return {std::clamp(x, 0, lay_.Wt - 1), std::clamp(y, 0, lay_.Hd - 1)};
+}
+
+// В адресах ЦП пишем только туда, где показано ОЗУ: ОЗУ БК или ДОЗУ СМК, открытое
+// на чтение и запись. ПЗУ (своё, контроллеров, «только чтение» СМК) и регистры — нет:
+// poke правит ПЗУ в обход защиты.
+bool MemCanvas::bkWritable(uint16_t a) const {
+    if (a >= bk::ADDR_IO_PAGE) return false;
+    const bk::Memory& mem = board_->memory();
+    if (a >= bk::ADDR_RAM_END) {
+        bk::Smk512::Slot s;
+        if (board_->smk512() && board_->smk().decode(a, s))
+            return s.cell == bk::Smk512::Cell::Rw;
+        uint16_t v;
+        if (mem.mpi() && mem.mpi()->mpiPeek(a, v)) return false;
+    }
+    return mem.isRam(a);
+}
+
+int MemCanvas::readSrc(int idx) const {
+    if (idx < 0 || idx >= lay_.n) return -1;
+    const bk::Memory& mem = board_->memory();
+    switch (lay_.kind) {
+    case Layout::Bk:
+        return mem.peekByte(lay_.vis[idx]);
+    case Layout::Smk: {
+        const auto& ram = board_->smk().ram();
+        const size_t o = static_cast<size_t>(lay_.from + idx);
+        return board_->smk512() && o < ram.size() ? ram[o] : -1;
+    }
+    case Layout::Bk11: {
+        const size_t o = static_cast<size_t>(lay_.from + idx);
+        return mem.bk11() && o < bk::Memory::RAM11_BYTES ? mem.ram11()[o] : -1;  // дальше — ПЗУ
+    }
+    default:
+        return -1;
+    }
+}
+
+void MemCanvas::writeSrc(int idx, uint8_t v) {
+    const int old = readSrc(idx);
+    if (old < 0 || (lay_.kind == Layout::Bk && !bkWritable(lay_.vis[idx]))) {
+        strokeRefused_ = true;
+        return;
+    }
+    if (old == v) return;
+    bk::Memory& mem = board_->memory();
+    switch (lay_.kind) {
+    case Layout::Bk:   mem.pokeByte(lay_.vis[idx], v); break;
+    case Layout::Smk:  board_->smk().ram()[static_cast<size_t>(lay_.from + idx)] = v; break;
+    case Layout::Bk11: mem.ram11()[lay_.from + idx] = v; break;
+    default: return;
+    }
+    strokeBytes_.insert(idx);
+}
+
+// Точка окна (x, y) показывает прямоугольник точек источника (srcSpan по обеим осям):
+// при уменьшении — несколько строк и столбцов, и красятся все, чтобы точка окна
+// стала того цвета, каким рисуют.
+void MemCanvas::paintCell(int x, int y) {
+    int sy0, sy1, sx0, sx1;
+    srcSpan(y, lay_.imgH, lay_.Hd, sy0, sy1);
+    srcSpan(x, lay_.imgW, lay_.Wt, sx0, sx1);
+    const int bpr = lay_.bytesPerRow;
+    for (int sy = sy0; sy < sy1; ++sy)
+        for (int sx = sx0; sx < sx1; ++sx) {
+            if (lay_.word16) {                 // точка = слово, младший байт первым
+                const int bx = sx * 2, idx = sy * bpr + bx;
+                if (idx >= lay_.n) continue;
+                writeSrc(idx, static_cast<uint8_t>(strokeValue_ & 0xff));
+                if (bx + 1 < bpr && idx + 1 < lay_.n)
+                    writeSrc(idx + 1, static_cast<uint8_t>((strokeValue_ >> 8) & 0xff));
+                continue;
+            }
+            const int ppb = lay_.pxPerByte, bits = 8 / ppb;
+            const int idx = sy * bpr + sx / ppb;
+            const int old = readSrc(idx);
+            if (old < 0) { strokeRefused_ = true; continue; }
+            const int shift = (sx % ppb) * bits;
+            const unsigned mask = ((1u << bits) - 1) << shift;
+            writeSrc(idx, static_cast<uint8_t>((static_cast<unsigned>(old) & ~mask)
+                                               | ((strokeValue_ << shift) & mask)));
+        }
+}
+
+// Отрезок между двумя точками картинки (Брезенхем): быстрое движение мыши
+// не оставляет пропусков.
+void MemCanvas::paintLine(QPoint a, QPoint b) {
+    const int dx = std::abs(b.x() - a.x()), dy = -std::abs(b.y() - a.y());
+    const int sx = a.x() < b.x() ? 1 : -1, sy = a.y() < b.y() ? 1 : -1;
+    int err = dx + dy, x = a.x(), y = a.y();
+    for (;;) {
+        paintCell(x, y);
+        if (x == b.x() && y == b.y()) break;
+        const int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x += sx; }
+        if (e2 <= dx) { err += dx; y += sy; }
+    }
+}
+
+void MemCanvas::mousePressEvent(QMouseEvent* e) {
+    const bool btn = e->button() == Qt::LeftButton || e->button() == Qt::RightButton;
+    if (!paintEnabled || !(e->modifiers() & Qt::ControlModifier) || !btn
+        || lay_.kind == Layout::None || stroke_) {
+        QWidget::mousePressEvent(e);
+        return;
+    }
+    stroke_ = true;
+    strokeValue_ = e->button() == Qt::LeftButton ? paintValue : 0;
+    strokeBytes_.clear();
+    strokeRefused_ = false;
+    lastPx_ = toImage(e->position());
+    paintLine(lastPx_, lastPx_);
+    update();
+}
+
+void MemCanvas::mouseMoveEvent(QMouseEvent* e) {
+    syncCursor(e->modifiers());
+    if (!stroke_) { QWidget::mouseMoveEvent(e); return; }
+    // Отпустили Ctrl — мазок кончился, даже если кнопка ещё нажата.
+    if (!(e->modifiers() & Qt::ControlModifier) || lay_.kind == Layout::None) {
+        stroke_ = false;
+        emit strokeDone(static_cast<int>(strokeBytes_.size()), strokeRefused_);
+        return;
+    }
+    const QPoint p = toImage(e->position());
+    if (p == lastPx_) return;
+    paintLine(lastPx_, p);
+    lastPx_ = p;
+    update();
+}
+
+void MemCanvas::mouseReleaseEvent(QMouseEvent* e) {
+    if (!stroke_) { QWidget::mouseReleaseEvent(e); return; }
+    stroke_ = false;
+    emit strokeDone(static_cast<int>(strokeBytes_.size()), strokeRefused_);
+}
+
 MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent), board_(board) {
     canvas_ = new MemCanvas(board, this);
 
@@ -460,6 +654,17 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent), boa
     auto* addr = new QSpinBox; addr->setRange(0, 0xFFFF); addr->setDisplayIntegerBase(8);
     addr->setPrefix("адрес 0"); addr->setSingleStep(0100); addr->setValue(0);
     auto* row = new QSpinBox; row->setRange(8, 512); row->setValue(64); row->setPrefix("шир ");
+
+    // Рисование мышью: по умолчанию выключено, и даже включённое пишет только с Ctrl.
+    auto* paint = new QCheckBox("Рисовать мышью");
+    paint->setToolTip("Ctrl + левая кнопка — рисовать выбранным значением точки,\n"
+                      "Ctrl + правая — нулём. ПЗУ и регистры не меняются.");
+    auto* value = new QSpinBox; value->setDisplayIntegerBase(8); value->setPrefix("значение 0");
+    value->setRange(0, 3); value->setValue(3);
+    auto* swatch = new QLabel;
+    swatch->setFixedSize(18, 18);
+    swatch->setFrameShape(QFrame::Box);
+    paintHint_ = new QLabel("Ctrl + левая кнопка — значением, Ctrl + правая — нулём");
 
     // Источник картинки: адреса процессора, ОЗУ БК-0011М или ДОЗУ платы СМК-512.
     // Список собирает syncSources() — под текущую машину и плату.
@@ -484,6 +689,21 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent), boa
         showRom->setEnabled(bkSrc || canvas_->src == MemCanvas::Src::Bk11All);
         showScreen->setEnabled(bkSrc);
         addr->setEnabled(bkSrc);
+        // Значение точки — столько бит, сколько в точке при текущем режиме.
+        {
+            const QSignalBlocker b(value);
+            value->setMaximum(canvas_->bpp >= 16 ? 0177777 : (1 << canvas_->bpp) - 1);
+        }
+        canvas_->paintEnabled = paint->isChecked();
+        canvas_->setMouseTracking(canvas_->paintEnabled);   // курсор — по Ctrl при наведении
+        canvas_->paintValue = static_cast<unsigned>(value->value());
+        canvas_->syncCursor(QGuiApplication::queryKeyboardModifiers());
+        value->setEnabled(canvas_->paintEnabled);
+        swatch->setEnabled(canvas_->paintEnabled);
+        paintHint_->setEnabled(canvas_->paintEnabled);
+        QPixmap sw(16, 16);
+        sw.fill(QColor::fromRgb(MemCanvas::pixelColor(canvas_->bpp, canvas_->color, canvas_->paintValue)));
+        swatch->setPixmap(sw);
         canvas_->update();
     };
     connect(bpp,  QOverload<int>::of(&QComboBox::currentIndexChanged), this, [=](int){ apply(); });
@@ -494,6 +714,13 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent), boa
     connect(addr, QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
     connect(row,  QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
     connect(src,  QOverload<int>::of(&QComboBox::currentIndexChanged), this, [=](int){ apply(); });
+    connect(paint, &QCheckBox::toggled, this, [=](bool){ apply(); });
+    connect(value, QOverload<int>::of(&QSpinBox::valueChanged), this, [=](int){ apply(); });
+    connect(canvas_, &MemCanvas::strokeDone, this, [this](int changed, bool refused) {
+        QString t = QString("изменено байт: %1").arg(changed);
+        if (refused) t += " (ПЗУ и регистры не тронуты)";
+        paintHint_->setText(t);
+    });
 
     auto* controls = new QHBoxLayout;
     controls->addWidget(src);
@@ -502,12 +729,18 @@ MemVisWidget::MemVisWidget(Board* board, QWidget* parent) : QWidget(parent), boa
     controls->addWidget(showScreen);
     controls->addWidget(addr); controls->addWidget(row);
     controls->addStretch();
+    auto* paintRow = new QHBoxLayout;
+    paintRow->addWidget(paint); paintRow->addWidget(value); paintRow->addWidget(swatch);
+    paintRow->addWidget(paintHint_);
+    paintRow->addStretch();
+    paintRow->setContentsMargins(0, 0, 0, 0);
 
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(2, 2, 2, 2);   // почти без отступа до рамки окна
     lay->setSpacing(2);
     controls->setContentsMargins(0, 0, 0, 0);
     lay->addLayout(controls);
+    lay->addLayout(paintRow);
     lay->addWidget(canvas_, 1);
     apply_ = apply;
     syncSources();
@@ -552,6 +785,17 @@ void MemVisWidget::syncSources() {
 // every 50 Hz tick is costly and steals time from the emulation on this same GUI
 // thread; the access-age fade is slow enough that 16 Hz looks identical.
 // Interactive control changes call canvas_->update() directly and are unaffected.
+// Ctrl нажат/отпущен без движения мыши — курсор над канвой меняется сразу.
+void MemVisWidget::keyPressEvent(QKeyEvent* e) {
+    if (e->key() == Qt::Key_Control) canvas_->syncCursor(Qt::ControlModifier);
+    QWidget::keyPressEvent(e);
+}
+
+void MemVisWidget::keyReleaseEvent(QKeyEvent* e) {
+    if (e->key() == Qt::Key_Control) canvas_->syncCursor(Qt::NoModifier);
+    QWidget::keyReleaseEvent(e);
+}
+
 void MemVisWidget::refresh() {
     syncSources();   // машину и плату могут сменить при открытом окне
     if (++refreshTick_ >= 3) { refreshTick_ = 0; canvas_->update(); }
