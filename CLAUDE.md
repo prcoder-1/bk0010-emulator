@@ -51,7 +51,7 @@ QT_QPA_PLATFORM=offscreen ./build/bk0010-emulator --frames 200 --shot out.png ga
 ```
 
 `--help` / `-h` prints every option (keep `printHelp` in `src/main.cpp` in sync when adding one).
-Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE overlay), `--memvis`,
+Flags: `--frames N`, `--shot`, `--dbgshot` (Soft-ICE debugger window), `--memvis`,
 `--hotpath`, `--callgraph`, `--flame`, `--flamechart`, `--hotchart`, `--mono`,
 `--no-arb037` (disable the КР1801ВП1-037 DRAM-window model, on by default),
 `--cpu-phase 0|1` (CPU clock phase vs the 037 window, see below),
@@ -92,7 +92,10 @@ Two layers, deliberately decoupled:
   (single-threaded — emulation runs in the GUI thread; one frame = 61440 ticks is
   fast enough), and hosts `GlScreen` + the debugger widgets. The GUI paces itself by
   REAL time (`QElapsedTimer`), not by timer ticks: a frame is 20.48 ms, which is not
-  an integral number of milliseconds.
+  an integral number of milliseconds. The Soft-ICE debugger (`DebuggerWindow`) is a SEPARATE
+  top-level window, shown by `setPaused(true)` and hidden on «continue»; its keys reach
+  `MainWindow::keyPressEvent` through an event filter, and every menu action with a shortcut is
+  also added to it so F12/Shift+F8/F11/Ctrl+… work there.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
   as ~47 JSON-RPC tools (JSON-RPC 2.0, newline-delimited over stdio, QtCore JSON) —
   run/step/step-over/step-out, `bk_machine` (show / switch БК-0010-01 ↔ БК-0011М), regs/mem, break (optionally conditional) / watch
@@ -353,7 +356,7 @@ Key cross-cutting facts to know before editing the CPU or screen:
   NOT by the `RESET` instruction — that is bus INIT on pin Б19, a separate signal in
   the replica's CPLD. Mode/page show up in the
   Soft-ICE «СИСТ. РЕГИСТРЫ» panel (only when the board is in, so the no-board
-  overlay layout is unchanged) and in `bk_io_state`; the DRAM itself has its own
+  debugger layout is unchanged) and in `bk_io_state`; the DRAM itself has its own
   window (`src/ui/SmkRamWidget.cpp`, Ctrl+D — per-page hex dump that also resolves
   each row to the BK address it is visible at right now, and edits words straight
   into `smk().ram()`, since unmapped pages have no BK address to poke) and is selectable as a

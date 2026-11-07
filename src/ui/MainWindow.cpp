@@ -1,8 +1,9 @@
 #include "MainWindow.h"
 #include <algorithm>
+#include <functional>
 #include "QtFormat.h"
 #include "GlScreen.h"
-#include "DebuggerOverlay.h"
+#include "DebuggerWindow.h"
 #include "MemVisWidget.h"
 #include "SmkRamWidget.h"
 #include "AzRamWidget.h"
@@ -23,6 +24,7 @@
 #include <QStandardPaths>
 #include <vector>
 #include <QMenuBar>
+#include <QScreen>
 #include <QMenu>
 #include <QActionGroup>
 #include <QAction>
@@ -108,9 +110,10 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     screen_->setFocusPolicy(Qt::NoFocus);
     setFocusPolicy(Qt::StrongFocus);
 
-    overlay_ = new DebuggerOverlay(board_.get(), screen_);
-    overlay_->setGeometry(screen_->rect());
-    overlay_->hide();
+    // Отладчик — отдельное окно верхнего уровня (как окна профилировщиков); его клавиши
+    // идут в keyPressEvent главного окна через eventFilter.
+    debugger_ = new DebuggerWindow(board_.get());
+    debugger_->installEventFilter(this);
 
     // --- Menus ---
     // Alt — это АР2 БК. Одиночное нажатие Alt не должно уводить фокус в меню.
@@ -402,7 +405,7 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
         int n = board_->loadSymbols(path.toStdString());
         status_->setText(n < 0 ? QString("Не удалось открыть файл символов")
                                : QString("Загружено символов: %1").arg(n));
-        overlay_->update();
+        debugger_->update();
     });
     dbg->addAction("Сохранить &аннотации (.bkdb)", this, [this] {
         QString p = annotationsPath();
@@ -420,9 +423,9 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
         status_->setText("Аннотации загружены: " + p);
     });
     dbg->addAction("&Автоанализ процедур (JSR + трасса)", this, [this] {
-        int n = overlay_->analyzeProcedures();
+        int n = debugger_->analyzeProcedures();
         status_->setText(QString("Автоанализ: добавлено процедур sub_… — %1").arg(n));
-        if (paused_) overlay_->update();
+        if (paused_) debugger_->update();
     });
 
     status_ = new QLabel("Готов", this);
@@ -460,11 +463,21 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     board_->sound().setEnabled(false); // no sink; don't accumulate samples
 #endif
 
+    // Горячие клавиши меню (F12, Shift+F8, F11, Ctrl+…) работают и в окне отладчика.
+    std::function<void(QMenu*)> addShortcuts = [&](QMenu* m) {
+        for (QAction* a : m->actions()) {
+            if (a->menu()) addShortcuts(a->menu());
+            else if (!a->shortcut().isEmpty()) debugger_->addAction(a);
+        }
+    };
+    for (QAction* a : menuBar()->actions())
+        if (a->menu()) addShortcuts(a->menu());
+
     updateTitle();
     resize(1024, 768);
 }
 
-MainWindow::~MainWindow() { stopVideo(); }
+MainWindow::~MainWindow() { stopVideo(); delete debugger_; }
 
 // Запись видео. path пусто — спросить имя (по умолчанию bk_ГГГГММДД_ЧЧММСС.avi в папке
 // прошлой записи); codec пусто и aspect < 0 — из настроек.
@@ -632,7 +645,7 @@ void MainWindow::runOneSlice(int kSlices) {
         else if (video_->frames() % 25 == 0) updateVideoLabel();
     }
     frameDone_ = false;
-    if (paused_) overlay_->update();
+    if (paused_) debugger_->update();
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
     if (smkram_ && smkram_->isVisible()) smkram_->refresh();
     if (bkram_ && bkram_->isVisible()) bkram_->refresh();
@@ -743,6 +756,11 @@ void MainWindow::changeEvent(QEvent* e) {
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
+    if (obj == debugger_) {
+        if (e->type() == QEvent::KeyPress) { keyPressEvent(static_cast<QKeyEvent*>(e)); return true; }
+        if (e->type() == QEvent::Close && paused_) setPaused(false);   // крестик окна — «продолжить»
+        return QMainWindow::eventFilter(obj, e);
+    }
     if (obj != screen_ || !board_->mouse().enabled() || paused_ || suspended_)
         return QMainWindow::eventFilter(obj, e);
     switch (e->type()) {
@@ -890,15 +908,17 @@ void MainWindow::setPaused(bool paused) {
     if (paused_) setMarsGrab(false);
     phase_ = 0;                     // start the next run at a fresh frame boundary
     if (paused_) {
-        overlay_->snapshotRegs();   // baseline for the changed-register highlight
-        overlay_->setCursor(board_->cpu().pc());   // selection starts at PC
-        overlay_->setGeometry(screen_->rect());
-        overlay_->followPc();
-        overlay_->show();
-        overlay_->raise();
+        debugger_->snapshotRegs();   // baseline for the changed-register highlight
+        debugger_->setCursor(board_->cpu().pc());   // selection starts at PC
+        showDebugger();
+        debugger_->followPc();
         status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, Shift+F8 до выхода, F4 до курсора, F9 точка, Esc продолжить, F12 выход");
     } else {
-        overlay_->hide();
+        if (debugger_->isVisible()) {
+            QSettings().setValue("debuggerGeometry", debugger_->saveGeometry());
+            debugger_->hide();
+            activateWindow();               // клавиатура — снова БК
+        }
         status_->setText("Выполнение");
     }
     // Entering/leaving the debugger drops any held keys so a game doesn't see a
@@ -921,12 +941,12 @@ void MainWindow::setSuspended(bool suspended) {
 }
 
 void MainWindow::stepInto() {
-    overlay_->snapshotRegs();   // so registers changed by this step are highlighted
+    debugger_->snapshotRegs();   // so registers changed by this step are highlighted
     board_->stepInstruction();
-    overlay_->setCursor(board_->cpu().pc());  // курсор — на исполняемую инструкцию
-    overlay_->followPc();
+    debugger_->setCursor(board_->cpu().pc());  // курсор — на исполняемую инструкцию
+    debugger_->followPc();
     renderScreen();
-    overlay_->update();
+    debugger_->update();
 }
 
 // Прогнать эмуляцию до инструкции под курсором и остановиться на ней (клавиша F4).
@@ -934,22 +954,22 @@ void MainWindow::stepInto() {
 // По пути честно срабатывают обычные точки останова; если за отведённый бюджет тактов
 // курсор не достигнут, останавливаемся там, где оказались.
 void MainWindow::runToCursor() {
-    uint16_t target = overlay_->cursorAddr();
+    uint16_t target = debugger_->cursorAddr();
     if (target == board_->cpu().pc()) return;  // уже на месте
-    overlay_->snapshotRegs();
+    debugger_->snapshotRegs();
     board_->runUntil(target, 3 * bk::Board::kDebugRunTicks);   // до курсора бывает и далеко
     board_->clearBreakHit();
-    overlay_->setCursor(board_->cpu().pc());   // курсор — куда реально дошли
-    overlay_->followPc();
+    debugger_->setCursor(board_->cpu().pc());   // курсор — куда реально дошли
+    debugger_->followPc();
     renderScreen();
-    overlay_->update();
+    debugger_->update();
 }
 
 // Доработать до выхода из текущей процедуры (или обработчика прерывания) и встать
 // на адресе возврата.
 void MainWindow::stepOut() {
     if (!paused_) return;
-    overlay_->snapshotRegs();
+    debugger_->snapshotRegs();
     using SO = bk::Board::StepOut;
     const SO r = board_->stepOut();
     const bool watch = board_->watchHit();
@@ -959,24 +979,36 @@ void MainWindow::stepOut() {
                    : r == SO::Break    ? (watch ? "Остановка на точке наблюдения, PC " : "Остановка на точке останова, PC ") + pc
                    : r == SO::Halt     ? "Процессор остановлен (HALT), PC " + pc
                                        : "Выхода из процедуры не дождались (лимит тактов), PC " + pc);
-    overlay_->setCursor(board_->cpu().pc());
-    overlay_->followPc();
+    debugger_->setCursor(board_->cpu().pc());
+    debugger_->followPc();
     renderScreen();
-    overlay_->update();
+    debugger_->update();
 }
 
 void MainWindow::stepOver() {
-    overlay_->snapshotRegs();   // so registers changed by this step are highlighted
+    debugger_->snapshotRegs();   // so registers changed by this step are highlighted
     board_->stepOver();
-    overlay_->setCursor(board_->cpu().pc());  // курсор — на исполняемую инструкцию
-    overlay_->followPc();
+    debugger_->setCursor(board_->cpu().pc());  // курсор — на исполняемую инструкцию
+    debugger_->followPc();
     renderScreen();
-    overlay_->update();
+    debugger_->update();
 }
 
-void MainWindow::resizeEvent(QResizeEvent* e) {
-    QMainWindow::resizeEvent(e);
-    if (overlay_) overlay_->setGeometry(screen_->rect());
+// Окно отладчика: в первый раз — на сохранённом месте или справа от окна экрана.
+void MainWindow::showDebugger() {
+    if (!debugger_->isVisible() && !debuggerPlaced_) {
+        debuggerPlaced_ = true;
+        if (!debugger_->restoreGeometry(QSettings().value("debuggerGeometry").toByteArray())) {
+            debugger_->resize(1024, 768);
+            const QRect avail = screen()->availableGeometry(), fg = frameGeometry();
+            int x = fg.right() + 1;
+            if (x + debugger_->width() > avail.right()) x = std::max(avail.left(), avail.right() - debugger_->width());
+            debugger_->move(x, fg.top());
+        }
+    }
+    debugger_->show();
+    debugger_->raise();
+    debugger_->activateWindow();
 }
 
 // Разница между размером окна и его «начинкой» (меню, строка состояния) заранее
@@ -994,7 +1026,7 @@ void MainWindow::showEvent(QShowEvent* e) {
 
 void MainWindow::nameCursorSymbol() {
     if (!paused_) return;
-    uint16_t a = overlay_->cursorAddr();
+    uint16_t a = debugger_->cursorAddr();
     const std::string* cur = board_->symbols().nameAt(a);
     bool ok = false;
     QString name = QInputDialog::getText(this, "Символ",
@@ -1004,12 +1036,12 @@ void MainWindow::nameCursorSymbol() {
     name = name.trimmed();
     if (name.isEmpty()) board_->symbols().remove(a);
     else board_->symbols().set(a, name.toStdString());
-    overlay_->update();
+    debugger_->update();
 }
 
 void MainWindow::commentCursor() {
     if (!paused_) return;
-    uint16_t a = overlay_->cursorAddr();
+    uint16_t a = debugger_->cursorAddr();
     const std::string* cur = board_->comment(a);
     bool ok = false;
     QString text = QInputDialog::getText(this, "Комментарий",
@@ -1017,12 +1049,12 @@ void MainWindow::commentCursor() {
         QLineEdit::Normal, cur ? QString::fromStdString(*cur) : QString(), &ok);
     if (!ok) return;
     board_->setComment(a, text.trimmed().toStdString());   // empty clears
-    overlay_->update();
+    debugger_->update();
 }
 
 void MainWindow::markData(bk::DataType t) {
     if (!paused_) return;
-    uint16_t a = overlay_->cursorAddr();
+    uint16_t a = debugger_->cursorAddr();
     uint16_t len = (t == bk::DataType::Word || t == bk::DataType::Ptr) ? 2 : 1;
     if (t == bk::DataType::String) {
         // Auto-length: printable run up to (and including) a terminating NUL, capped.
@@ -1036,7 +1068,7 @@ void MainWindow::markData(bk::DataType t) {
         if (len == 0) len = 1;
     }
     board_->setData(a, t, len);
-    overlay_->update();
+    debugger_->update();
 }
 
 void MainWindow::gotoDialog() {
@@ -1052,17 +1084,17 @@ void MainWindow::gotoDialog() {
     if (!ok) return;
     sel = sel.trimmed();
     uint16_t addr;
-    if (board_->symbols().addrOf(sel.toStdString(), addr)) { overlay_->navigateTo(addr); return; }
+    if (board_->symbols().addrOf(sel.toStdString(), addr)) { debugger_->navigateTo(addr); return; }
     bool num = false; uint parsed = sel.startsWith("0x", Qt::CaseInsensitive)
         ? sel.mid(2).toUInt(&num, 16) : sel.toUInt(&num, 8);
-    if (num) overlay_->navigateTo(static_cast<uint16_t>(parsed));
+    if (num) debugger_->navigateTo(static_cast<uint16_t>(parsed));
     else status_->setText("Не найдено: " + sel);
 }
 
 void MainWindow::xrefsDialog() {
     if (!paused_) return;
-    uint16_t t = overlay_->cursorAddr();
-    std::vector<uint16_t> refs = overlay_->xrefsTo(t);
+    uint16_t t = debugger_->cursorAddr();
+    std::vector<uint16_t> refs = debugger_->xrefsTo(t);
     QString what = oct6(t);
     if (const std::string* nm = board_->symbols().nameAt(t)) what += " (" + QString::fromStdString(*nm) + ")";
     if (refs.empty()) { status_->setText("Нет ссылок на " + what); return; }
@@ -1075,7 +1107,7 @@ void MainWindow::xrefsDialog() {
         QString("Кто ссылается (%1):").arg(refs.size()), items, 0, /*editable*/ false, &ok);
     if (!ok) return;
     bool num = false; uint a = sel.section(' ', 0, 0).toUInt(&num, 8);
-    if (num) overlay_->navigateTo(static_cast<uint16_t>(a));
+    if (num) debugger_->navigateTo(static_cast<uint16_t>(a));
 }
 
 QString MainWindow::annotationsPath() const {
@@ -1122,10 +1154,11 @@ void MainWindow::loadAnnotations(const QString& path) {
         QJsonObject o = v.toObject();
         board_->setData(uint16_t(o["a"].toInt()), bk::DataType(o["t"].toInt()), uint16_t(o["l"].toInt()));
     }
-    if (overlay_) overlay_->update();
+    if (debugger_) debugger_->update();
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {
+    if (debugger_->isVisible()) QSettings().setValue("debuggerGeometry", debugger_->saveGeometry());
     stopVideo();                          // дописать индекс AVI
     saveAnnotations(annotationsPath());   // persist symbols/comments next to the .bin
     saveDisks();
@@ -1503,33 +1536,33 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
     if (paused_) {
         // Идёт правка значения на месте — все клавиши уходят в поле ввода,
         // иначе цифры и Enter разошлись бы по командам отладчика.
-        if (overlay_->handleEditKey(e)) { e->accept(); return; }
+        if (debugger_->handleEditKey(e)) { e->accept(); return; }
         // --- Debugger controls (SoftICE overlay is visible) ---
         switch (e->key()) {
         case Qt::Key_F4:       runToCursor(); return;   // дойти до инструкции под курсором
         case Qt::Key_F7:       stepInto(); return;
         case Qt::Key_F8:       if (e->modifiers() & Qt::ShiftModifier) stepOut(); else stepOver(); return;
-        case Qt::Key_F9:       board_->toggleBreakpoint(overlay_->cursorAddr()); overlay_->update(); return;  // на строке под курсором
+        case Qt::Key_F9:       board_->toggleBreakpoint(debugger_->cursorAddr()); debugger_->update(); return;  // на строке под курсором
         case Qt::Key_Escape:   setPaused(false); return;
-        case Qt::Key_PageUp:   overlay_->scrollDisasm(-8); return;
-        case Qt::Key_PageDown: overlay_->scrollDisasm(8); return;
-        case Qt::Key_Up:       overlay_->moveCursor(-1); return;
-        case Qt::Key_Down:     overlay_->moveCursor(1); return;
+        case Qt::Key_PageUp:   debugger_->scrollDisasm(-8); return;
+        case Qt::Key_PageDown: debugger_->scrollDisasm(8); return;
+        case Qt::Key_Up:       debugger_->moveCursor(-1); return;
+        case Qt::Key_Down:     debugger_->moveCursor(1); return;
         case Qt::Key_N:        nameCursorSymbol(); return;   // name/rename the selected line
         case Qt::Key_Semicolon: commentCursor(); return;     // comment the selected line
         case Qt::Key_B:        markData(bk::DataType::Byte);   return;  // mark data types
         case Qt::Key_W:        markData(bk::DataType::Word);   return;
         case Qt::Key_S:        markData(bk::DataType::String); return;
         case Qt::Key_P:        markData(bk::DataType::Ptr);    return;
-        case Qt::Key_U:        board_->clearData(overlay_->cursorAddr()); overlay_->update(); return; // back to code
+        case Qt::Key_U:        board_->clearData(debugger_->cursorAddr()); debugger_->update(); return; // back to code
         case Qt::Key_G:        gotoDialog(); return;                       // goto symbol/address
         case Qt::Key_X:        xrefsDialog(); return;                      // who references the cursor
         case Qt::Key_Return:
-        case Qt::Key_Enter:    overlay_->followTarget(); return;           // follow branch/call target
-        case Qt::Key_Left:     overlay_->navBack(); return;                // history back / forward
-        case Qt::Key_Right:    overlay_->navForward(); return;
-        case Qt::Key_BracketLeft:  overlay_->scrollMem(-8); return;
-        case Qt::Key_BracketRight: overlay_->scrollMem(8); return;
+        case Qt::Key_Enter:    debugger_->followTarget(); return;           // follow branch/call target
+        case Qt::Key_Left:     debugger_->navBack(); return;                // history back / forward
+        case Qt::Key_Right:    debugger_->navForward(); return;
+        case Qt::Key_BracketLeft:  debugger_->scrollMem(-8); return;
+        case Qt::Key_BracketRight: debugger_->scrollMem(8); return;
         default: e->accept(); return; // swallow other keys while debugging
         }
     }
@@ -1736,7 +1769,7 @@ void MainWindow::openSmkRam() {
 void MainWindow::broadcastHighlight(int addr, ProfilerView* src) {
     for (ProfilerView* p : profilers_)
         if (p != src) p->setHighlight(addr);
-    if (overlay_) overlay_->setHighlight(addr);   // debugger disasm is always a receiver
+    if (debugger_) debugger_->setHighlight(addr);   // debugger disasm is always a receiver
 }
 
 template <class W>
@@ -1748,8 +1781,8 @@ void MainWindow::openProfiler(W*& w, QSize size, bool flame, bool spans) {
         // Щелчок по адресу ведёт дизассемблер отладчика туда (отладчик открывается).
         connect(v, &ProfilerView::addressPicked, this, [this](uint16_t addr) {
             if (!paused_) setPaused(true);   // setPaused re-anchors disasm to PC…
-            overlay_->setDisasmAddr(addr);   // …so set the picked address after it
-            overlay_->update();
+            debugger_->setDisasmAddr(addr);   // …so set the picked address after it
+            debugger_->update();
         });
         connect(v, &ProfilerView::hoverAddress, this, [this, v](int a) { broadcastHighlight(a, v); });
         profilers_.push_back(v);
@@ -1792,7 +1825,7 @@ void MainWindow::loadState() {
         applyScanline();
         updateTitle();
         renderScreen();
-        if (paused_) overlay_->followPc();
+        if (paused_) debugger_->followPc();
     } else {
         QMessageBox::warning(this, "БК", "Не удалось восстановить состояние");
     }

@@ -11,7 +11,7 @@
 #include "Gamepad.h"
 
 class GlScreen;
-class DebuggerOverlay;
+class DebuggerWindow;
 class MemVisWidget;
 class SmkRamWidget;
 class BkRamWidget;
@@ -119,7 +119,6 @@ protected:
     void changeEvent(QEvent* e) override;                 // окно неактивно — захват мыши отпустить
     void keyPressEvent(QKeyEvent* e) override;
     void keyReleaseEvent(QKeyEvent* e) override;
-    void resizeEvent(QResizeEvent* e) override;
     void showEvent(QShowEvent* e) override;
     void closeEvent(QCloseEvent* e) override;   // auto-save annotations
 
@@ -180,6 +179,7 @@ private:
     // включается (flame/spans — ещё дерево вызовов и хронология).
     template <class W> void openProfiler(W*& w, QSize size, bool flame = false, bool spans = false);
     void setPaused(bool paused);
+    void showDebugger();                 // показать окно отладчика (в первый раз — расставить)
     void setSuspended(bool suspended);   // simple pause (Pause key), no debugger
     void stepInto();
     void stepOver();
@@ -197,7 +197,8 @@ private:
 
     std::unique_ptr<bk::Board> board_;
     GlScreen* screen_ = nullptr;
-    DebuggerOverlay* overlay_ = nullptr;
+    DebuggerWindow* debugger_ = nullptr;   // отдельное окно верхнего уровня
+    bool debuggerPlaced_ = false;          // место окна уже выбрано в этом сеансе
     MemVisWidget* memvis_ = nullptr;
     SmkRamWidget* smkram_ = nullptr;
     BkRamWidget* bkram_ = nullptr;

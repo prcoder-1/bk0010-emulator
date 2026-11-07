@@ -12,7 +12,7 @@
 #include <vector>
 #include <cstdint>
 #include "ui/MainWindow.h"
-#include "ui/DebuggerOverlay.h"
+#include "ui/DebuggerWindow.h"
 #include "ui/MemVisWidget.h"
 #include "ui/SmkRamWidget.h"
 #include "ui/BkRamWidget.h"
@@ -504,14 +504,14 @@ static int runHeadless(const CliOptions& o) {
         std::printf("headless: ran %d frames, wrote %s\n", frames, qPrintable(shot));
     }
     if (!dbgShot.isEmpty()) {
-        // Composite the Soft-ICE overlay over the (scaled) BK screen.
-        QImage big = out.scaled(1024, 768).convertToFormat(QImage::Format_ARGB32);
-        DebuggerOverlay ov(&board);
-        ov.resize(1024, 768);
-        ov.followPc();
-        ov.render(&big, QPoint(), QRegion(), QWidget::DrawChildren);
+        // Окно отладчика Soft-ICE в размере 1024x768 (экран БК — в --shot).
+        QImage big(1024, 768, QImage::Format_ARGB32);
+        DebuggerWindow dw(&board);
+        dw.resize(big.size());
+        dw.followPc();
+        dw.render(&big, QPoint(), QRegion(), QWidget::DrawChildren);
         if (!big.save(dbgShot)) { std::fprintf(stderr, "headless: cannot save %s\n", qPrintable(dbgShot)); return 5; }
-        std::printf("headless: wrote debugger overlay %s (PC=%06o)\n", qPrintable(dbgShot), board.cpu().pc());
+        std::printf("headless: wrote debugger window %s (PC=%06o)\n", qPrintable(dbgShot), board.cpu().pc());
     }
     if (!memvisShot.isEmpty()) {
         MemVisWidget w(&board);
@@ -804,7 +804,7 @@ static void printHelp(const char* prog) {
         "профилировщиков, --type или --keys; --shot, --key и --keyframe работают вместе с ними:\n"
         "  --frames N             прогнать N кадров\n"
         "  --shot <файл.png>      снимок экрана 512x256 после прогона (с AZБК — VGA 1024x768)\n"
-        "  --dbgshot <файл.png>   снимок с отладчиком Soft-ICE\n"
+        "  --dbgshot <файл.png>   снимок окна отладчика Soft-ICE\n"
         "  --memvis <файл.png>    визуализация памяти\n"
         "  --hotpath, --callgraph, --flame, --flamechart, --hotchart <файл.png>\n"
         "                         профилировщики: горячий путь, граф вызовов, пламенный\n"

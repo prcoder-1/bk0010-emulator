@@ -11,14 +11,14 @@ class QPainter;
 
 namespace bk { class Board; }
 
-// Soft-ICE style translucent debugger drawn on top of the BK screen. Shows
-// register, disassembly, memory and stack panels. Painting is on-demand; the
-// MainWindow drives stepping and toggles visibility with a hotkey. The BK
-// screen underneath stays visible through the translucent panels.
-class DebuggerOverlay : public QWidget {
+// Soft-ICE style debugger in its own top-level window, separate from the BK
+// screen. Shows register, disassembly, memory and stack panels. Painting is
+// on-demand; the MainWindow drives stepping, shows the window on a break and
+// hides it on «continue», and gets its keys through an event filter.
+class DebuggerWindow : public QWidget {
     Q_OBJECT
 public:
-    explicit DebuggerOverlay(bk::Board* board, QWidget* parent = nullptr);
+    explicit DebuggerWindow(bk::Board* board, QWidget* parent = nullptr);
 
     void followPc();                 // scroll disasm so PC is visible
     void snapshotRegs();             // remember current regs so the next paint can highlight changes

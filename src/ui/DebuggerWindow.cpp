@@ -1,4 +1,4 @@
-#include "DebuggerOverlay.h"
+#include "DebuggerWindow.h"
 #include "QtFormat.h"
 #include "Board.h"
 #include "Disasm.h"
@@ -14,16 +14,19 @@
 
 using bk::Board;
 
-DebuggerOverlay::DebuggerOverlay(Board* board, QWidget* parent)
+DebuggerWindow::DebuggerWindow(Board* board, QWidget* parent)
     : QWidget(parent), board_(board) {
-    setAttribute(Qt::WA_NoSystemBackground);
-    setAutoFillBackground(false);
+    setAttribute(Qt::WA_OpaquePaintEvent);
+    setAttribute(Qt::WA_QuitOnClose, false);   // закрытие отладчика — не выход из эмулятора
+    setFocusPolicy(Qt::StrongFocus);
+    setWindowTitle(QString::fromUtf8("Отладчик Soft-ICE"));
+    setMinimumSize(640, 480);
     disasmTop_ = board_->cpu().pc();
     // Record execution so the disassembler can tint hot (frequently-run) code.
     board_->trace().setEnabled(true);
 }
 
-void DebuggerOverlay::followPc() {
+void DebuggerWindow::followPc() {
     uint16_t pc = board_->cpu().pc();
     // If PC is outside the currently shown disasm window, re-anchor near it.
     bool visible = false;
@@ -36,7 +39,7 @@ void DebuggerOverlay::followPc() {
     update();
 }
 
-void DebuggerOverlay::scrollDisasm(int lines) {
+void DebuggerWindow::scrollDisasm(int lines) {
     if (lines > 0) {
         for (int i = 0; i < lines; ++i)
             disasmTop_ += bk::disasm(board_->memory(), disasmTop_).words * 2;
@@ -46,16 +49,16 @@ void DebuggerOverlay::scrollDisasm(int lines) {
     update();
 }
 
-void DebuggerOverlay::scrollMem(int rows) { memAddr_ += rows * 8; update(); }
+void DebuggerWindow::scrollMem(int rows) { memAddr_ += rows * 8; update(); }
 
-void DebuggerOverlay::snapshotRegs() {
+void DebuggerWindow::snapshotRegs() {
     auto& cpu = board_->cpu();
     for (int i = 0; i < 8; ++i) prevR_[i] = cpu.r[i];
     prevPsw_ = cpu.psw;
     havePrev_ = true;
 }
 
-void DebuggerOverlay::moveCursor(int lines) {
+void DebuggerWindow::moveCursor(int lines) {
     const bk::Memory& mem = board_->memory();
     auto stepFwd = [&](uint16_t a) -> uint16_t {
         if (const bk::DataItem* di = board_->dataAt(a)) return a + (di->len ? di->len : 2);
@@ -73,7 +76,7 @@ void DebuggerOverlay::moveCursor(int lines) {
     update();
 }
 
-void DebuggerOverlay::navigateTo(uint16_t a) {
+void DebuggerWindow::navigateTo(uint16_t a) {
     if (a == cursorAddr_) return;
     navBack_.push_back(cursorAddr_);
     if (navBack_.size() > 256) navBack_.erase(navBack_.begin());
@@ -82,7 +85,7 @@ void DebuggerOverlay::navigateTo(uint16_t a) {
     update();
 }
 
-void DebuggerOverlay::navBack() {
+void DebuggerWindow::navBack() {
     if (navBack_.empty()) return;
     navForward_.push_back(cursorAddr_);
     cursorAddr_ = navBack_.back(); navBack_.pop_back();
@@ -90,7 +93,7 @@ void DebuggerOverlay::navBack() {
     update();
 }
 
-void DebuggerOverlay::navForward() {
+void DebuggerWindow::navForward() {
     if (navForward_.empty()) return;
     navBack_.push_back(cursorAddr_);
     cursorAddr_ = navForward_.back(); navForward_.pop_back();
@@ -98,14 +101,14 @@ void DebuggerOverlay::navForward() {
     update();
 }
 
-bool DebuggerOverlay::followTarget() {
+bool DebuggerWindow::followTarget() {
     uint16_t t;
     if (!targetOf(cursorAddr_, t)) return false;
     navigateTo(t);
     return true;
 }
 
-int DebuggerOverlay::analyzeProcedures() {
+int DebuggerWindow::analyzeProcedures() {
     const bk::Memory& mem = board_->memory();
     std::set<uint16_t> cands;
     // Live trace: procedures that actually got called (flame CCT), if a profiler
@@ -130,11 +133,11 @@ int DebuggerOverlay::analyzeProcedures() {
     return added;
 }
 
-std::vector<uint16_t> DebuggerOverlay::xrefsTo(uint16_t target) const {
+std::vector<uint16_t> DebuggerWindow::xrefsTo(uint16_t target) const {
     return bk::staticXrefs(board_->memory(), target);
 }
 
-bool DebuggerOverlay::targetOf(uint16_t addr, uint16_t& out) const {
+bool DebuggerWindow::targetOf(uint16_t addr, uint16_t& out) const {
     // Переходы, SOB, JMP/JSR по @#a, a(PC), @a(PC); косвенные через регистр статически
     // не разрешить.
     const bk::InstrInfo in = bk::instrInfo(board_->memory(), addr);
@@ -143,7 +146,7 @@ bool DebuggerOverlay::targetOf(uint16_t addr, uint16_t& out) const {
     return true;
 }
 
-bool DebuggerOverlay::addrTokenAtX(const QString& text, int relX, const QFontMetrics& fm,
+bool DebuggerWindow::addrTokenAtX(const QString& text, int relX, const QFontMetrics& fm,
                                    uint16_t& out) const {
     auto isTok = [](QChar c) { return c.isLetterOrNumber() || c == '_' || c == '.' || c == '$'; };
     const int n = text.size();
@@ -179,9 +182,10 @@ static QString flagsStr(uint16_t psw) {
 }
 
 
-void DebuggerOverlay::paintEvent(QPaintEvent*) {
+void DebuggerWindow::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::TextAntialiasing, true);
+    p.fillRect(rect(), QColor(0, 0, 0));
 
     QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     int fs = qMax(10, height() / 48);
@@ -191,7 +195,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
     lineH_ = fm.height() + 2;
     int cw = fm.horizontalAdvance('0');
 
-    const QColor panelBg(8, 16, 40, 210);      // translucent dark-blue
+    const QColor panelBg(8, 16, 40, 210);      // dark-blue panels
     const QColor border(80, 140, 255, 230);
     const QColor fg(210, 220, 255);
     const QColor hi(255, 240, 120);            // current PC
@@ -671,7 +675,7 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
 // ---------------------------------------------------------------------------
 // Правка значения на месте
 // ---------------------------------------------------------------------------
-void DebuggerOverlay::beginEdit(EditTarget t, int reg, uint16_t addr) {
+void DebuggerWindow::beginEdit(EditTarget t, int reg, uint16_t addr) {
     editTarget_ = t;
     editReg_ = reg;
     editAddr_ = addr;
@@ -679,13 +683,13 @@ void DebuggerOverlay::beginEdit(EditTarget t, int reg, uint16_t addr) {
     update();
 }
 
-void DebuggerOverlay::cancelEdit() {
+void DebuggerWindow::cancelEdit() {
     editTarget_ = EditTarget::None;
     editBuf_.clear();
     update();
 }
 
-void DebuggerOverlay::commitEdit() {
+void DebuggerWindow::commitEdit() {
     if (editTarget_ == EditTarget::None) return;
     if (!editBuf_.isEmpty()) {
         bool ok = false;
@@ -714,7 +718,7 @@ void DebuggerOverlay::commitEdit() {
     update();
 }
 
-bool DebuggerOverlay::handleEditKey(QKeyEvent* e) {
+bool DebuggerWindow::handleEditKey(QKeyEvent* e) {
     if (editTarget_ == EditTarget::None) return false;
     switch (e->key()) {
     case Qt::Key_Escape:    cancelEdit(); return true;
@@ -732,12 +736,11 @@ bool DebuggerOverlay::handleEditKey(QKeyEvent* e) {
     return true;   // пока идёт правка, прочие клавиши в отладчик не пропускаем
 }
 
-void DebuggerOverlay::drawEditField(QPainter& p, int x, int baselineY, const QFontMetrics& fm,
+void DebuggerWindow::drawEditField(QPainter& p, int x, int baselineY, const QFontMetrics& fm,
                                     const QString& current) const {
     const QPen prev = p.pen();
     const QRect r(x - 1, baselineY - fm.ascent(), cw_ * 7 + 2, fm.height());
-    // Заливка ПОЛУПРОЗРАЧНАЯ: сплошная съедала цифры, да и весь оверлей полупрозрачный
-    // по смыслу — сквозь него виден экран БК. Поле выделяем рамкой, а не заливкой.
+    // Заливка ПОЛУПРОЗРАЧНАЯ: сплошная съедала цифры. Поле выделяем рамкой, а не заливкой.
     p.fillRect(r, QColor(230, 200, 40, 60));
     p.setPen(QColor(255, 220, 80));
     p.drawRect(r);
@@ -755,7 +758,7 @@ void DebuggerOverlay::drawEditField(QPainter& p, int x, int baselineY, const QFo
     p.setPen(prev);
 }
 
-void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
+void DebuggerWindow::mousePressEvent(QMouseEvent* e) {
     const QPoint pos = e->pos();
     // Идёт правка: клик в стороне — отмена (чтобы не залипало).
     if (editing()) { cancelEdit(); return; }
@@ -831,7 +834,7 @@ void DebuggerOverlay::mousePressEvent(QMouseEvent* e) {
     }
 }
 
-void DebuggerOverlay::wheelEvent(QWheelEvent* e) {
+void DebuggerWindow::wheelEvent(QWheelEvent* e) {
     // Scroll the panel under the cursor: the disassembler by default, the memory
     // dump when hovering it. One notch (120 units) = a few lines.
     int notches = e->angleDelta().y() / 120;
