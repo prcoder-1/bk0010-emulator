@@ -1485,7 +1485,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         case Qt::Key_F4:       runToCursor(); return;   // дойти до инструкции под курсором
         case Qt::Key_F7:       stepInto(); return;
         case Qt::Key_F8:       stepOver(); return;
-        case Qt::Key_F9:       board_->toggleBreakpoint(board_->cpu().pc()); overlay_->update(); return;
+        case Qt::Key_F9:       board_->toggleBreakpoint(overlay_->cursorAddr()); overlay_->update(); return;  // на строке под курсором
         case Qt::Key_Escape:   setPaused(false); return;
         case Qt::Key_PageUp:   overlay_->scrollDisasm(-8); return;
         case Qt::Key_PageDown: overlay_->scrollDisasm(8); return;
