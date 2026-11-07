@@ -463,7 +463,9 @@ QJsonArray McpServer::toolDefs() const {
     t.append(tool("bk_step", "Execute N single instructions.",
         schema({{"count", P("integer", "Instruction count (default 1)")}})));
     t.append(tool("bk_step_over", "Step one instruction, stepping over JSR/EMT calls.", schema({})));
-    t.append(tool("bk_step_out", "Run until the current subroutine returns to its caller (finish).",
+    t.append(tool("bk_step_out", "Run until the current subroutine or interrupt handler returns to its caller (finish): "
+        "stops on the first control transfer that raises SP above the frame level (RTS/RTI/RTT/MARK/JMP @(SP)+); "
+        "needs no call history. Stops on breakpoints too.",
         schema({{"max_ticks", P("integer", "CPU-tick limit (default 20000000)")}})));
     t.append(tool("bk_regs", "Read the CPU registers R0-R7, SP, PC and PSW (with flags).", schema({})));
     t.append(tool("bk_set_reg", "Set a register (R0..R7, SP, PC, PSW).",
@@ -1643,14 +1645,14 @@ QJsonObject McpServer::tool_bk_screenshot(const QJsonObject& args) {
 }
 
 QJsonObject McpServer::tool_bk_step_out(const QJsonObject& args) {
-    size_t d = board_.trace().stackDepth();
-    if (d <= 1) { board_.stepInstruction(); return textContent("At top level; stepped one instruction.\n" + regsText() + "\n" + disasmText(board_.cpu().pc(), 3)); }
-    bool ret = board_.runUntilReturn(d, args.value("max_ticks").toInt(bk::Board::kDebugRunTicks));
-    QString extra;
-    if (board_.breakHit()) { extra = board_.watchHit() ? "\n(stopped on a watchpoint)" : "\n(stopped on a breakpoint)"; board_.clearBreakHit(); }
-    return textContent(QString("%1%2\n%3\n%4")
-        .arg(ret ? "Returned to caller." : "Did not return within the tick limit.").arg(extra)
-        .arg(regsText()).arg(disasmText(board_.cpu().pc(), 3)));
+    using SO = bk::Board::StepOut;
+    const SO r = board_.stepOut(args.value("max_ticks").toInt(bk::Board::kDebugRunTicks));
+    QString what = r == SO::Returned ? "Returned to caller."
+                 : r == SO::Halt     ? "CPU halted before returning."
+                 : r == SO::Break    ? (board_.watchHit() ? "Stopped on a watchpoint." : "Stopped on a breakpoint.")
+                                     : "Did not return within the tick limit.";
+    board_.clearBreakHit();
+    return textContent(what + "\n" + regsText() + "\n" + disasmText(board_.cpu().pc(), 3));
 }
 
 QJsonObject McpServer::tool_bk_audio(const QJsonObject& args) {

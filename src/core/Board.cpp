@@ -425,6 +425,9 @@ int Board::stepCore() {
     inStep_ = true;
     int t = cpu_.step();
     inStep_ = false;
+    const bool tTrap = cpu_.traceTrapped();   // итог самой команды — без входа в ловушку T
+    instrEndPc_ = tTrap ? cpu_.tracePc() : cpu_.pc();
+    instrEndSp_ = static_cast<uint16_t>(cpu_.sp() + (tTrap ? 4 : 0));
     if (watchArmed_) watchPc_ = pcBefore;   // the instruction that triggered a watch
     if (arb037_) t = busTicks(ir, t);
     trace_.ticks(pcBefore, t);
@@ -1639,11 +1642,32 @@ bool Board::runUntil(uint16_t addr, int maxTicks) {
     return r == RunStop::Target || r == RunStop::Break;
 }
 
-bool Board::runUntilReturn(size_t targetDepth, int maxTicks) {
+Board::StepOut Board::stepOut(int maxTicks) {
+    uint16_t level = cpu_.sp();          // SP, выше которого поднимает только возврат
+    bool returned = false;               // возврат был, но следом принято прерывание
+    uint16_t retPc = 0, retSp = 0;
     int done = 0;
-    const RunStop r = runLoop(maxTicks, true, [&] { return trace_.stackDepth() < targetDepth; }, done);
+    const RunStop r = runLoop(maxTicks, true, [&] {
+        if (!returned) {
+            if (instrEndSp_ <= level) return false;
+            const InstrInfo in = instrInfo(mem_, curInstrPc_);
+            if (instrEndPc_ == static_cast<uint16_t>(curInstrPc_ + 2 * in.words)) {
+                level = instrEndSp_;     // сняли со стека сохранённое — кадр всё тот же
+                return false;
+            }
+            returned = true;
+            retPc = instrEndPc_;
+            retSp = instrEndSp_;
+        }
+        return cpu_.pc() == retPc && cpu_.sp() == retSp;
+    }, done);
     screen_.setScroll(scroll_);
-    return r == RunStop::Target || r == RunStop::Break;
+    switch (r) {
+    case RunStop::Target: return StepOut::Returned;
+    case RunStop::Break:  return StepOut::Break;
+    case RunStop::Halt:   return StepOut::Halt;
+    default:              return StepOut::Budget;
+    }
 }
 
 void Board::runFrame() {

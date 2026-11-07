@@ -379,6 +379,9 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     connect(vAudio, &QAction::toggled, this, [](bool on) { QSettings().setValue("video/audio", on); });
 
     QMenu* dbg = menuBar()->addMenu("&Отладка");
+    stepOutAction_ = dbg->addAction("До в&ыхода из процедуры", this, &MainWindow::stepOut, QKeySequence("Shift+F8"));
+    stepOutAction_->setEnabled(false);   // при работающей БК Shift+F8 — её клавиша ШАГ
+    dbg->addSeparator();
     dbg->addAction("&Визуализация памяти…", this, &MainWindow::openMemVis, QKeySequence("Ctrl+I"));
     dbg->addAction("&ДОЗУ СМК-512 по страницам…", this, &MainWindow::openSmkRam, QKeySequence("Ctrl+D"));
     dbg->addAction("Память &БК по страницам…", this, &MainWindow::openBkRam, QKeySequence("Ctrl+P"));
@@ -883,6 +886,7 @@ QString MainWindow::chooseTapeProgram(const QString& wav) {
 
 void MainWindow::setPaused(bool paused) {
     paused_ = paused;
+    stepOutAction_->setEnabled(paused_);
     if (paused_) setMarsGrab(false);
     phase_ = 0;                     // start the next run at a fresh frame boundary
     if (paused_) {
@@ -892,7 +896,7 @@ void MainWindow::setPaused(bool paused) {
         overlay_->followPc();
         overlay_->show();
         overlay_->raise();
-        status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, F9 точка, Esc продолжить, F12 выход");
+        status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, Shift+F8 до выхода, F9 точка, Esc продолжить, F12 выход");
     } else {
         overlay_->hide();
         status_->setText("Выполнение");
@@ -936,6 +940,26 @@ void MainWindow::runToCursor() {
     board_->runUntil(target, 3 * bk::Board::kDebugRunTicks);   // до курсора бывает и далеко
     board_->clearBreakHit();
     overlay_->setCursor(board_->cpu().pc());   // курсор — куда реально дошли
+    overlay_->followPc();
+    renderScreen();
+    overlay_->update();
+}
+
+// Доработать до выхода из текущей процедуры (или обработчика прерывания) и встать
+// на адресе возврата.
+void MainWindow::stepOut() {
+    if (!paused_) return;
+    overlay_->snapshotRegs();
+    using SO = bk::Board::StepOut;
+    const SO r = board_->stepOut();
+    const bool watch = board_->watchHit();
+    board_->clearBreakHit();
+    const QString pc = oct6(board_->cpu().pc());
+    status_->setText(r == SO::Returned ? "Вышли из процедуры, возврат на " + pc
+                   : r == SO::Break    ? (watch ? "Остановка на точке наблюдения, PC " : "Остановка на точке останова, PC ") + pc
+                   : r == SO::Halt     ? "Процессор остановлен (HALT), PC " + pc
+                                       : "Выхода из процедуры не дождались (лимит тактов), PC " + pc);
+    overlay_->setCursor(board_->cpu().pc());
     overlay_->followPc();
     renderScreen();
     overlay_->update();
@@ -1484,7 +1508,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         switch (e->key()) {
         case Qt::Key_F4:       runToCursor(); return;   // дойти до инструкции под курсором
         case Qt::Key_F7:       stepInto(); return;
-        case Qt::Key_F8:       stepOver(); return;
+        case Qt::Key_F8:       if (e->modifiers() & Qt::ShiftModifier) stepOut(); else stepOver(); return;
         case Qt::Key_F9:       board_->toggleBreakpoint(overlay_->cursorAddr()); overlay_->update(); return;  // на строке под курсором
         case Qt::Key_Escape:   setPaused(false); return;
         case Qt::Key_PageUp:   overlay_->scrollDisasm(-8); return;

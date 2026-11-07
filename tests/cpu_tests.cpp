@@ -1466,6 +1466,46 @@ int main(int argc, char** argv) {
               "runUntil простаивает на WAIT, как runTicks, а не исполняет его заново");
     }
 
+    // ---- «До выхода из процедуры» (Board::stepOut) ----
+    SECTION("stepOut: до выхода из процедуры")
+    {
+        Board b; b.loadRoms(BK_DEFAULT_ROM_DIR); b.reset();
+        Memory& m = b.memory();
+        loadProg(m, 01000, {004737, 02000, 000240});          // JSR PC,SUB; NOP
+        loadProg(m, 02000, {010146,                            // SUB: MOV R1,-(SP)
+                            004737, 02100,                     //      JSR PC,SUB2
+                            012601,                            //      MOV (SP)+,R1 — эпилог выше старта
+                            0104001,                           //      EMT 1 — вложенный возврат в эпилоге
+                            000207});                          //      RTS PC
+        loadProg(m, 02100, {000207});                          // SUB2: RTS PC
+        loadProg(m, 03100, {010046, 012600, 000002});          // EMT: MOV R0,-(SP); MOV (SP)+,R0; RTI
+        loadProg(m, 03000, {000006});                          // T: RTT
+        m.pokeWord(030, 03100); m.pokeWord(032, 0);
+        m.pokeWord(014, 03000); m.pokeWord(016, 0);
+        using SO = Board::StepOut;
+        auto enterSub = [&] {
+            b.cpu().reset(01000, 0);
+            b.cpu().r[6] = 01000;
+            b.stepInstruction(); b.stepInstruction();          // в SUB, R1 сохранён на стеке
+        };
+        enterSub();
+        CHECK(b.stepOut() == SO::Returned && b.cpu().pc() == 01004 && b.cpu().sp() == 01000,
+              "stepOut из середины SUB: мимо вложенного RTS и EMT в эпилоге — на адрес возврата");
+        enterSub();
+        b.cpu().psw |= Cpu::CC_T;                              // каждая команда — через ловушку 014
+        CHECK(b.stepOut() == SO::Returned && b.cpu().pc() == 01004 && b.cpu().sp() == 01000,
+              "stepOut под T-битом: ловушка после RTS дорабатывается, остановка на адресе возврата");
+        b.cpu().reset(02010, 0);
+        b.cpu().r[6] = 01000;
+        b.stepInstruction();                                   // EMT 1 → обработчик
+        CHECK(b.stepOut() == SO::Returned && b.cpu().pc() == 02012 && b.cpu().sp() == 01000,
+              "stepOut из обработчика EMT — на команду за EMT");
+        loadProg(m, 04000, {000777});                          // BR . — процедуры нет
+        b.cpu().reset(04000, 0);
+        CHECK(b.stepOut(100000) == SO::Budget && b.cpu().pc() == 04000,
+              "stepOut без возврата упирается в лимит тактов");
+    }
+
     // ---- Ловушка по T-биту (вектор 014) и разница RTI/RTT ----
     // На ней держится «музыка параллельно с игрой»: обработчик 014 крутит динамик
     // после каждой команды основной программы и возвращается по RTT.

@@ -204,12 +204,12 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `frameEnd_`): the overshoot of the last instruction and the frame-IRQ entry carry into the next
   frame, and the beam is advanced by it at the frame start. Starting each frame from "now" made
   the emulated frame tens of ticks too long, so anything locked to the VM1 timer crawled up the
-  screen (INSULT part 19). `runFrame`, `runFrameSlice`, `runUntil`, `runUntilReturn` all go
+  screen (INSULT part 19). `runFrame`, `runFrameSlice`, `runUntil`, `stepOut` all go
   through `beginFrame`.
 - **WAIT idles in time**: `runTicks` no longer skips the rest of the frame on WAIT; it calls
   `idleTicks` in 64-tick chunks so sound (AY music runs from the frame IRQ), the floppy, the
   VM1 timer and the beam keep going. Interrupt entry ticks also go through `advanceDevices`.
-  `runTicks`, `runUntil` and `runUntilReturn` share ONE loop (`Board::runLoop`: WAIT idling,
+  `runTicks`, `runUntil` and `stepOut` share ONE loop (`Board::runLoop`: WAIT idling,
   breakpoints/watchpoints, frame boundaries for the debugger runs) — keep it that way.
 - **CPU dispatch** (`Cpu::buildTable`): a 1024-entry table indexed by `ir >> 6`,
   mirroring the reference `bk` emulator's `itab.c`. Instruction semantics/flags are

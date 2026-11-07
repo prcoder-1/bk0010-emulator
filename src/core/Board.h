@@ -408,15 +408,20 @@ public:
     // (or a breakpoint) was reached.
     bool runUntil(uint16_t addr, int maxTicks);
 
-    // Run (with frame interrupts) until the call stack becomes shallower than
-    // `targetDepth` (i.e. the current subroutine returns), a breakpoint, HALT, or
-    // the tick limit. For "step out". Needs the flame/CCT tracker enabled.
-    bool runUntilReturn(size_t targetDepth, int maxTicks);
 
     // Шаг с обходом (F8 отладчика, MCP bk_step_over): вызов — JSR или EMT/TRAP/IOT/BPT —
     // прогоняется до команды за ним (с кадрами и точками останова), прочее — один шаг.
     static constexpr int kDebugRunTicks = 20'000'000;   // бюджет прогонов отладчика (~5–7 с БК)
     void stepOver(int maxTicks = kDebugRunTicks);
+    // «До выхода из процедуры» (отладчик, MCP bk_step_out): прогон с кадрами до команды
+    // передачи управления, поднявшей SP выше уровня кадра — RTS/RTI/RTT/MARK, JMP @(SP)+…
+    // Истории вызовов не нужно: уровень кадра — SP на старте, его поднимают только
+    // обычные команды (снятие сохранённого со стека), вложенные вызовы и прерывания
+    // возвращаются не выше него. Останов — на адресе возврата (прерывание, принятое сразу
+    // после возврата, дорабатывается). Returned — вышли, Break — точка останова,
+    // Budget/Halt — не вышли.
+    enum class StepOut { Returned, Break, Budget, Halt };
+    StepOut stepOut(int maxTicks = kDebugRunTicks);
 
     // I/O-register write log (0177600..0177776), captured only while enabled — for
     // debugging how a game programs the keyboard / timer / sound / port.
@@ -756,6 +761,7 @@ private:
     size_t   ioLogCap_ = 2048;
     uint16_t ioLogFilter_ = 0;   // 0 = все адреса страницы В-В
     uint16_t curInstrPc_ = 0;    // PC исполняемой сейчас инструкции (для лога В-В)
+    uint16_t instrEndPc_ = 0, instrEndSp_ = 0;   // PC/SP после самой команды — до ловушки T и прерывания
 
     std::deque<SpkEdge> spkLog_; // фронты динамика (capped ring)
     bool   spkLogOn_ = false;

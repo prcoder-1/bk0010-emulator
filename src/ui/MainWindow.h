@@ -162,6 +162,7 @@ private:
     // Мышь «Марсианка»: движение мыши ПК над экраном → шаги шара (marsScaleX_/Y_ точек экрана
     // на шаг по своей оси); средняя кнопка — захват (курсор спрятан, движение относительное).
     QAction* mouseAction_ = nullptr;
+    QAction* stepOutAction_ = nullptr;   // «до выхода из процедуры» — только в отладчике
     int marsScaleX_ = 8, marsScaleY_ = 3;
     double marsAccX_ = 0, marsAccY_ = 0;
     QPoint marsLast_;
@@ -183,6 +184,7 @@ private:
     void stepInto();
     void stepOver();
     void runToCursor();                  // F4: прогнать до инструкции под курсором
+    void stepOut();                      // Shift+F8: доработать до выхода из процедуры
     // Interactive-disassembler annotations (symbols + comments).
     void nameCursorSymbol();             // N: name/rename the symbol at the cursor
     void commentCursor();                // ;: edit the comment at the cursor
