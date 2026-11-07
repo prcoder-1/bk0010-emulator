@@ -315,12 +315,46 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         }
     }
 
+    // ---- Подсказка внизу: сначала функциональные клавиши (ярко), с новой строки —
+    // остальное (приглушённо); перенос по целым пунктам ----
+    struct HelpItem { const char* key; const char* desc; };
+    static const HelpItem kHelpF[] = {
+        {"F4", "до курсора"}, {"F7", "шаг"}, {"F8", "шаг с обходом"}, {"Shift+F8", "до выхода из процедуры"},
+        {"F9", "точка останова"}, {"F11", "цвет/ч-б"}, {"F12/Esc", "продолжить"},
+    };
+    static const HelpItem kHelpMore[] = {
+        {"↑↓ PgUp/PgDn", "код"}, {"[ ]", "память"}, {"G", "адрес"}, {"Enter ←→", "переход"},
+        {"X", "ссылки"}, {"N ;", "имя, комм."}, {"B/W/S/P U", "данные/код"}, {"ЛКМ", "выбор/правка"}, {"ПКМ", "точка"},
+    };
+    QFont helpFont = mono; helpFont.setPixelSize(qMax(9, fs * 3 / 4));
+    QFont helpFontF = helpFont; helpFontF.setBold(true);
+    QFontMetrics hfm(helpFont), hfmF(helpFontF);
+    struct HelpLine { bool f; std::vector<const HelpItem*> items; };
+    std::vector<HelpLine> helpLines;
+    const int helpGap = hfm.horizontalAdvance("   ");
+    auto helpItemW = [&](const HelpItem& h, bool f) {
+        return (f ? hfmF : hfm).horizontalAdvance(QString::fromUtf8(h.key) + "-" + QString::fromUtf8(h.desc));
+    };
+    auto layoutHelp = [&](const HelpItem* b, const HelpItem* e, bool f) {
+        helpLines.push_back({f, {}});
+        int x = 0;
+        for (const HelpItem* h = b; h != e; ++h) {
+            const int w = helpItemW(*h, f);
+            if (!helpLines.back().items.empty() && x + helpGap + w > W - 2 * margin) { helpLines.push_back({f, {}}); x = 0; }
+            x += (helpLines.back().items.empty() ? 0 : helpGap) + w;
+            helpLines.back().items.push_back(h);
+        }
+    };
+    layoutHelp(std::begin(kHelpF), std::end(kHelpF), true);
+    layoutHelp(std::begin(kHelpMore), std::end(kHelpMore), false);
+    const int helpLs = hfm.lineSpacing();
+
     // ---- Disassembly panel (left) ----
-    // Reserve a band at the bottom for the help line and size the panels snugly
+    // Reserve a band at the bottom for the help lines and size the panels snugly
     // to their content, so the gap after the frame is larger than the padding
     // left inside it after the last line.
     int dTop = regRect.bottom() + margin;
-    int helpTop = (H - 4) - lineH_;             // top of the help-line band
+    int helpTop = (H - 4) - hfmF.ascent() - (static_cast<int>(helpLines.size()) - 1) * helpLs;   // top of the help band
     int panelBottomMax = helpTop - margin;      // panels end >= margin above the help line
     disasmLines_ = (panelBottomMax - dTop - 8) / lineH_ - 1;
     if (disasmLines_ < 1) disasmLines_ = 1;
@@ -612,16 +646,26 @@ void DebuggerOverlay::paintEvent(QPaintEvent*) {
         gy += lineH_;
     }
 
-    // ---- Help line ---- (slightly smaller font so all the hints fit on one line)
-    QFont helpFont = mono; helpFont.setPixelSize(qMax(9, fs * 3 / 4));
-    p.setFont(helpFont);
-    QFontMetrics hfm(helpFont);
-    p.setPen(QColor(180, 200, 255));
-    QString help = QString::fromUtf8(
-        "F12-выход  F7/F8-шаг  Shift+F8-до выхода  F4-до курсора  F9-тчк  Esc-продолж  ↑↓-курсор  G-переход  Enter-цель  X-ссылки  ←→-назад/вперёд  "
-        "N-имя ;-коммент  данные:B/W/S/P U-код  ЛКМ-по адресу-переход  ПКМ-тчк  "
-        "ЛКМ по регистру/стеку/памяти-правка (0-7, Enter, Esc)");
-    p.drawText(margin, H - 4, hfm.elidedText(help, Qt::ElideRight, W - 2 * margin));
+    // ---- Help lines (slightly smaller font) ----
+    const int nHelp = static_cast<int>(helpLines.size());
+    for (int i = 0; i < nHelp; ++i) {
+        const HelpLine& ln = helpLines[i];
+        p.setFont(ln.f ? helpFontF : helpFont);
+        const QFontMetrics& lm = ln.f ? hfmF : hfm;
+        // Под панелями через тот же отступ, что между ними: остаток от целого числа строк
+        // дизассемблера уходит к нижнему краю, а не в зазор над подсказкой.
+        const int y = disasmRect_.bottom() + margin + hfmF.ascent() + i * helpLs;
+        int x = margin;
+        for (const HelpItem* h : ln.items) {
+            const QString key = QString::fromUtf8(h->key), desc = "-" + QString::fromUtf8(h->desc);
+            p.setPen(ln.f ? QColor(255, 240, 120) : QColor(150, 175, 220));
+            p.drawText(x, y, key);
+            x += lm.horizontalAdvance(key);
+            p.setPen(ln.f ? QColor(225, 232, 255) : QColor(130, 145, 175));
+            p.drawText(x, y, desc);
+            x += lm.horizontalAdvance(desc) + helpGap;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -896,7 +896,7 @@ void MainWindow::setPaused(bool paused) {
         overlay_->followPc();
         overlay_->show();
         overlay_->raise();
-        status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, Shift+F8 до выхода, F9 точка, Esc продолжить, F12 выход");
+        status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, Shift+F8 до выхода, F4 до курсора, F9 точка, Esc продолжить, F12 выход");
     } else {
         overlay_->hide();
         status_->setText("Выполнение");
