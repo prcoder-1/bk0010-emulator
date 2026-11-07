@@ -46,6 +46,8 @@ public:
     // восьмеричными цифрами. Пока правка идёт, MainWindow отдаёт клавиши сюда:
     // цифры 0-7 набирают значение, Backspace стирает, Enter применяет, Esc отменяет.
     bool editing() const { return editTarget_ != EditTarget::None; }
+    // БК работает при открытом окне: панели показывают живое состояние, правка мышью выключена.
+    void setLive(bool on) { live_ = on; if (on) cancelEdit(); update(); }
     bool handleEditKey(QKeyEvent* e);   // true = клавиша использована правкой
 
 protected:
@@ -57,6 +59,7 @@ private:
     bk::Board* board_;
     uint16_t disasmTop_ = 0;         // first address shown in the disasm panel
     uint16_t cursorAddr_ = 0;        // selected disasm line (naming/commenting target)
+    bool live_ = false;              // БК работает (окно открыто без останова)
     uint16_t memAddr_   = 01000;     // first address shown in the memory panel
     int lineH_ = 14;                 // pixel height of a text line (recomputed)
     int disasmLines_ = 20;

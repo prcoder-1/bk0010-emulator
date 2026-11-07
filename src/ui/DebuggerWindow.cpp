@@ -277,7 +277,7 @@ void DebuggerWindow::paintEvent(QPaintEvent*) {
     p.drawText(rx + cw * 12, ry + 2 * lineH_, QString("[%1]").arg(flagsStr(cpu.psw)));
     p.setPen(fg);
     p.drawText(rx + cw * 24, ry + 2 * lineH_,
-        QString(cpu.halted() ? "СОСТ: ОСТАНОВ (HALT)" : "СОСТ: ПАУЗА"));
+        QString(cpu.halted() ? "СОСТ: ОСТАНОВ (HALT)" : live_ ? "СОСТ: РАБОТА" : "СОСТ: ПАУЗА"));
 
     // ---- Breakpoints panel (top strip, right of the registers) ----
     // Lists the installed breakpoints; LMB jumps the disassembler there, RMB
@@ -324,7 +324,7 @@ void DebuggerWindow::paintEvent(QPaintEvent*) {
     struct HelpItem { const char* key; const char* desc; };
     static const HelpItem kHelpF[] = {
         {"F4", "до курсора"}, {"F7", "шаг"}, {"F8", "шаг с обходом"}, {"Shift+F8", "до выхода из процедуры"},
-        {"F9", "точка останова"}, {"F11", "цвет/ч-б"}, {"F12/Esc", "продолжить"},
+        {"F9", "точка останова"}, {"F11", "цвет/ч-б"}, {"F12", "пуск/стоп"}, {"Esc", "закрыть"},
     };
     static const HelpItem kHelpMore[] = {
         {"↑↓ PgUp/PgDn", "код"}, {"[ ]", "память"}, {"G", "адрес"}, {"Enter ←→", "переход"},
@@ -760,6 +760,7 @@ void DebuggerWindow::drawEditField(QPainter& p, int x, int baselineY, const QFon
 
 void DebuggerWindow::mousePressEvent(QMouseEvent* e) {
     const QPoint pos = e->pos();
+    if (live_) return;               // правка и точки — только в останове
     // Идёт правка: клик в стороне — отмена (чтобы не залипало).
     if (editing()) { cancelEdit(); return; }
     // Панель регистров: клик по значению начинает его правку.

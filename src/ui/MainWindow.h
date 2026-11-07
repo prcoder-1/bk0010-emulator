@@ -178,7 +178,9 @@ private:
     // Окно профилировщика создаётся при первом открытии и попадает в profilers_; трасса
     // включается (flame/spans — ещё дерево вызовов и хронология).
     template <class W> void openProfiler(W*& w, QSize size, bool flame = false, bool spans = false);
-    void setPaused(bool paused);
+    // false — продолжить; hideDebugger = false (F12) оставляет окно отладчика открытым
+    // с живым состоянием.
+    void setPaused(bool paused, bool hideDebugger = true);
     void showDebugger();                 // показать окно отладчика (в первый раз — расставить)
     void setSuspended(bool suspended);   // simple pause (Pause key), no debugger
     void stepInto();

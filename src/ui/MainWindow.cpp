@@ -216,7 +216,7 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     board_->setAzVga(azVgaAction_->isChecked());
     connect(azVgaAction_, &QAction::toggled, this, &MainWindow::setAzVga);
     emu->addAction("&Пауза", this, [this]{ setSuspended(!suspended_); }, QKeySequence(Qt::Key_Pause));
-    emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_); }, QKeySequence("F12"));
+    emu->addAction("&Отладчик (Soft-ICE)", this, [this]{ setPaused(!paused_, false); }, QKeySequence("F12"));
     emu->addAction("Экранная &клавиатура БК…", this, &MainWindow::openKeyboard);
 
     // --- Машина: БК-0010-01 или БК-0011М и её оборудование: СМК-512, AY, джойстик ---
@@ -645,7 +645,7 @@ void MainWindow::runOneSlice(int kSlices) {
         else if (video_->frames() % 25 == 0) updateVideoLabel();
     }
     frameDone_ = false;
-    if (paused_) debugger_->update();
+    if (debugger_->isVisible()) debugger_->update();   // и при работе: живые регистры/память
     if (memvis_ && memvis_->isVisible()) memvis_->refresh();
     if (smkram_ && smkram_->isVisible()) smkram_->refresh();
     if (bkram_ && bkram_->isVisible()) bkram_->refresh();
@@ -758,7 +758,11 @@ void MainWindow::changeEvent(QEvent* e) {
 bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
     if (obj == debugger_) {
         if (e->type() == QEvent::KeyPress) { keyPressEvent(static_cast<QKeyEvent*>(e)); return true; }
-        if (e->type() == QEvent::Close && paused_) setPaused(false);   // крестик окна — «продолжить»
+        if (e->type() == QEvent::KeyRelease) { keyReleaseEvent(static_cast<QKeyEvent*>(e)); return true; }
+        if (e->type() == QEvent::Close) {                  // крестик окна — «продолжить»
+            QSettings().setValue("debuggerGeometry", debugger_->saveGeometry());
+            if (paused_) setPaused(false);
+        }
         return QMainWindow::eventFilter(obj, e);
     }
     if (obj != screen_ || !board_->mouse().enabled() || paused_ || suspended_)
@@ -902,8 +906,9 @@ QString MainWindow::chooseTapeProgram(const QString& wav) {
     return wav + QString("#%1").arg(idx[items.indexOf(pick)] + 1);
 }
 
-void MainWindow::setPaused(bool paused) {
+void MainWindow::setPaused(bool paused, bool hideDebugger) {
     paused_ = paused;
+    debugger_->setLive(!paused_);
     stepOutAction_->setEnabled(paused_);
     if (paused_) setMarsGrab(false);
     phase_ = 0;                     // start the next run at a fresh frame boundary
@@ -912,7 +917,11 @@ void MainWindow::setPaused(bool paused) {
         debugger_->setCursor(board_->cpu().pc());   // selection starts at PC
         showDebugger();
         debugger_->followPc();
-        status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, Shift+F8 до выхода, F4 до курсора, F9 точка, Esc продолжить, F12 выход");
+        status_->setText("ОТЛАДЧИК: F7 шаг, F8 через, Shift+F8 до выхода, F4 до курсора, F9 точка, "
+                         "F12 продолжить, Esc продолжить и закрыть");
+    } else if (debugger_->isVisible() && !hideDebugger) {
+        activateWindow();                   // клавиатура — снова БК, окно отладчика остаётся
+        status_->setText("Выполнение (F12 — остановить в отладчике)");
     } else {
         if (debugger_->isVisible()) {
             QSettings().setValue("debuggerGeometry", debugger_->saveGeometry());
@@ -1525,7 +1534,7 @@ bool MainWindow::event(QEvent* e) {
 
 void MainWindow::keyPressEvent(QKeyEvent* e) {
     // F12 toggles the debugger regardless of state.
-    if (e->key() == Qt::Key_F12) { setPaused(!paused_); e->accept(); return; }
+    if (e->key() == Qt::Key_F12) { setPaused(!paused_, false); e->accept(); return; }
     // Pause key toggles the simple emulation freeze.
     if (e->key() == Qt::Key_Pause) { setSuspended(!suspended_); e->accept(); return; }
 

@@ -93,7 +93,8 @@ Two layers, deliberately decoupled:
   fast enough), and hosts `GlScreen` + the debugger widgets. The GUI paces itself by
   REAL time (`QElapsedTimer`), not by timer ticks: a frame is 20.48 ms, which is not
   an integral number of milliseconds. The Soft-ICE debugger (`DebuggerWindow`) is a SEPARATE
-  top-level window, shown by `setPaused(true)` and hidden on «continue»; its keys reach
+  top-level window, shown by `setPaused(true)`; Esc/close continue and hide it, F12 continues with
+  the window open and live (`setPaused(false, false)`, `DebuggerWindow::setLive`); its keys reach
   `MainWindow::keyPressEvent` through an event filter, and every menu action with a shortcut is
   also added to it so F12/Shift+F8/F11/Ctrl+… work there.
 - **`src/mcp/`** — `McpServer`: a headless MCP server (`--server`) exposing the core
