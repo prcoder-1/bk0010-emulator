@@ -58,19 +58,42 @@ void DebuggerWindow::snapshotRegs() {
     havePrev_ = true;
 }
 
+uint16_t DebuggerWindow::nextLine(uint16_t a) const {
+    if (const bk::DataItem* di = board_->dataAt(a)) return a + (di->len ? di->len : 2);
+    return a + bk::disasm(board_->memory(), a).words * 2;
+}
+
+// Назад PDP-11 однозначно не дизассемблируется (команда — 1..3 слова): перебираем старты
+// на 1..3 слова на строку выше и берём те, с которых разбор вперёд ровно попадает на `pc`.
+// Из них — с наибольшим числом строк по адресам, которые реально исполнялись (это точно
+// начала команд), при равенстве — самый дальний (дольше синхронизировался).
+uint16_t DebuggerWindow::topAbove(uint16_t pc, int above) const {
+    if (above <= 0) return pc;
+    const bk::Trace& tr = board_->trace();
+    uint16_t best = pc;
+    int bestScore = -1;
+    std::vector<uint16_t> lines;
+    for (int d = above * 6; d >= above * 2; d -= 2) {
+        if (d > pc) continue;                       // не заворачиваем через 0
+        lines.clear();
+        uint16_t a = static_cast<uint16_t>(pc - d);
+        while (a < pc && static_cast<uint16_t>(pc - a) <= d) { lines.push_back(a); a = nextLine(a); }
+        if (a != pc || static_cast<int>(lines.size()) < above) continue;
+        int score = 0;
+        for (size_t i = lines.size() - above; i < lines.size(); ++i) score += tr.execCount(lines[i]) != 0;
+        if (score > bestScore) { bestScore = score; best = lines[lines.size() - above]; }
+    }
+    return bestScore >= 0 ? best : pc;
+}
+
 void DebuggerWindow::moveCursor(int lines) {
-    const bk::Memory& mem = board_->memory();
-    auto stepFwd = [&](uint16_t a) -> uint16_t {
-        if (const bk::DataItem* di = board_->dataAt(a)) return a + (di->len ? di->len : 2);
-        return a + bk::disasm(mem, a).words * 2;
-    };
-    if (lines > 0) { for (int i = 0; i < lines; ++i) cursorAddr_ = stepFwd(cursorAddr_); }
+    if (lines > 0) { for (int i = 0; i < lines; ++i) cursorAddr_ = nextLine(cursorAddr_); }
     else           { cursorAddr_ += lines * 2; }   // approximate backward move (1 word/line)
     // Re-anchor the disasm window if the cursor scrolled out of view.
     uint16_t a = disasmTop_; bool vis = false;
     for (int i = 0; i < disasmLines_; ++i) {
         if (a == cursorAddr_) { vis = true; break; }
-        a = stepFwd(a);
+        a = nextLine(a);
     }
     if (!vis) disasmTop_ = cursorAddr_;
     update();
@@ -362,6 +385,12 @@ void DebuggerWindow::paintEvent(QPaintEvent*) {
     int panelBottomMax = helpTop - margin;      // panels end >= margin above the help line
     disasmLines_ = (panelBottomMax - dTop - 8) / lineH_ - 1;
     if (disasmLines_ < 1) disasmLines_ = 1;
+    // «РАБОТА»: окно следует за исполнением — PC на средней строке, курсор на нём. Здесь, а не
+    // в MainWindow: число строк известно только после раскладки.
+    if (live_) {
+        disasmTop_ = topAbove(cpu.pc(), disasmLines_ / 2);
+        cursorAddr_ = cpu.pc();
+    }
     int dH = (disasmLines_ + 1) * lineH_ + 8;   // snug: title + lines + small pad
     disasmRect_ = QRect(margin, dTop, (W - 3 * margin) * 3 / 5, dH);
     p.fillRect(disasmRect_, panelBg);

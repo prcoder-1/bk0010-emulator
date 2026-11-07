@@ -98,6 +98,9 @@ private:
     // Static branch/call/jump target of the instruction at `addr` (false if it is
     // register-indirect or not a control-flow instruction).
     bool targetOf(uint16_t addr, uint16_t& out) const;
+    uint16_t nextLine(uint16_t a) const;   // адрес следующей строки дизассемблера (данные — целиком)
+    // Верх окна дизассемблера, при котором `pc` стоит `above` строками ниже (режим «РАБОТА»).
+    uint16_t topAbove(uint16_t pc, int above) const;
     // If the pixel `relX` (relative to the instruction-text origin) falls on an
     // address token in `text` (a symbol name, or an octal number not prefixed by
     // '#'), returns its address. Used to make operand addresses click-to-navigate.
