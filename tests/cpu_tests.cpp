@@ -1621,6 +1621,63 @@ int main(int argc, char** argv) {
         CHECK(b.vp037().scanline() >= 230, "к трём четвертям кадра луч дошёл до нижних строк");
     }
 
+    // ---- GigaScreen: экран через кадр — смесь цветов, а не мерцание ----
+    // Как в демо Babylon_gigascreen (БК-0011М): кадровое прерывание переключает экран
+    // 5 <-> 6 (бит 15 регистра 0177662), и на ЭЛТ глаз видит смесь двух картинок.
+    SECTION("GigaScreen: экран через кадр — смесь цветов, остальное — как есть")
+    {
+        CHECK(GigaScreen::mix(0xFF000000, 0xFFFFFFFF) == 0xFFBCBCBC, "чёрный с белым — 0xBCBCBC (смесь света, не кодов)");
+        CHECK(GigaScreen::mix(0xFFAA00FF, 0xFFAAFF00) == GigaScreen::mix(0xFFAAFF00, 0xFFAA00FF), "смесь симметрична");
+        CHECK(GigaScreen::mix(0xFF700000, 0xFF700000) == 0xFF700000, "цвет с самим собой — он же");
+        const uint32_t c1 = 0xFFAAFF00, c2 = 0xFFAA00FF, c3 = 0xFFAA0000;   // палитра 10
+        for (int scan = 0; scan < 2; ++scan) {
+            const std::string how = scan ? " (построчно)" : " (покадрово)";
+            Board b;
+            b.setMachine(Machine::Bk0011m); b.loadRoms(BK_DEFAULT_ROM_DIR); b.reset();
+            b.setScanlineRender(scan);
+            b.setGigaScreen(true);
+            Memory& m = b.memory();
+            std::memset(m.ram11() + 5 * Memory::PAGE11_BYTES, 0125, Memory::PAGE11_BYTES);   // экран 5: цвет 1
+            std::memset(m.ram11() + 6 * Memory::PAGE11_BYTES, 0252, Memory::PAGE11_BYTES);   // экран 6: цвет 2
+            loadProg(m, 01000, {0012737, 0005000, 0177662,     // MOV #5000,@#177662 — палитра 10, экран 5, IRQ
+                                0012737, 0001100, 0000100,     // MOV #1100,@#100
+                                0005037, 0000102,              // CLR @#102
+                                0106427, 0000000,              // MTPS #0
+                                0000777});                     // BR .
+            loadProg(m, 01100, {0062737, 0100000, 0001200,     // ADD #100000,@#1200 — другой экран
+                                0013737, 0001200, 0177662,     // MOV @#1200,@#177662
+                                0000002});                     // RTI
+            m.pokeWord(01200, 005000);
+            b.cpu().reset(01000, 0340);
+            b.cpu().r[6] = 0700;
+            auto frame = [&] {
+                b.runFrame();
+                if (!scan) b.screen().render(m);   // покадровую отрисовку делает тот, кто показывает
+            };
+            for (int i = 0; i < 10; ++i) frame();
+            const int mid = 128 * Screen::TEX_W + 256;
+            const uint32_t raw0 = b.screen().pixels()[mid], shown0 = b.screenFrame().px[mid];
+            frame();
+            const uint32_t raw1 = b.screen().pixels()[mid], shown1 = b.screenFrame().px[mid];
+            CHECK(((raw0 == c1 && raw1 == c2) || (raw0 == c2 && raw1 == c1)), ("кадры по очереди с экранов 5 и 6" + how).c_str());
+            CHECK(shown0 == GigaScreen::mix(c1, c2) && shown1 == shown0, ("на экране — смесь, одна и та же в каждом кадре" + how).c_str());
+            // Изменение, которое не мигает, видно сразу и без смеси.
+            m.ram11()[5 * Memory::PAGE11_BYTES] = m.ram11()[6 * Memory::PAGE11_BYTES] = 0377;
+            frame();
+            CHECK(b.screenFrame().px[0] == c3 && b.screenFrame().px[mid] == shown0,
+                  ("постоянное изменение — как есть, мигающие точки — смесью" + how).c_str());
+            if (!scan) {
+                // Шаг в отладчике: изменённая после кадра точка — как есть.
+                m.ram11()[b.memory().videoPage() * Memory::PAGE11_BYTES + 128 * 64 + 32] = 0;
+                b.screen().render(m);
+                CHECK(b.screenFrame().px[mid] == 0xFF000000 && b.screenFrame().px[mid + 8] == shown0,
+                      "точка, изменённая после кадра, — как есть, соседние — смесью");
+            }
+            b.setGigaScreen(false);
+            CHECK(b.screenFrame().px == b.screen().pixels(), ("выключенный GigaScreen — кадр как есть" + how).c_str());
+        }
+    }
+
     // ---- Экранная кодировка БК -> UTF-8 ----
     SECTION("Экранная кодировка БК -> UTF-8")
     {

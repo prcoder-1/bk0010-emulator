@@ -534,10 +534,14 @@ QJsonArray McpServer::toolDefs() const {
                 {"start", addrArg}, {"end", addrArg},
                 {"max", P("integer", "Max changed cells to list per bit (default 8)")}})));
     t.append(tool("bk_screenshot", "Render the BK screen and return it as an inline PNG image (so you "
-                  "can see it directly); optionally run frames first and/or write it to a file.",
+                  "can see it directly); optionally run frames first and/or write it to a file. "
+                  "GigaScreen: a pixel whose colour alternates every frame (A, B, A — a program flipping "
+                  "screen pages or palettes each frame) is shown as the eye sees it on a CRT, the two "
+                  "colours mixed in linear light; `raw` gives the frame as drawn.",
         schema({{"path", P("string", "Optional output PNG path")},
                 {"frames", P("integer", "Run this many frames before the shot (default 0)")},
                 {"mono", P("boolean", "512x256 monochrome (default false=colour)")},
+                {"raw", P("boolean", "The last frame as drawn, without GigaScreen mixing (default false)")},
                 {"tv", P("boolean", "With AZБК: the BK's own screen instead of the AZ VGA picture")}})));
     t.append(tool("bk_audio", "Capture the emulator's sound output (piezo 0177716, AY in ABC stereo — A left, "
                   "B centre, C right with GID's panning — and Covox, stereo on word writes as on the "
@@ -1633,7 +1637,8 @@ QJsonObject McpServer::tool_bk_screenshot(const QJsonObject& args) {
     }
     // С AZБК — его VGA 1024x768, если не попросили экран самой БК (tv).
     const bool vga = board_.azbk() && board_.azVga() && !args.value("tv").toBool(false);
-    const uint32_t* px = vga ? board_.displayFrame().px : board_.screen().pixels();
+    const uint32_t* px = vga ? board_.displayFrame().px
+                       : args.value("raw").toBool(false) ? board_.screen().pixels() : board_.screenFrame().px;
     const int w = vga ? bk::Azbk::VGA_W : bk::Screen::TEX_W, h = vga ? bk::Azbk::VGA_H : bk::Screen::TEX_H;
     QImage img = QImage(reinterpret_cast<const uchar*>(px), w, h, QImage::Format_ARGB32).copy();
     QString path = args.value("path").toString(), note = vga ? "AZБК VGA 1024x768" : "BK screen";

@@ -239,6 +239,19 @@ void Board::flushRaster() {
     if (scanlineRender_) renderRasterTo(vp037_.fieldLine(), vp037_.lineWord());
 }
 
+// Чередование кадров видно, только если смотреть КАЖДЫЙ кадр, а GUI, снимки и MCP берут
+// экран когда придётся. Поэтому кадр запоминается здесь, на границе; при покадровой
+// отрисовке — исходником (экранное ОЗУ и регистры), рисуется он при показе.
+void Board::captureFrame() {
+    if (scanlineRender_) {
+        flushRaster();
+        giga_.push(screen_.pixels());
+    } else {
+        screen_.setScroll(scroll_);
+        giga_.push(screen_, mem_.videoRam());
+    }
+}
+
 // Record a frame-synchronisation boundary at the current tick (deduped, capped).
 // The timer may cross zero several times between two register reads, but a game
 // paces one frame per crossing it observes, so one boundary per timerCheck edge
@@ -741,6 +754,7 @@ void Board::reset() {
     spkLog_.clear();
     speaker_ = 0;
     framesSinceReset_ = 0;
+    giga_.reset();
     std::memset(ioLastWrite_, 0, sizeof(ioLastWrite_));
     screen_.setScroll(scroll_);
     // БК-0011М: обе защёлки 0177716 — нули (оба окна — страница 1, ПЗУ в окне 1 нет;
@@ -1099,6 +1113,7 @@ bool Board::powerOn(const Setup& s, const std::string& romDir) {
     setArbitration(s.arb037);
     setCpuPhase(s.cpuPhase);
     setScanlineRender(s.scanline >= 0 ? s.scanline > 0 : bk11());
+    setGigaScreen(s.gigascreen);
     setSmk512(s.smk);                                // при AZ лишь запомнится до снятия платы
     if (!s.diskRom.empty()) setDiskRom(s.diskRom);
     setHddController(s.hddCtl);
@@ -1334,6 +1349,7 @@ void Board::finishLoad(const std::vector<uint8_t>& in, size_t off) {
     cpu_.clearHalt(); cpu_.clearWait();
     screen_.setScroll(scroll_);
     rasterScroll_ = scroll_; scrollLatched_ = true;
+    giga_.reset();                                     // прежние кадры — от другого состояния
     vp037_.setM256(scroll_ & 01000);                   // фаза выровняется на следующем кадре
     loadStateExt(in, off);
 }

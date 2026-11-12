@@ -208,6 +208,18 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
     aspectAction_->setChecked(aspect34);
     aspectAction_->setShortcut(QKeySequence("Ctrl+F11"));
     connect(aspectAction_, &QAction::toggled, this, &MainWindow::setPixelAspect34);
+    // Программа меняет страницу экрана или палитру каждый кадр, а глаз на ЭЛТ видит смесь
+    // цветов; монитор хоста показал бы мерцание.
+    gigaAction_ = emu->addAction("&GigaScreen: смешивать кадры, мигающие через один");
+    gigaAction_->setCheckable(true);
+    gigaAction_->setChecked(QSettings().value("gigascreen", true).toBool());
+    board_->setGigaScreen(gigaAction_->isChecked());
+    connect(gigaAction_, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue("gigascreen", on);
+        board_->setGigaScreen(on);
+        status_->setText(on ? "GigaScreen: точки, мигающие через кадр, — смесью двух цветов"
+                            : "GigaScreen выключен: кадры как есть");
+    });
     // С AZБК на экране — его VGA; переключатель показывает экран самой БК (её ТВ-выход).
     azVgaAction_ = emu->addAction("Экран &VGA платы AZБК (иначе — экран БК)");
     azVgaAction_->setCheckable(true);
@@ -638,7 +650,7 @@ void MainWindow::runOneSlice(int kSlices) {
             bk::VideoCapture::toVga(fr.px, vgaFrame_.data());
             px = vgaFrame_.data();
         } else if (video_->srcWidth() == bk::Screen::TEX_W && fr.w != bk::Screen::TEX_W) {
-            px = board_->screen().pixels();
+            px = board_->screenFrame().px;
         }
         video_->addFrame(px, videoAudio_.data(), video_->hasAudio() ? videoAudio_.size() / 2 : 0);
         if (!video_->error().empty()) stopVideo();
@@ -1408,6 +1420,13 @@ void MainWindow::openAzRam() {
 
 void MainWindow::applyScanline() {
     board_->setScanlineRender(scanlineOverride_ >= 0 ? scanlineOverride_ > 0 : board_->bk11());
+}
+
+void MainWindow::setGigaScreenOverride(int v) {
+    if (v < 0) return;
+    board_->setGigaScreen(v > 0);
+    const QSignalBlocker b(gigaAction_);   // ключ настройку не меняет
+    gigaAction_->setChecked(v > 0);
 }
 
 void MainWindow::syncMachineMenu() {

@@ -105,6 +105,7 @@ struct CliOptions {
     // 0 — `MOV (R0),R1` = 28 тактов, 1 — 24.
     int  cpuPhase = 0;
     int  scanline = -1;                   // построчная отрисовка: -1 — по машине (11М — вкл)
+    int  gigascreen = -1;                 // смешивание кадров: -1 — по умолчанию (вкл; GUI — настройка)
     // Носители. Образы по умолчанию открываются ТОЛЬКО НА ЧТЕНИЕ — чужой рабочий образ
     // портить нельзя; --disk-rw / --hdd-rw разрешают запись обратно в файл.
     QString disk, diskB, hdd, hddB;
@@ -130,6 +131,7 @@ struct CliOptions {
         st.machine = machine;
         st.ay = ay; st.ay2 = ay2; st.covox = covox;
         st.scanline = scanline;
+        st.gigascreen = gigascreen != 0;
         // По умолчанию плата стоит; у БК-0010 1985 года её нет — она закрыла бы Фокал.
         st.smk = smk < 0 ? machine != bk::Machine::Bk0010Focal : smk != 0;
         st.mstd = mstd; st.arb037 = arb037; st.cpuPhase = cpuPhase;
@@ -193,6 +195,8 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
         else if (a == "--mono") o.color = false;
         else if (a == "--scanline") o.scanline = 1;
         else if (a == "--no-scanline") o.scanline = 0;
+        else if (a == "--gigascreen") o.gigascreen = 1;
+        else if (a == "--no-gigascreen") o.gigascreen = 0;
         else if (a == "--machine" && hasVal) {
             if (!bk::Board::parseMachineChoice(args[++i].toLower().toStdString(), o.machineChoice))
                 return fail("--machine: ожидается auto, bk10 или bk11m");
@@ -482,7 +486,7 @@ static int runHeadless(const CliOptions& o) {
         if (video.active()) {
             if (!board.scanlineRender()) board.screen().render(board.memory());
             board.sound().takeCaptured(videoAudio);
-            video.addFrame(board.azbk() ? board.az().frame() : board.screen().pixels(), videoAudio.data(), videoAudio.size() / 2);
+            video.addFrame(board.azbk() ? board.az().frame() : board.screenFrame().px, videoAudio.data(), videoAudio.size() / 2);
         }
     }
     board.sound().setCapture(false);
@@ -797,6 +801,10 @@ static void printHelp(const char* prog) {
         "  --no-arb037            «идеальная» память без ожиданий 037\n"
         "  --scanline             построчная отрисовка по лучу (на БК-0011М — по умолчанию)\n"
         "  --no-scanline          выключить построчную отрисовку\n"
+        "  --no-gigascreen        не смешивать кадры: точка, мигающая через кадр (GigaScreen —\n"
+        "                         смена страницы или палитры каждый кадр), видна как есть, а не\n"
+        "                         смесью двух цветов (по умолчанию смешиваются; GUI — настройка,\n"
+        "                         --gigascreen включает)\n"
         "  --mono                 чёрно-белый режим экрана (безголовый режим)\n"
         "  --aspect34, --no-aspect34  неквадратный пиксель БК в окне (GUI; по умолчанию вкл)\n"
         "\n"
@@ -895,6 +903,7 @@ int main(int argc, char** argv) {
     azo.unitsRw = o.diskRw;
     MainWindow w(o.romDir, o.machineChoice, o.machine, o.smk, o.aspect34, o.ay, o.ay2, o.covox, azo);
     w.setScanlineOverride(o.scanline);
+    w.setGigaScreenOverride(o.gigascreen);
     w.setMstd(o.mstd);
     w.setArbitration(o.arb037);
     w.setCpuPhase(o.cpuPhase);

@@ -111,6 +111,8 @@ public:
     void setCovox(bool on);             // Covox — ЦАП на 0177714
     // Построчная отрисовка: -1 — по машине (БК-0011М — вкл), 0/1 — принудительно.
     void setScanlineOverride(int v) { scanlineOverride_ = v; applyScanline(); }
+    // GigaScreen (смешивание чередующихся кадров): -1 — настройка, 0/1 — на этот запуск.
+    void setGigaScreenOverride(int v);
     void setMstd(bool on) { if (board_ && on != board_->memory().mstd()) { board_->setMstd(on); resetMachine(); } }
 
 protected:
@@ -253,6 +255,7 @@ private:
     QAction* azVgaAction_ = nullptr;       // галка «экран VGA AZБК»
     void syncMachineMenu();                // галки меню — по состоянию платы (без сигналов)
     QAction* aspectAction_ = nullptr;   // галка «Пиксели 3:4»
+    QAction* gigaAction_ = nullptr;     // галка «GigaScreen»
     QString lastBin_;
     // С чего машина запущена — сброс (Ctrl+R, смена платы или машины) повторяет этот пуск.
     enum class Boot { None, Bin, Disk, Hdd };

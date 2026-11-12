@@ -20,10 +20,12 @@ public:
     void setPalette(int p) { palette_ = p & 15; }
     int  palette() const { return palette_; }
     void setScroll(uint16_t reg) { scroll_ = reg; }
+    uint16_t scroll() const { return scroll_; }
 
     // Rebuild the RGBA texture from the current screen RAM contents.
     // Отрисовать весь кадр текущим значением скролла (покадровый режим).
-    void render(const Memory& mem);
+    void render(const Memory& mem) { render(mem.videoRam()); }
+    void render(const uint8_t* vram);   // 16 Кбайт экранного ОЗУ (64 байта на строку)
     // Отрисовать одну строку заданным значением регистра 0177664 — построчный режим,
     // которым Board рисует кадр по мере движения луча (см. Board::setScanlineRender).
     void renderLine(const Memory& mem, int y, uint16_t scrollReg) { renderSpan(mem, y, scrollReg, 0, WORDS_PER_LINE); }
@@ -31,7 +33,10 @@ public:
     // смена палитры или экранного буфера посреди строки (БК-0011М) видна ровно с
     // того слова, где стоял луч.
     static constexpr int WORDS_PER_LINE = 32;
-    void renderSpan(const Memory& mem, int y, uint16_t scrollReg, int fromWord, int toWord);
+    void renderSpan(const Memory& mem, int y, uint16_t scrollReg, int fromWord, int toWord) {
+        renderSpan(mem.videoRam(), y, scrollReg, fromWord, toWord);
+    }
+    void renderSpan(const uint8_t* vram, int y, uint16_t scrollReg, int fromWord, int toWord);
 
     const uint32_t* pixels() const { return tex_; }
 

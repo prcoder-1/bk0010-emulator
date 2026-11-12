@@ -70,6 +70,8 @@ for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox
 `--tape <file.wav>` / `--tape-play` / `--tape-remote` (cassette in the tape recorder) and
 `--wav2bin <file.wav>` (catalogue + extract to .BIN, `docs/tape.md`); a positional `.wav` (or
 `x.wav#N`) loads the tape's program like a .BIN,
+`--no-gigascreen` / `--gigascreen` (frame mixing, ON by default in the GUI (setting), headless and MCP; `Board` itself
+starts without it — see GigaScreen below),
 `--scanline` (per-scanline rendering — each line drawn with the palette/screen values live
 when the beam crossed it and the scroll latched for the field, driven off the `Vp037` raster; OFF by default,
 see `Board::setScanlineRender`), `--key <code>`, `--keyframe N`.
@@ -199,6 +201,15 @@ Key cross-cutting facts to know before editing the CPU or screen:
   enables the frame IRQ only with `MOVB #14,@#177663` and hangs on WAIT without it. INSULT
   part 19 then shows its per-line page/palette "checker floor"; a whole-frame renderer shows
   that frame in palette 0 instead (its last write is `CLR @#177662`) — do not "fix" that.
+- **GigaScreen** (`src/core/GigaScreen`): a program flipping the screen page or palette every frame (11M:
+  `Babylon_gigascreen.img`, bit 15 of 0177662 from the 0100 handler) relies on the CRT + eye mixing the two
+  frames; a host monitor shows 48.83 Hz frames unevenly → flicker. `Board::endFrame` captures EVERY finished
+  frame (scanline mode: the pixels; frame mode: 16 KB of video RAM + mode/palette/scroll, rendered only when
+  shown — rendering each frame cost ~10% on the BK-0010); `Board::screenFrame()` (and `displayFrame()`) shows
+  a pixel whose colour went A, B, A as the linear-light mix of A and B, everything else raw (so motion is
+  not blurred), and a pixel changed since the last captured frame (debugger step) raw. Consumers must take
+  the screen through `screenFrame/displayFrame`, not `screen().pixels()` (that stays the raw frame — OCR,
+  `bk_vram`, MCP `bk_screenshot {raw}`). History is cleared by reset and state load.
 - **The scroll register is latched once per field**: 037 loads `0177664` into the line
   address only at ALOAD (lines 278–279, `Vp037::SCROLL_LATCH_LINE`); afterwards the address
   just counts lines. A mid-field write shows from the NEXT frame (`Board::latchScroll`,

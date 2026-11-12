@@ -32,7 +32,7 @@ Screen::Screen() {
 // луч эту строку проходил. Отсюда берутся построчные эффекты (параллакс, «разрезанный»
 // экран): при покадровой отрисовке весь кадр рисуется последним значением скролла,
 // и всё, что игра меняла в середине кадра, теряется.
-void Screen::renderSpan(const Memory& mem, int y, uint16_t scrollReg, int fromWord, int toWord) {
+void Screen::renderSpan(const uint8_t* vram, int y, uint16_t scrollReg, int fromWord, int toWord) {
     if (y < 0 || y >= TEX_H) return;
     if (fromWord < 0) fromWord = 0;
     if (toWord > WORDS_PER_LINE) toWord = WORDS_PER_LINE;
@@ -55,7 +55,7 @@ void Screen::renderSpan(const Memory& mem, int y, uint16_t scrollReg, int fromWo
         return;
     }
     const int memLine = (y + scrollOffset) & 0377;      // 0..255
-    const uint8_t* row = mem.videoRam() + memLine * 64; // 64 bytes/line
+    const uint8_t* row = vram + memLine * 64;           // 64 bytes/line
 
     for (int bx = fromWord * 2; bx < toWord * 2; ++bx) {
         const uint8_t b = row[bx];
@@ -73,8 +73,8 @@ void Screen::renderSpan(const Memory& mem, int y, uint16_t scrollReg, int fromWo
     }
 }
 
-void Screen::render(const Memory& mem) {
-    for (int y = 0; y < TEX_H; ++y) renderLine(mem, y, scroll_);
+void Screen::render(const uint8_t* vram) {
+    for (int y = 0; y < TEX_H; ++y) renderSpan(vram, y, scroll_, 0, WORDS_PER_LINE);
 }
 
 } // namespace bk

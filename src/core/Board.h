@@ -7,6 +7,7 @@
 #include "Memory.h"
 #include "Cpu.h"
 #include "Screen.h"
+#include "GigaScreen.h"
 #include "Speaker.h"
 #include "Vp037.h"
 #include "Vm1Timing.h"
@@ -122,6 +123,11 @@ public:
     // весь кадр рисуется один раз последним значением скролла.
     void setScanlineRender(bool on) { scanlineRender_ = on; }
     bool scanlineRender() const { return scanlineRender_; }
+    // GigaScreen (см. GigaScreen.h): точки, цвет которых меняется через кадр, показывать
+    // смесью двух цветов, как их видит глаз на ЭЛТ. Кадры для этого запоминаются на каждой
+    // границе кадра. По умолчанию ВЫКЛ (GUI, безголовый режим и MCP включают).
+    void setGigaScreen(bool on) { if (on != gigaOn_) { gigaOn_ = on; giga_.reset(); } }
+    bool gigaScreen() const { return gigaOn_; }
     bool arbitration() const { return arb037_; }
     const Vp037& vp037() const { return vp037_; }
 
@@ -215,7 +221,11 @@ public:
     bool azLive() const { return azLive_; }
     Frame displayFrame() {
         if (azOn_ && azVga_) return {az_.renderNow(), Azbk::VGA_W, Azbk::VGA_H};
-        return {screen_.pixels(), Screen::TEX_W, Screen::TEX_H};
+        return screenFrame();
+    }
+    // Экран самой БК, каким его видит глаз: с GigaScreen — со смешанными кадрами.
+    Frame screenFrame() {
+        return {gigaOn_ ? giga_.output(screen_.pixels()) : screen_.pixels(), Screen::TEX_W, Screen::TEX_H};
     }
 
     // Конфигурация машины одним куском — общая для безголового режима и MCP-сервера
@@ -225,6 +235,7 @@ public:
         Machine machine = Machine::Bk0011m;
         int  ay = -1, ay2 = -1, covox = -1, scanline = -1;
         bool smk = true, mstd = false, arb037 = true;
+        bool gigascreen = true;                      // смешивание кадров (GigaScreen)
         bool mouse = false;                          // мышь «Марсианка» на 0177714
         int  cpuPhase = 0;
         std::string diskRom;                         // пусто — прошивка по конфигурации
@@ -618,6 +629,9 @@ private:
 
     bool arb037_ = true;           // моделировать арбитраж 037 (по умолчанию ВКЛ)
     bool scanlineRender_ = false;  // построчная отрисовка экрана
+    bool gigaOn_ = false;          // GigaScreen: смешивание чередующихся кадров
+    GigaScreen giga_;
+    void captureFrame();           // досчитанный кадр — в историю GigaScreen
     int  renderedLine_ = 0;        // следующая строка кадра, ещё не отрисованная
     int  renderedWord_ = 0;        // в строке renderedLine_ уже нарисованы слова [0, renderedWord_)
     uint16_t rasterScroll_ = 01330;  // скролл, защёлкнутый 037 для текущего поля
@@ -794,7 +808,7 @@ private:
     bool breakAt(uint16_t pc) const {
         return !breakpoints_.empty() && breakpoints_.count(pc) && breakAllows(pc);
     }
-    void endFrame() { trace_.tick(); ++framesSinceReset_; }   // кадр досчитан
+    void endFrame() { trace_.tick(); ++framesSinceReset_; if (gigaOn_) captureFrame(); }   // кадр досчитан
     void deliverFrameInterrupts(); // взвести кадровый запрос (11М, таймер AZ) и попробовать выдать
     int  tryDeliverInterrupts();   // выдать взведённые запросы; возвращает такты входа
     int  stepCore();               // one instruction + sound/trace bookkeeping
