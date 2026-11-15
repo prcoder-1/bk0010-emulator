@@ -2815,10 +2815,11 @@ int main(int argc, char** argv) {
                 const double f = Ay8910::DEFAULT_CLOCK / (16.0 * 100);
                 CHECK(edges > f * 0.98 && edges < f * 1.02, "AY: частота тона = clock / (16 · TP)");
                 ay.writeReg(8, 0);
+                for (int i = 0; i < 100; ++i) { ay.advance(1.0 / 44100); ay.takeSample(); }  // ФНЧ выхода успокоился
                 double mn = 1, mx = 0;
                 for (int i = 0; i < 4410; ++i) { ay.advance(1.0 / 44100); const double v = ay.takeSample(); mn = std::min(mn, v); mx = std::max(mx, v); }
                 CHECK(mx - mn < 1e-9, "AY: громкость 0 — тишина");
-                // Стерео ABC с коэффициентами GID: A — влево, B — в центр, C — вправо.
+                // Стерео ABC как у «Мультизвука»: A влево, C вправо, B в оба вполовину, перетекание 9 %.
                 auto pan = [&](int ch) {
                     Ay8910 c;
                     c.writeReg(7, 077); c.writeReg(8 + ch, 15);   // тон и шум выключены — постоянный уровень
@@ -2827,11 +2828,30 @@ int main(int argc, char** argv) {
                     return std::make_pair(l, r);
                 };
                 const auto pa = pan(0), pb = pan(1), pc = pan(2);
-                CHECK(pa.first > 0 && std::abs(pa.first / pa.second - 1.149375 / 0.249375) < 1e-6
+                CHECK(pa.first > 0 && std::abs(pa.second / pa.first - 0.09) < 1e-9
+                      && std::abs(pc.first / pc.second - 0.09) < 1e-9
                       && std::abs(pb.first - pb.second) < 1e-12
-                      && std::abs(pc.second / pc.first - 1.149375 / 0.249375) < 1e-6
+                      && std::abs(pb.first - 0.5 * (pa.first + pa.second)) < 1e-9
                       && std::abs(pa.first - pc.second) < 1e-12,
-                      "AY: стерео ABC как у GID — A влево, B в центр, C вправо");
+                      "AY: стерео ABC как у «Мультизвука» — A влево, C вправо, B вполовину в оба, перетекание 9 %");
+                // ФНЧ выхода 7,5 кГц (ёмкости «Менестреля» и Covox на гнезде платы): основная
+                // гармоника тона 13,4 кГц тише, чем 536 Гц, на −6,2 дБ (ФНЧ) и ещё ~−1,4 дБ
+                // (усреднение в отсчёт 44,1 кГц).
+                auto fund = [&](int tp) {
+                    Ay8910 c;
+                    c.writeReg(0, static_cast<uint8_t>(tp)); c.writeReg(1, static_cast<uint8_t>(tp >> 8));
+                    c.writeReg(7, 076); c.writeReg(8, 15);
+                    const double f = Ay8910::DEFAULT_CLOCK / (16.0 * tp);
+                    double re = 0, im = 0;
+                    for (int i = 0; i < 44100; ++i) {
+                        c.advance(1.0 / 44100);
+                        const double v = c.takeSample();
+                        if (i >= 4410) { re += v * std::cos(2 * M_PI * f * i / 44100); im += v * std::sin(2 * M_PI * f * i / 44100); }
+                    }
+                    return std::hypot(re, im);
+                };
+                const double att = 20 * std::log10(fund(8) / fund(200));
+                CHECK(att < -6.5 && att > -9.0, "AY: ФНЧ выхода — тон 13,4 кГц на 6,5–9 дБ тише тона 536 Гц");
                 // Два AY: разряд 15 = 0 — первый чип, 14 = 0 — второй (демо «200%»).
                 CHECK(!b.ay2Active(), "2AY: пока программа не выбрала второй чип, он не подключён");
                 auto ayw2 = [&](uint16_t sel, int r, int v) {
@@ -3913,6 +3933,8 @@ int main(int argc, char** argv) {
             ay.setYm(ym);
             ay.writeReg(7, 077);
             ay.writeReg(8, 1);
+            ay.advance(0.001);
+            ay.takeSample();                   // ФНЧ выхода успокоился
             ay.advance(0.001);
             return ay.takeSample() * 3.0 * 65535.0;
         };

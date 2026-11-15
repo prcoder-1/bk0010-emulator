@@ -1,16 +1,28 @@
 #include "Ay8910.h"
+#include <cmath>
 #include <cstring>
 
 namespace bk {
 
 // Громкость YM2149: 32 ступени (emu2149 m_voltbl[1]), доля от максимума одного канала.
 // AY-3-8910: 16 ступеней, каждая — на два индекса (emu2149 m_voltbl[0]).
-// Стерео по схеме ABC с панорамой GID (devemu/Config.h: AY_LEFT_PAN_DEFAULT = 95,
-// AY_CENTER_PAN_DEFAULT = 50; emu2149.cpp: k(n) = n/100 − 0,25·((n−50)²/10000 − 1) —
-// квадратичная поправка, чтобы центр не казался тихим): A — 95 % влево, B — центр,
-// C — 95 % вправо. В противоположный канал уходит ~20 % громкости крайнего.
-static const double kPanL[3] = {1.149375, 0.75, 0.249375};
-static const double kPanR[3] = {0.249375, 0.75, 1.149375};
+// Стерео ABC — как резисторный микшер «Мультизвука» (схема v1.0: A через 1,5 кОм в левый
+// узел, C через 1,5 кОм в правый, B через 3 кОм в оба): A влево, C вправо, B в оба канала
+// вполовину. Каналы на плате ещё и перетекают друг в друга на kCross (−21 дБ): по
+// стереозаписи leCSIcon с линейного выхода платы ширина стерео (L−R к L+R по полосам
+// 0,3–6 кГц) ложится на это с точностью 0,4 дБ; без перетекания выходило на 1–2 дБ шире
+// записи, с панорамой GID (что стояла раньше) — на 2–3 дБ уже. Множитель kMix держит
+// прежний уровень: три канала на полную дают 0,716 на сторону.
+static constexpr double kCross = 0.09;
+static constexpr double kMix = (1.149375 + 0.75 + 0.249375) / (1.5 * (1.0 + kCross));
+static const double kPanL[3] = {kMix, 0.5 * (1.0 + kCross) * kMix, kCross * kMix};
+static const double kPanR[3] = {kCross * kMix, 0.5 * (1.0 + kCross) * kMix, kMix};
+// На те же линии гнезда «Мультизвука» через 22 мкФ сажены выходы «Менестреля» (C5/C6
+// 0,1 мкФ, R52/R53 1,5 кОм на землю) и Covox (C1/C2 10 нФ): выход AY нагружен ёмкостью,
+// и это ФНЧ первого порядка. Частота среза — по записи leCSIcon с линейного выхода платы
+// (спектр запись/эмулятор на 2–12 кГц ложится на 7,5 кГц с точностью 0,7 дБ); по номиналам
+// схемы выходит 6–8 кГц.
+static constexpr double kOutCutHz = 7500.0;
 
 static const uint16_t kVolYm[32] = {
     0x0000, 0x0000, 0x00EF, 0x01D0, 0x0290, 0x032A, 0x03EE, 0x04D2, 0x0611, 0x0782, 0x0912, 0x0A36,
@@ -30,6 +42,7 @@ void Ay8910::reset() {
     envPtr_ = 0; envDir_ = 0; envFreq_ = 1; envCount_ = 0;
     envHold_ = envAlt_ = envLast_ = false;
     phase_ = accSum_ = accL_ = accR_ = 0.0; accN_ = 0; last_ = lastL_ = lastR_ = 0.0;
+    outM_ = outL_ = outR_ = 0.0;
 }
 
 void Ay8910::writeReg(uint8_t r, uint8_t v) {
@@ -110,13 +123,16 @@ void Ay8910::output(double& mono, double& left, double& right) const {
 }
 
 void Ay8910::advance(double dtSec) {
+    // ФНЧ выхода считается на частоте шагов, до усреднения в отсчёт, — как в аналоговой цепи.
+    const double a = 1.0 - std::exp(-2.0 * M_PI * kOutCutHz * 8.0 / clock_);
     phase_ += dtSec * clock_ / 8.0;
     while (phase_ >= 1.0) {
         phase_ -= 1.0;
         step();
         double m, l, r;
         output(m, l, r);
-        accSum_ += m; accL_ += l; accR_ += r;
+        outM_ += (m - outM_) * a; outL_ += (l - outL_) * a; outR_ += (r - outR_) * a;
+        accSum_ += outM_; accL_ += outL_; accR_ += outR_;
         ++accN_;
     }
 }

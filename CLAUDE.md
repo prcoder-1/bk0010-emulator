@@ -304,8 +304,11 @@ Key cross-cutting facts to know before editing the CPU or screen:
 - **Speaker is 3-bit**: the piezo sums bits 6, 5 and 2 of `0177716` (mask `0144`) into 8
   levels; `Speaker::feed()` takes a level 0..7, not a bit. The AY-3-8910 (`Ay8910`, emu2149
   semantics, 1.714 MHz) is mixed into the same STEREO stream (interleaved L/R frames: `Speaker::read`,
-  `available`, `trimTo` count frames) past the piezo RC filter — ABC panning with GID's
-  coefficients (A 1.149375/0.249375, B 0.75/0.75, C mirrored), the piezo goes to both; on
+  `available`, `trimTo` count frames) past the piezo RC filter — ABC as the Multizvuk's resistor
+  mixer (A left, C right, B half into both, 9% L/R crossfeed fitted to a stereo line-out
+  recording; was GID's 1.149/0.249 panning) and a
+  first-order 7.5 kHz low-pass (Menestrel/Covox caps on the card's jack lines; fitted to a line-out
+  recording of leCSIcon, docs/sound.md), the piezo goes to both; on
   0177714 a WORD write selects the register, a BYTE write sends data, both inverted. The "2AY"
   board (`--2ay`, default ON on the 11M with the AY and Covox) understands BOTH chip-select
   protocols at once (`Board::ayWrite`): TurboSound — a word whose logical value has bits 3–7 set
