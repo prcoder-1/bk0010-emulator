@@ -317,7 +317,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
   mono (left sample in both channels), so a word writer with high byte 0 is left-only, as on the
   card; it stays silent while
   writes mix words and bytes (AY protocol, the Multizvuk auto-detect) and within a frame of a
-  read of 0177714 (joystick/mouse polling). The `RESET` instruction resets both AYs (all
+  read of 0177714 (joystick/mouse polling). TurboSound chip-select words (with "2AY" on) do not
+  enter that history: a 2AY player with both tunes paused writes only `MOV #0`/`MOV #1` each
+  frame, and counting them made the DAC click in time with leCSIcon's music (the real card's
+  PLIS keeps 4 writes including them and would click too — deliberate deviation, docs/sound.md). The `RESET` instruction resets both AYs (all
   registers 0 → silence, TurboSound back to chip 1): INIT reaches the AY through contact А1
   «СБРОС» of the УП connector, GID does the same, and programs rely on it (INSULT's music-off
   routine 035204 starts with RESET). Details in `docs/sound.md`.

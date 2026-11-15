@@ -2415,6 +2415,11 @@ void Board::setCovox(bool on) {
     sound_.setCovox(on);
 }
 
+// TurboSound: слово, у которого в логическом значении (~запись) разряды 3–7 единичны, —
+// выбор чипа, а не номер регистра (номера 0–17 с ним не пересекаются). Так его видит
+// ПЛИС «Мультизвука».
+static bool turboSelect(uint16_t value) { return (static_cast<uint16_t>(~value) & 0370) == 0370; }
+
 // AY на порту: слово — номер регистра, байт — данные; линии инверсные, поэтому дальше
 // всё в «логических» значениях l = ~value. Выбор чипа на плате с двумя AY (GID
 // AYSnd.cpp, MODE_GRYPHON): в слове адреса разряд 15 = 0 выбирает первый чип, 14 = 0 —
@@ -2431,9 +2436,8 @@ void Board::ayWrite(uint16_t value, uint16_t wide, bool isByte) {
     }
     const uint16_t l = static_cast<uint16_t>(~value);
     if (!ay2On_) { aySel_ = 1; ay_.writeAddress(static_cast<uint8_t>(l & 017)); return; }
-    // TurboSound: разряды 3–7 единичны — это выбор чипа (разряд 0: 1 — первый), не номер
-    // регистра (номера 0–17 с ним не пересекаются). Так его видит ПЛИС «Мультизвука».
-    if ((l & 0370) == 0370) {
+    // TurboSound: разряд 0 выбирает чип (1 — первый).
+    if (turboSelect(value)) {
         tsChip_ = (l & 1) ? 0 : 1;
         aySel_ = tsChip_ ? 2 : 1;
         if (tsChip_ && !ay2Seen_) { ay2Seen_ = true; syncSound(); }
@@ -2455,9 +2459,18 @@ void Board::ayWrite(uint16_t value, uint16_t wide, bool isByte) {
 // Covox: ЦАП на линиях порта. Пока стоит и AY, ЦАП включается только после того, как
 // по ширине последних восьми записей ясно, что это не протокол AY (слова вперемешку с
 // байтами): иначе каждый выбор регистра щёлкал бы в динамике. Без AY — любая запись.
-void Board::covoxWrite(uint16_t wide, bool isByte, bool odd) {
-    covoxHist_ = static_cast<uint8_t>((covoxHist_ << 1) | (isByte ? 1 : 0));
-    if (covoxN_ < 8) ++covoxN_;
+//
+// Слово выбора чипа TurboSound (chipSelect) — тоже протокол AY, а не отсчёт: в историю
+// его не пишем, режим остаётся прежним. Плеер для двух AY, у которого обе мелодии на
+// паузе, пишет за кадр только MOV #0 / MOV #1 — через несколько кадров это выглядело
+// стерео Covox, и ЦАП щёлкал в такт музыке (leCSIcon, начало части 2 и конец части 3).
+// ПЛИС «Мультизвука» эти слова в историю пишет (она помнит четыре записи) и щёлкала бы
+// так же, но такие программы писали под платы без Covox.
+void Board::covoxWrite(uint16_t wide, bool isByte, bool odd, bool chipSelect) {
+    if (!chipSelect) {
+        covoxHist_ = static_cast<uint8_t>((covoxHist_ << 1) | (isByte ? 1 : 0));
+        if (covoxN_ < 8) ++covoxN_;
+    }
     const uint8_t mask = static_cast<uint8_t>((1u << covoxN_) - 1);
     const uint8_t h = covoxHist_ & mask;
     auto mute = [&](CovoxMode m) {
@@ -2539,7 +2552,8 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // нечётному адресу приходит в старший байт, младший тогда 0 → данные 0377.
             ayWrite(value, wide, isByte);
         }
-        if (covoxOn_ && !(azOn_ && az_.legacyCovoxOff())) covoxWrite(wide, isByte, (addrIn & 1) != 0);
+        if (covoxOn_ && !(azOn_ && az_.legacyCovoxOff()))
+            covoxWrite(wide, isByte, (addrIn & 1) != 0, ayOn_ && ay2On_ && !isByte && turboSelect(value));
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
     case REG_KBD_DATA:

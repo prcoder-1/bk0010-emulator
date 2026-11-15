@@ -2893,6 +2893,11 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < 4; ++i) ayw(0, i);
                 CHECK(b.covoxMode() == Board::CovoxMode::AyMuted,
                       "Covox с AY: слова вперемешку с байтами — протокол AY, ЦАП молчит");
+                // Плеер для двух AY, у которого обе мелодии на паузе, пишет за кадр только выбор
+                // чипов TurboSound (leCSIcon: MOV #0 / MOV #1) — это тоже протокол AY.
+                for (int i = 0; i < 8; ++i) { m.writeWord(0177714, 0); m.writeWord(0177714, 1); }
+                CHECK(b.covoxMode() == Board::CovoxMode::AyMuted,
+                      "Covox с AY: одни слова выбора чипа TurboSound — протокол AY, ЦАП молчит");
                 for (int i = 0; i < 8; ++i) m.writeByte(0177714, static_cast<uint8_t>(0200 + i));
                 CHECK(b.covoxMode() == Board::CovoxMode::Active && b.covoxSample() == 0207,
                       "Covox: только байты — звучит");
@@ -2901,6 +2906,10 @@ int main(int argc, char** argv) {
                       "Covox: только слова — звучит младший байт");
                 CHECK(b.covoxStereo() && b.covoxSampleR() == 020,
                       "Covox: только слова — стерео «Мультизвука», старший байт в правый канал");
+                m.writeWord(0177714, 010003);          // левый отсчёт 3 — как выбор чипа TurboSound
+                CHECK(b.covoxMode() == Board::CovoxMode::Active && b.covoxSample() == 03,
+                      "Covox: отсчёт, похожий на выбор чипа TurboSound, в стерео Covox звучит");
+                m.writeWord(0177714, 010207);
                 m.writeByte(0177715, 0377);
                 CHECK(b.covoxSample() == 0207 && b.covoxMode() == Board::CovoxMode::AyMuted,
                       "Covox с AY: байт после слов — протокол AY, ЦАП не меняется");

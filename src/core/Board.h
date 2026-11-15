@@ -843,7 +843,7 @@ private:
     uint8_t covoxH_ = 0200;     // старший байт — правый ЦАП (стерео Covox)
     bool    covoxStereo_ = false;   // записи только словами — стерео, иначе моно в оба канала
     uint64_t portReadAt_ = 0;   // такт последнего чтения 0177714 + 1 (0 — не читали)
-    void covoxWrite(uint16_t wide, bool isByte, bool odd);
+    void covoxWrite(uint16_t wide, bool isByte, bool odd, bool chipSelect);
     Trace   trace_;
 };
 
