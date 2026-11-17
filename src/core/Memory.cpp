@@ -74,7 +74,7 @@ void Memory::applyMap() {
     default: romBlk(4, -1); romBlk(5, -1); break;            // ПЗУ-страницы 2, 3 — пустые розетки;
                                                              // -2 — окно отключено ВЭД (СМК-512)
     }
-    romBlk(6, ROM_BOS);
+    romBlk(6, bosOff_ ? -1 : ROM_BOS);
     romBlk(7, mstd_ ? ROM_MSTD : -1);
 }
 

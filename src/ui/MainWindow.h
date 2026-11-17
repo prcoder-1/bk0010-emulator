@@ -40,6 +40,7 @@ struct AzCliOptions {
     std::map<int, QString> units;
     bool rw = false;
     int mod037 = -1;
+    int noMon = -1;                        // БК-0011М: доработка монитора (-1 — настройка)
     QString net;                           // кабель сетевой карты (пусто — настройка, «-» — нет)
     bool unitsRw = false;                  // --disk-rw: диски AZn из командной строки — на запись
 };
@@ -251,6 +252,7 @@ private:
     QString romDir_;
     QAction* azAction_ = nullptr;          // галка «AZБК»
     QAction* az037Action_ = nullptr;       // галка «доработка 037» (БК-0010)
+    QAction* azNoMonAction_ = nullptr;     // галка «доработка монитора» (БК-0011М)
     QAction* azUnit0RwAction_ = nullptr;   // галка «диск AZ0 на запись»
     QAction* azVgaAction_ = nullptr;       // галка «экран VGA AZБК»
     void syncMachineMenu();                // галки меню — по состоянию платы (без сигналов)

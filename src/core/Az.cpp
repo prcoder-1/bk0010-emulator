@@ -567,7 +567,8 @@ void Azbk::saveState(std::vector<uint8_t>& out) const {
     auto put = [&](const void* v, size_t n) { const uint8_t* b = static_cast<const uint8_t*>(v); out.insert(out.end(), b, b + n); };
     putS(out, cfg_.sdDir); putS(out, cfg_.writeDir);
     const uint8_t fl = static_cast<uint8_t>((cfg_.rw ? 1 : 0) | (cfg_.mod037 ? 2 : 0) | (smkTrigger_ ? 4 : 0)
-                                            | (smallScreen_ ? 8 : 0) | (sync_ ? 16 : 0) | (dmaPlaying_ ? 32 : 0) | (dmaDone_ ? 64 : 0));
+                                            | (smallScreen_ ? 8 : 0) | (sync_ ? 16 : 0) | (dmaPlaying_ ? 32 : 0) | (dmaDone_ ? 64 : 0)
+                                            | (cfg_.noMon ? 128 : 0));
     put(&fl, 1);
     const uint32_t nu = static_cast<uint32_t>(cfg_.units.size());
     put(&nu, 4);
@@ -615,7 +616,7 @@ bool Azbk::loadState(const uint8_t*& p, const uint8_t* e) {
         if (!get(&u, 4) || !getS(p, e, s)) return false;
         c.units[u] = s;
     }
-    c.rw = fl & 1; c.mod037 = fl & 2;
+    c.rw = fl & 1; c.mod037 = fl & 2; c.noMon = fl & 128;
     // Плата заново «вставляется» (диски открываются по конфигурации снимка), потом
     // поверх неё — состояние.
     c.net = cfg_.net;                                // кабель и запись в образы — хоста, не снимка

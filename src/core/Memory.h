@@ -153,6 +153,10 @@ public:
     // БК-0010: блоки по 8 Кбайт без микросхемы ПЗУ (бит i — блок i) — чтение зависает.
     void setAbsent10(uint8_t mask) { if (mask != absent10_) { absent10_ = mask; applyMap(); } }
     bool basicOff() const { return romsOff_; }
+    // БК-0011М: ПЗУ БОС (0140000–0157777) снято доработкой монитора — там отвечает только
+    // плата в МПИ (AZБК), иначе чтение зависает. На БК-0010 ничего не делает.
+    void setBosOff(bool off) { if (off != bosOff_) { bosOff_ = off; applyMap(); } }
+    bool bosOff() const { return bosOff_; }
     bool mstd() const { return mstd_; }
     void setPageMap(uint16_t reg);            // запись в 0177716 с битом 11
     uint16_t pageMap() const { return pageReg_; }
@@ -225,6 +229,7 @@ private:
     MpiDevice* mpi_ = nullptr;           // контроллер в разъёме МПИ (СМК-512)
     bool     mpiFull_ = false;           // он отвечает и при A15 = 0 (AZБК)
     bool     romsOff_ = false;           // БК-0010: Бейсик заблокирован
+    bool     bosOff_ = false;            // БК-0011М: ПЗУ БОС снято (доработка монитора)
     bool mpiAt(uint16_t a) const { return mpi_ && (a >= ADDR_RAM_END || mpiFull_); }
     AccessHook hook_;
     BusErrorHook busError_;

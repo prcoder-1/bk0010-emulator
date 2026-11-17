@@ -94,6 +94,7 @@ struct CliOptions {
     QString azSd;
     std::map<int, QString> azUnits;
     bool azRw = false, az037 = false;
+    int  azNoMon = -1;                    // БК-0011М: доработка монитора (-1 — по умолчанию/настройка)
     QString azNet;                        // кабель сетевой карты AZБК; «-» — снять (GUI)
     int  aspect34 = -1;                   // GUI: неквадратный пиксель БК
     bool mstd = false;                    // блок МСТД (ПЗУ 330) в окне 0160000 БК-0011М
@@ -147,6 +148,7 @@ struct CliOptions {
         c.sdDir = (azSd.isEmpty() ? romDir + "/azbk" : azSd).toStdString();
         c.writeDir = MainWindow::azWriteDir(QString::fromStdString(c.sdDir), azRw).toStdString();
         c.rw = azRw; c.mod037 = az037;
+        if (azNoMon >= 0) c.noMon = azNoMon > 0;
         for (const auto& kv : azUnits) {
             c.units[kv.first] = kv.second.toStdString();
             if (diskRw) c.rwUnits.insert(kv.first);   // --disk-rw: образы из командной строки — на запись
@@ -216,6 +218,8 @@ static int parseArgs(const QStringList& args, CliOptions& o) {
         else if (a == "--az-sd" && hasVal) o.azSd = args[++i];
         else if (a == "--az-rw") o.azRw = true;
         else if (a == "--az-037") o.az037 = true;
+        else if (a == "--az-nomon") o.azNoMon = 1;
+        else if (a == "--no-az-nomon") o.azNoMon = 0;
         else if (a == "--az-net" && hasVal) o.azNet = args[++i];
         else if (a == "--az-unit" && hasVal) {
             // N=образ; без «N=» — диск 0.
@@ -751,6 +755,8 @@ static void printHelp(const char* prog) {
         "                         карту; иначе изменения дисков в памяти, остальное — в\n"
         "                         каталоге данных эмулятора\n"
         "  --az-037               БК-0010: доработка 037 (эмуляция БК-0011М, быстрая память)\n"
+        "  --az-nomon / --no-az-nomon  БК-0011М: доработка монитора — своего ПЗУ БОС нет, его\n"
+        "                         даёт плата (BIOS: «[nomon]»); по умолчанию включена\n"
         "  --az-net <кабель>      сетевая карта платы (ENC28J60 и стек прошивки: DHCP, NTP,\n"
         "                         ping, HTTP, landisk, HOF) — к сети хоста: tap:ИМЯ,\n"
         "                         macvtap:ИМЯ или /dev/tapN («-» — без кабеля). MAC, DHCP и\n"
@@ -899,6 +905,7 @@ int main(int argc, char** argv) {
 
     MainWindow::AzOptions azo;
     azo.on = o.az; azo.sd = o.azSd; azo.units = o.azUnits; azo.rw = o.azRw; azo.mod037 = o.az037 ? 1 : -1;
+    azo.noMon = o.azNoMon;
     azo.net = o.azNet;
     azo.unitsRw = o.diskRw;
     MainWindow w(o.romDir, o.machineChoice, o.machine, o.smk, o.aspect34, o.ay, o.ay2, o.covox, azo);

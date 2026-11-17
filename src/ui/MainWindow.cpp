@@ -292,6 +292,13 @@ MainWindow::MainWindow(const QString& romDir, bk::MachineChoice choice, bk::Mach
         azCli_.mod037 = -1;
         if (board_->azbk()) { applyAz(true); resetMachine(); }
     });
+    azNoMonAction_ = azMenu->addAction("Доработка &монитора (БК-0011М: БОС даёт плата)");
+    azNoMonAction_->setCheckable(true);
+    connect(azNoMonAction_, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue("azbk/nomon", on);
+        azCli_.noMon = -1;
+        if (board_->azbk()) { applyAz(true); resetMachine(); }
+    });
     ayAction_ = mach->addAction("Звуковой сопроцессор &AY-3-8910 / YM2149 (порт 0177714)");
     ayAction_->setCheckable(true);
     connect(ayAction_, &QAction::toggled, this, [this](bool on) { setAy(on); });
@@ -1297,6 +1304,7 @@ bk::Azbk::Config MainWindow::azConfig() const {
     c.rw = azCli_.rw;
     c.writeDir = azWriteDir(sd, c.rw).toStdString();
     c.mod037 = azCli_.mod037 >= 0 ? azCli_.mod037 > 0 : st.value("azbk/mod037", false).toBool();
+    c.noMon = azCli_.noMon >= 0 ? azCli_.noMon > 0 : st.value("azbk/nomon", true).toBool();
     const QString u0 = st.value("azbk/unit0").toString();
     if (!u0.isEmpty()) c.units[0] = u0.toStdString();
     for (const auto& kv : azCli_.units) {
@@ -1447,10 +1455,12 @@ void MainWindow::syncMachineMenu() {
     smkAction_->setChecked(board_->smk512());
     smkAction_->setEnabled(!board_->azbk());
     if (azAction_) {
-        QSignalBlocker ba(azAction_), bb(az037Action_), bc(azUnit0RwAction_);
+        QSignalBlocker ba(azAction_), bb(az037Action_), bc(azUnit0RwAction_), bd(azNoMonAction_);
         azAction_->setChecked(board_->azbk());
         az037Action_->setEnabled(!board_->bk11());
         az037Action_->setChecked(azConfig().mod037);
+        azNoMonAction_->setEnabled(board_->bk11());
+        azNoMonAction_->setChecked(azConfig().noMon);
         azUnit0RwAction_->setChecked(azConfig().rwUnits.count(0) != 0);
     }
 }

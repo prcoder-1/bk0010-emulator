@@ -46,6 +46,9 @@ public:
         bool rw = false;                     // образы дисков на запись
         std::set<int> rwUnits;               // отдельные AZn на запись (AzCtrl::Config::rwUnits)
         bool mod037 = false;                 // доработка 037 (REVTYPE = 1): эмуляция 11М на БК-0010
+        // БК-0011М: доработка монитора — своё ПЗУ БОС (0140000–0157777) снято, его даёт
+        // плата (BIOS: «[nomon]», окна 12–13 — слоты 16/17). Так у машины пользователя.
+        bool noMon = true;
         std::map<int, std::string> units;    // AZn поверх [DISKS]
         std::string net;                     // кабель сетевой карты (AzCtrl::Config::net)
     };

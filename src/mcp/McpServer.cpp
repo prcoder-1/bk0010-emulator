@@ -158,9 +158,10 @@ QString McpServer::machineText() {
     if (!romsOk_) s += QString(" ⚠ ПЗУ %1 не загружены из %2.").arg(b11 ? "БК-0011М" : "БК-0010")
                            .arg(QString::fromStdString(romDir_));
     if (board_.azbk()) {
-        s += QString(" Контроллер AZБК: карта SD %1%2, экран %3.")
+        s += QString(" Контроллер AZБК: карта SD %1%2%3, экран %4.")
                  .arg(QString::fromStdString(board_.az().config().sdDir))
                  .arg(board_.az().config().mod037 ? ", доработка 037" : "")
+                 .arg(b11 && board_.az().config().noMon ? ", доработка монитора (БОС даёт плата)" : "")
                  .arg(board_.azVga() ? "VGA платы" : "ТВ БК");
         for (const auto& u : board_.az().ctrl().units())
             s += QString(" AZ%1: %2 (%3 блоков).").arg(u.unit).arg(QString::fromStdString(u.host.empty() ? u.name : u.host)).arg(u.blocks);
@@ -430,6 +431,7 @@ QJsonArray McpServer::toolDefs() const {
                 {"az_unit0", P("string", "Disk image for AZ0 on top of AZ.INI's [DISKS] (\"\" = as in AZ.INI); with `disk` while AZ is on, the same")},
                 {"az_rw", P("boolean", "AZ disk images and BK writes (EEPROM, files) go to the SD card itself (default false: disks in memory, the rest in the emulator's data dir)")},
                 {"az_037", P("boolean", "BK-0010: the 037 modification (BK-0011M emulation, fast memory)")},
+                {"az_nomon", P("boolean", "BK-0011M: the monitor modification (default true, as on the user's machine) — the BK's own BOS ROM at 0140000–0157777 is removed and the board supplies BOS (BIOS shows \"[nomon]\"); false = stock BOS ROM")},
                 {"az_vga", P("boolean", "Show (and screenshot) the AZ VGA picture (true, default) or the BK's own screen")},
                 {"az_net", P("string", "AZБК network card cable (ENC28J60 + firmware 00019 TCP/IP: DHCP, NTP, ping, HTTP, landisk, HOF): \"tap:NAME\", \"macvtap:NAME\" or \"/dev/tapN\"; \"\" = unplugged. MAC/DHCP/address come from AZ.INI [NETWORK]. Plugged live, no reinstall (default: keep)")},
                 {"frames", P("integer", "Run this many frames after reset/boot (default 0)")}})));
@@ -1214,6 +1216,7 @@ QJsonObject McpServer::tool_bk_reset(const QJsonObject& args) {
     if (unit0RwGiven) { if (args.value("disk_rw").toBool()) cfg.rwUnits.insert(0); else cfg.rwUnits.erase(0); }
     if (args.contains("az_rw")) { cfg.rw = args.value("az_rw").toBool(); cfgChanged = true; }
     if (args.contains("az_037")) { cfg.mod037 = args.value("az_037").toBool(); cfgChanged = true; }
+    if (args.contains("az_nomon")) { cfg.noMon = args.value("az_nomon").toBool(); cfgChanged = true; }
     cfg.writeDir = azWriteDirFor(QString::fromStdString(cfg.sdDir), cfg.rw).toStdString();
     if (azWanted && (cfgChanged || unit0Given || !board_.azbk())) {
         std::string err;

@@ -890,6 +890,7 @@ bool Board::MpiMux::mpiPoke(uint16_t raw, uint16_t value, bool isByte) {
 }
 
 void Board::updateMpi() {
+    mem_.setBosOff(azOn_ && az_.config().noMon);
     if (azOn_) {
         symbols_.setFallback(nullptr);
         mem_.setMpi(&az_);
@@ -1532,6 +1533,7 @@ void Board::loadAzTail(const std::vector<uint8_t>& in, size_t off, size_t end) {
     }
     azVga_ = vga != 0;
     azIrqPending_ = pend & 1; azResetPending_ = pend & 2;
+    updateMpi();                                     // доработка монитора — из снимка
 }
 
 void Board::loadBkx1(const std::vector<uint8_t>& in, size_t off, size_t end) {

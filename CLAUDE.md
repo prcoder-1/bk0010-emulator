@@ -63,7 +63,7 @@ ROM 0120000–0157777, so programs calling into it — tetr-music, TIMERTST, ove
 the СМК-512 or the «Самара» controller, `docs/hdd.md`),
 `--machine auto|bk10|bk10f|bk11m` (`--bk10`, `--bk10f`, `--bk11m`; default auto), `--mstd` (МСТД block: on the
 -01 FOCAL+tests instead of BASIC, on the 11M the test ROM), `--az` / `--az-sd <dir>` /
-`--az-unit N=<img>` / `--az-rw` / `--az-037` / `--az-net tap:IF|macvtap:IF|/dev/tapN` (AZБК controller, `docs/azbk.md`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
+`--az-unit N=<img>` / `--az-rw` / `--az-037` / `--az-nomon` / `--az-net tap:IF|macvtap:IF|/dev/tapN` (AZБК controller, `docs/azbk.md`), `--ay` / `--no-ay` (AY-3-8910 on 0177714; default on
 for 11M), `--2ay` / `--no-2ay` and `--covox` / `--no-covox` (second AY and Covox, default on for 11M), `--no-scanline` (11M renders per scanline by default),
 `--video <file.avi|.mp4>` / `--video-codec zmbv|h264` (default: by extension) / `--video-size 1024x768|512x256` /
 `--video-audio` / `--no-video-audio` (screen capture with sound, GUI and headless, `docs/video.md`),
@@ -446,7 +446,9 @@ Key cross-cutting facts to know before editing the CPU or screen:
   (`RE_ARM/decompiled/src/io11.c`), not GID: streams via explicit commands, DR outside a
   stream = last status, IRQ 0174 after a long command with IE. SMK-mode table is GID's
   except window 14 in Std10/Std11 = slot 8 (AZ337) — GID's «page 0» broke leCSIcon.
-  `--az`, `--az-sd`, `--az-unit N=img`, `--az-rw`, `--az-037`; SD template `roms/azbk`
+  `--az`, `--az-sd`, `--az-unit N=img`, `--az-rw`, `--az-037`; on the 11M the «monitor modification»
+  (`Config::noMon`, `--az-nomon`, default ON = the user's machine, BIOS «[nomon]»): no own BOS ROM at
+  0140000–0157777 (`Memory::setBosOff`), the board's windows 12–13 supply it. SD template `roms/azbk`
   (firmware 00019, no disks); BK writes (EEPROM, AZ.INI from Setup, files) go to a per-card
   dir AppDataLocation/azbk/<card>-<hash> (`src/ui/AzPaths.h`), read before the card, unless `--az-rw`.
   `Board::displayFrame()` is the VGA 1024x768 (or the BK screen), drawn per line only while
