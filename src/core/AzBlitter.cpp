@@ -13,7 +13,8 @@ uint16_t AzBlitter::readCtrl() const {
 }
 
 // Запись 0177270: 0 команд — асинхронный останов; пока блиттер работает, меняется только
-// число команд; ручной пуск — разряд 12 при уже установленном (до этой записи) разряде 14.
+// число команд; ручной пуск — разряд 12 при разряде 14, уже стоявшем или в той же записи
+// (автор советует ставить 14 раньше, но 050001 после 0 на плате пускает — AZHWT).
 void AzBlitter::writeCtrl(uint16_t v) {
     const uint16_t n = v & 0777;
     if (n == 0) {
@@ -26,7 +27,7 @@ void AzBlitter::writeCtrl(uint16_t v) {
     const bool wasManual = manual_;
     count_ = n;
     manual_ = (v & MANUAL) != 0;
-    if (wasManual && (v & START)) start(n);
+    if ((v & START) && (wasManual || manual_)) start(n);
 }
 
 void AzBlitter::frameEnd() {
@@ -51,7 +52,7 @@ bool AzBlitter::fetch() {
         const uint16_t cmd = c_[3];
         const int op = (cmd >> 3) & 7;
         const int height = c_[4] >> 8;
-        if ((cmd & 4) || op > 5 || height == 0) continue;     // NOP, неизвестная, 0 строк
+        if ((cmd & 4) || op > 5) continue;                    // NOP, неизвестная
         dst_ = ((uint32_t(c_[0] & 0377) << 16) | c_[2]) + (uint32_t(c_[6]) << 8);
         src_ = (uint32_t(c_[0] >> 8) << 16) | c_[1];
         wLeft_ = (c_[4] & 0377) + 1;
@@ -94,8 +95,11 @@ void AzBlitter::step() {
     if (--wLeft_ == 0) {
         wLeft_ = (c_[4] & 0377) + 1;
         dst_ += static_cast<uint32_t>(vstep);
-        if (--hLeft_ == 0) active_ = false;
+        --hLeft_;
     }
+    // Счётчик строк проверяется после каждого слова: команда с 0 строк пишет одно слово
+    // (AZHWT на плате), а не ничего и не строку.
+    if (hLeft_ <= 0) active_ = false;
 }
 
 void AzBlitter::line() {

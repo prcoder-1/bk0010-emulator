@@ -71,12 +71,13 @@ void Azbk::dmaSample() {
     soundOut();
 }
 
-// Выход ЦАП платы: Covox (16 бит без знака, середина — 0100000) плюс DMA (16 бит со
-// знаком). Постоянную составляющую снимает микшер.
+// Выход ЦАП платы: Covox и DMA — 16 бит со знаком (у платы после включения в Covox 0,
+// 8-битный отсчёт ложится в 0..077600 — знаковый разряд не трогается; у GID тоже int16).
+// Постоянную составляющую снимает микшер.
 void Azbk::soundOut() {
     if (!sound) return;
-    const double l = (cvxL_ - 32768.0) / 32768.0 + pcmL_ / 32768.0;
-    const double r = (cvxR_ - 32768.0) / 32768.0 + pcmR_ / 32768.0;
+    const double l = static_cast<int16_t>(cvxL_) / 32768.0 + pcmL_ / 32768.0;
+    const double r = static_cast<int16_t>(cvxR_) / 32768.0 + pcmR_ / 32768.0;
     sound(std::clamp(l, -1.0, 1.0), std::clamp(r, -1.0, 1.0));
 }
 

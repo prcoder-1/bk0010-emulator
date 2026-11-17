@@ -58,7 +58,6 @@ public:
     std::function<void()> irq2;                      // кадровое прерывание AZ (60 Гц)
     std::function<void()> irqVector;                 // контроллер, вектор 0174
     std::function<void()> resetMachine;              // команда 037
-    std::function<void()> busError;                  // запись в окно «только чтение»
 
     Azbk();
     // Включить плату: память, регистры, AZ.INI (ПЗУ, заставка, диски). false — нет карты SD.
@@ -214,7 +213,7 @@ private:
     int      imaCur_[2] = {0, 0}, imaIdx_[2] = {0, 0};
     uint64_t dmaAcc_ = 0;
     uint8_t  ay1a_ = 0, ay1d_ = 0, ay2a_ = 0, ay2d_ = 0;
-    uint16_t cvxL_ = 0, cvxR_ = 0, cvxM_ = 0, cvxCsr_ = 0;
+    uint16_t cvxL_ = 0, cvxR_ = 0, cvxCsr_ = 0;      // Covox: отсчёты 16 бит со знаком
 
     // Прочее.
     uint16_t com_[4] = {0, 0, 0200, 0};             // ИРПС: передатчик всегда свободен

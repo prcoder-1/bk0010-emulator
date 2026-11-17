@@ -43,7 +43,7 @@ bool Azbk::powerOn(const Config& c, bool bk11, int cpuHz, std::string* err) {
     dmaLeft_ = dmaAddr_ = 0; dmaUnits_ = 0; pcmL_ = pcmR_ = 0; dmaAcc_ = 0;
     imaCur_[0] = imaCur_[1] = imaIdx_[0] = imaIdx_[1] = 0;
     ay1a_ = ay1d_ = ay2a_ = ay2d_ = 0;
-    cvxL_ = cvxR_ = cvxM_ = 0x8000; cvxCsr_ = 0;
+    cvxL_ = cvxR_ = 0; cvxCsr_ = 0;
     com_[0] = 0; com_[1] = 0; com_[2] = 0200; com_[3] = 0;
     AzCtrl::Config cc;
     cc.sdDir = c.sdDir; cc.writeDir = c.writeDir; cc.rw = c.rw; cc.units = c.units; cc.net = c.net; cc.rwUnits = c.rwUnits;
@@ -313,8 +313,9 @@ bool Azbk::mpiWrite(uint16_t addr, uint16_t value, bool isByte) {
         else setMemWord(p, value);
         return false;
     }
-    if (!active(w)) return false;
-    if (!writable(w)) { if (busError) busError(); return true; }
+    // Окно «только чтение» запись не берёт: она уходит в саму БК, без ловушки (AZHWT на
+    // плате: запись в такое окно легла в ОЗУ БК под ним).
+    if (!writable(w)) return false;
     const uint32_t p = phys(a);
     if (isByte) mem_[p | (addr & 1)] = static_cast<uint8_t>(value);
     else setMemWord(p, value);
@@ -346,11 +347,9 @@ bool Azbk::regRead(uint16_t a, uint16_t& v, bool peek) {
     case 0177170: v = dmaCur_; return true;
     case 0177172: v = static_cast<uint16_t>((ay1d_ << 8) | ay1a_); return true;
     case 0177174: v = static_cast<uint16_t>((ay2d_ << 8) | ay2a_); return true;
-    case 0177176: return true;                                  // OPL2 — убран в прошивке 19
+    // Covox: 0177200 читает левый канал, 0177202–0177206 — правый (AZHWT на плате).
     case 0177200: v = cvxL_; return true;
-    case 0177202: v = cvxR_; return true;
-    case 0177204: v = cvxM_; return true;
-    case 0177206: v = static_cast<uint16_t>((cvxL_ >> 8) | (cvxR_ & 0177400)); return true;
+    case 0177202: case 0177204: case 0177206: v = cvxR_; return true;
     case 0177212: v = cvxCsr_; return true;
     case 0177220: case 0177222: case 0177224: case 0177226:
         v = ctrl_.read((a - 0177220) >> 1, peek);
@@ -430,13 +429,13 @@ bool Azbk::regWrite(uint16_t addr, uint16_t value, bool isByte) {
         ay2a_ = static_cast<uint8_t>(value); ay2d_ = static_cast<uint8_t>(value >> 8);
         if (ayWrite) { ayWrite(1, true, ay2a_); ayWrite(1, false, ay2d_); }
         return true;
-    case 0177176: return true;
     case 0177200: cvxL_ = value; soundOut(); return true;
     case 0177202: cvxR_ = value; soundOut(); return true;
-    case 0177204: cvxL_ = cvxR_ = cvxM_ = value; soundOut(); return true;
+    case 0177204: cvxL_ = cvxR_ = value; soundOut(); return true;
     case 0177206:
-        if (isByte) cvxM_ = cvxL_ = cvxR_ = static_cast<uint16_t>((value & 0377) << 8);
-        else { cvxL_ = static_cast<uint16_t>((value & 0377) << 8); cvxR_ = value & 0177400; }
+        // 8 бит без знака -> отсчёт (b << 7): 0..077600, как у GID и на плате.
+        if (isByte) cvxL_ = cvxR_ = static_cast<uint16_t>((value & 0377) << 7);
+        else { cvxL_ = static_cast<uint16_t>((value & 0377) << 7); cvxR_ = static_cast<uint16_t>((value & 0177400) >> 1); }
         soundOut();
         return true;
     case 0177212:
@@ -576,7 +575,8 @@ void Azbk::saveState(std::vector<uint8_t>& out) const {
     put(map_, sizeof map_);
     const uint16_t r[] = {winCtrl_, winRo_, winShdw_, mmu_, az130_, az716_, preBCtrl_, preBShdw_, preSCtrl_, preSRo_,
                           scrCsr_, pageL0_, pageL1_, pageL2_, palCell_, vscr_[0], vscr_[1], vscr_[2], legacyPal_, az662_,
-                          dmaCsr_, dmaPage_, dmaCur_, dmaWord_, cvxL_, cvxR_, cvxM_, cvxCsr_, com_[0], com_[1], com_[2], com_[3]};
+                          dmaCsr_, dmaPage_, dmaCur_, dmaWord_, cvxL_, cvxR_, 0 /* было Covox «моно» */, cvxCsr_,
+                          com_[0], com_[1], com_[2], com_[3]};
     put(r, sizeof r);
     put(preB_, 8); put(preS_, 8); put(hscr_, 3);
     const uint8_t ay[4] = {ay1a_, ay1d_, ay2a_, ay2d_};
@@ -630,7 +630,7 @@ bool Azbk::loadState(const uint8_t*& p, const uint8_t* e) {
     scrCsr_ = 0; setMode(r[10]); pageL0_ = r[11]; pageL1_ = r[12]; pageL2_ = r[13]; palCell_ = r[14];
     vscr_[0] = r[15]; vscr_[1] = r[16]; vscr_[2] = r[17]; legacyPal_ = r[18]; az662_ = r[19];
     dmaCsr_ = r[20]; dmaPage_ = r[21]; dmaCur_ = r[22]; dmaWord_ = r[23];
-    cvxL_ = r[24]; cvxR_ = r[25]; cvxM_ = r[26]; cvxCsr_ = r[27];
+    cvxL_ = r[24]; cvxR_ = r[25]; cvxCsr_ = r[27];
     for (int i = 0; i < 4; ++i) com_[i] = r[28 + i];
     uint8_t ay[4];
     int32_t vi[6], vj[2];

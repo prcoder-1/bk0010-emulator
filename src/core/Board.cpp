@@ -341,7 +341,6 @@ Board::Board() {
     az_.irq2 = [this]() { irqFramePending_ = true; };
     az_.irqVector = [this]() { azIrqPending_ = true; };
     az_.resetMachine = [this]() { azResetPending_ = true; };
-    az_.busError = [this]() { busErrorPending_ = true; };
 }
 
 // Кто отвечает на обмен. ДОЗУ БК (A15=0, оба банка) обслуживает 037 через своё
@@ -350,8 +349,10 @@ Board::Board() {
 // tests/hw/ROMIO.BIN на реальной БК-0010-01 в фазе 1 показал, что чтение из ПЗУ
 // на окно 037 медленнее чтения из В-В (docs/slow-memory-timing.md).
 uint8_t Board::busClass(uint16_t addr, bool write) const {
-    // Обмен, который обслужил AZБК (его окно или регистр), — быстрый, как ОЗУ СМК.
-    if (azOn_ && az_.serves(addr, write)) return BusFast;
+    // Обмен, который обслужил AZБК: запись и регистры — быстрые, как ОЗУ СМК; чтение из
+    // окна памяти отвечает позже, как ПЗУ (AZHWT на БК-0011М с платой: 8000 чтений
+    // MOV (R1),R0 — 1795 тиков таймера /128 при 1501 у «быстрой» памяти и 1793 у ПЗУ).
+    if (azOn_ && az_.serves(addr, write)) return (!write && addr < 0177000) ? BusRom : BusFast;
     if (bk11()) {
         // БК-0011М: всё ОЗУ (и страницы в окне 1) — ДОЗУ за 037; ПЗУ и пустые розетки — ПЗУ;
         // ОЗУ СМК-512 отвечает сразу, как и на БК-0010.
