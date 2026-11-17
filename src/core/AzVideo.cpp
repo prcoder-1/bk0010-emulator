@@ -148,8 +148,6 @@ void Azbk::renderLine(uint32_t* out) {
     const int per = 16 / bpp;
     const uint16_t pmask = static_cast<uint16_t>((1 << bpp) - 1);
     const uint32_t* legacy = &pal_[256 + legacyPal_ * 4];
-    const uint32_t* legacy2 = &pal_[256 + ((legacyPal_ + 1) & 15) * 4];
-    const uint32_t* legacy3 = &pal_[256 + ((legacyPal_ + 2) & 15) * 4];
     int x = 0;
     const int xs = fr_.xs;
     for (int c = 0; c < llen && x < VGA_W; ++c) {
@@ -168,8 +166,10 @@ void Azbk::renderLine(uint32_t* out) {
             case 1: px = legacy[p1]; break;
             case 2: px = pal_[320 + p1]; break;
             case 3: px = pal_[p1]; break;
-            case 4: px = pal_[(p1 << 2) | (p2 << 1) | p3]; break;
-            case 5: px = p1 ? legacy[p1] : p2 ? legacy2[p2] : legacy3[p3]; break;
+            // Слои по 1 и 2 бита — по AZPIC на плате: 8 цветов в ячейках 0510–0517 (не 0–7);
+            // у слоя k своя палитра БК-0011М номер k (ячейки 0400 + 4k), 0177662 не влияет.
+            case 4: px = pal_[0510 + ((p1 << 2) | (p2 << 1) | p3)]; break;
+            case 5: px = p1 ? pal_[0400 + p1] : p2 ? pal_[0404 + p2] : pal_[0410 + p3]; break;
             case 6: px = p1 ? pal_[p1] : p2 ? pal_[16 + p2] : pal_[32 + p3]; break;
             case 7: px = pal_[p1 ? p1 : p2 ? p2 : p3]; break;
             }
