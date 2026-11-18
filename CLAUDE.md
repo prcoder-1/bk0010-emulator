@@ -446,6 +446,9 @@ Key cross-cutting facts to know before editing the CPU or screen:
   (`RE_ARM/decompiled/src/io11.c`), not GID: streams via explicit commands, DR outside a
   stream = last status, IRQ 0174 after a long command with IE. SMK-mode table is GID's
   except window 14 in Std10/Std11 = slot 8 (AZ337) — GID's «page 0» broke leCSIcon.
+  Sound = FPGA build 19H15 mixer: both AYs always mixed, legacy Covox on 0177714 goes into
+  the board's 0177200/0177202 (mono/stereo by 0177212 bit 0, not by write width; `--covox`
+  ignored), AY protocol only stops samples, never zeroes the DAC (docs/azbk.md «Звук»).
   `--az`, `--az-sd`, `--az-unit N=img`, `--az-rw`, `--az-037`; on the 11M the «monitor modification»
   (`Config::noMon`, `--az-nomon`, default ON = the user's machine, BIOS «[nomon]»): no own BOS ROM at
   0140000–0157777 (`Memory::setBosOff`), the board's windows 12–13 supply it. SD template `roms/azbk`

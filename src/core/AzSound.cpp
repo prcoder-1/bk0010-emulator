@@ -71,6 +71,22 @@ void Azbk::dmaSample() {
     soundOut();
 }
 
+// Легаси-Covox на 0177714 (описание автора платы, тема 5556): запись ложится в те же
+// регистры 0177200/0177202, 8 бит — как в 0177206 (b << 7). Режим — разряд 0 регистра
+// 0177212 (Setup «Legacy Covox»), а не ширина записей, как у «Мультизвука»: стерео —
+// младший байт влево, старший вправо (байт — в свой канал), моно — байт в оба канала.
+void Azbk::legacyCovox(uint16_t wide, bool isByte, bool odd) {
+    const uint16_t lo = static_cast<uint16_t>((wide & 0377) << 7);
+    const uint16_t hi = static_cast<uint16_t>((wide >> 8) << 7);
+    if (!legacyCovoxStereo()) {
+        cvxL_ = cvxR_ = (isByte && odd) ? hi : lo;
+    } else {
+        if (!isByte || !odd) cvxL_ = lo;
+        if (!isByte || odd) cvxR_ = hi;
+    }
+    soundOut();
+}
+
 // Выход ЦАП платы: Covox и DMA — 16 бит со знаком (у платы после включения в Covox 0,
 // 8-битный отсчёт ложится в 0..077600 — знаковый разряд не трогается; у GID тоже int16).
 // Постоянную составляющую снимает микшер.

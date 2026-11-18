@@ -126,12 +126,15 @@ bool McpServer::switchMachine(bk::Machine m) {
     return true;
 }
 
-static const char* covoxModeName(bk::Board::CovoxMode m) {
+// Под AZБК протокол AY и опрос порта отсчёты не глушат: ЦАП платы держит последний.
+static const char* covoxModeName(bk::Board::CovoxMode m, bool az) {
     switch (m) {
     case bk::Board::CovoxMode::Off:     return "выкл";
     case bk::Board::CovoxMode::Idle:    return "записей не было";
-    case bk::Board::CovoxMode::AyMuted: return "молчит — в порт идёт протокол AY";
-    case bk::Board::CovoxMode::PortInput: return "молчит — порт опрашивают (джойстик, мышь)";
+    case bk::Board::CovoxMode::AyMuted:
+        return az ? "держит отсчёт — в порт идёт протокол AY" : "молчит — в порт идёт протокол AY";
+    case bk::Board::CovoxMode::PortInput:
+        return az ? "держит отсчёт — порт опрашивают (джойстик, мышь)" : "молчит — порт опрашивают (джойстик, мышь)";
     case bk::Board::CovoxMode::Active:  return "звучит";
     }
     return "";
@@ -2521,8 +2524,9 @@ QJsonObject McpServer::tool_bk_io_state(const QJsonObject& args) {
     + (board_.ay() ? QString("\n  AY-3-8910 %1").arg(QString::fromStdString(board_.aySummary())) : QString())
     + (board_.ay2Active() ? QString("\n  AY №2     %1").arg(QString::fromStdString(board_.aySummary(1))) : QString())
     + (board_.ay() && board_.ay2() ? QString("\n  2AY       выбор TurboSound: AY№%1").arg(board_.ayTurboChip() + 1) : QString())
-    + (board_.covox() ? QString("\n  Covox     %1, %2")
-                            .arg(covoxModeName(board_.covoxMode()))
+    + (board_.portCovox() ? QString("\n  Covox     %1%2, %3")
+                            .arg(board_.azbk() ? "легаси-Covox AZБК: " : "")
+                            .arg(covoxModeName(board_.covoxMode(), board_.azbk()))
                             .arg(board_.covoxStereo()
                                      ? QString("стерео: левый %1, правый %2").arg(oct6(board_.covoxSample()), oct6(board_.covoxSampleR()))
                                      : QString("моно (в оба канала): отсчёт %1").arg(oct6(board_.covoxSample()))) : QString())

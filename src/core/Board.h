@@ -316,17 +316,20 @@ public:
     // канал, старший — правый; только слова — стерео, есть байты — моно (левый отсчёт в
     // оба канала). Вместе с AY — автоопределение этой карты: слова и байты вперемешку —
     // протокол AY, ЦАП молчит; молчит он и пока программа читает порт (джойстик, мышь).
+    // С AZБК порт слушает легаси-Covox платы (0177212), а не эта карта: отсчёты идут в
+    // регистры платы, и протокол AY их не глушит — ЦАП держит последний (ПЛИС 19H15).
     void setCovox(bool on);
     bool covox() const { return covoxOn_; }
+    bool portCovox() const { return azOn_ ? !az_.legacyCovoxOff() : covoxOn_; }
     enum class CovoxMode { Off, Idle, AyMuted, PortInput, Active };
-    CovoxMode covoxMode() const { return covoxOn_ ? covoxMode_ : CovoxMode::Off; }
+    CovoxMode covoxMode() const { return portCovox() ? covoxMode_ : CovoxMode::Off; }
     uint8_t covoxSample() const { return covoxL_; }      // младший байт регистра порта (левый ЦАП)
     uint8_t covoxSampleR() const { return covoxH_; }     // старший байт (правый ЦАП в стерео)
     bool    covoxStereo() const { return covoxStereo_; } // стерео Covox: в порт идут только слова
     const Ay8910& ayChip(int chip = 0) const { return chip ? ay2_ : ay_; }
     Ay8910&       ayChip(int chip = 0)       { return chip ? ay2_ : ay_; }
     bool ay() const { return ayOn_; }
-    bool ay2Active() const { return ayOn_ && ay2On_ && ay2Seen_; }   // программа обратилась ко второму AY
+    bool ay2Active() const { return ayOn_ && ay2On_ && (ay2Seen_ || azOn_); }   // второй AY в миксе
     int  ayTurboChip() const { return tsChip_; }                     // выбор TurboSound: 0 — первый
 
     // True while an unread code sits in the register (ready flag set).
@@ -823,7 +826,9 @@ private:
     Speaker sound_;
     Ay8910  ay_;                // звуковой сопроцессор на 0177714 (если ayOn_)
     // Второй AY платы «2AY» (если ay2On_). ay2Seen_ — программа хоть раз выбрала его:
-    // до этого он не подмешивается, и одиночный AY звучит в полную громкость.
+    // до этого он не подмешивается, и одиночный AY звучит в полную громкость. У AZБК
+    // (ПЛИС 19H15) оба чипа всегда в микшере: громкость первого не скачет, когда
+    // программа начинает играть на втором.
     Ay8910  ay2_;
     bool    ay2On_ = false;
     bool    ay2Seen_ = false;
@@ -832,7 +837,7 @@ private:
     void ayWrite(uint16_t value, uint16_t wide, bool isByte);
     void syncSound() {
         sound_.setAy(ayOn_ ? &ay_ : nullptr);
-        sound_.setAy2(ayOn_ && ay2On_ && ay2Seen_ ? &ay2_ : nullptr);
+        sound_.setAy2(ayOn_ && ay2On_ && (ay2Seen_ || azOn_) ? &ay2_ : nullptr);
     }
     // Covox на 0177714.
     bool    covoxOn_ = false;

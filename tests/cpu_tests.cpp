@@ -4013,6 +4013,60 @@ int main(int argc, char** argv) {
         CHECK(b.ayChip(0).ym() && b.ayChip(1).ym(), "AZ/AY: без платы — YM2149");
     }
 
+    SECTION("AZБК: микшер ПЛИС 19H15 — легаси-Covox в регистрах платы, AY его не прерывает")
+    {
+        azSetup();
+        Board b;
+        b.setMachine(Machine::Bk0011m);
+        b.loadRoms(BK_DEFAULT_ROM_DIR);
+        b.setAzbk(true, azCfg());
+        b.reset();
+        Memory& m = b.memory();
+        CHECK(b.ay2Active(), "AZ/микшер: второй AY в миксе сразу, без обращения к нему");
+        // 0177212 = 0: легаси-Covox включён, моно — младший байт в оба канала (b << 7).
+        m.writeWord(0177212, 0);
+        for (int i = 0; i < 4; ++i) m.writeWord(0177714, static_cast<uint16_t>(041500 + i));
+        CHECK(b.covoxMode() == Board::CovoxMode::Active && b.az().reg(0177200) == 0103 << 7
+              && b.az().reg(0177202) == 0103 << 7, "AZ/микшер: моно по 0177212 — слово, а младший байт в оба канала");
+        // Разряд 0 — стерео: младший байт влево, старший вправо.
+        m.writeWord(0177212, 1);
+        m.writeWord(0177714, 041501);
+        CHECK(b.az().reg(0177200) == 0101 << 7 && b.az().reg(0177202) == 0103 << 7 && b.covoxStereo(),
+              "AZ/микшер: стерео по 0177212 — младший байт влево, старший вправо");
+        // Протокол AY в тот же порт: в ЦАП не попадает и не глушит его — отсчёт держится.
+        // Первое слово выбора регистра после потока слов ещё уходит в ЦАП: автоопределение
+        // узнаёт протокол по ширине записей, то есть на следующем байте.
+        m.writeWord(0177714, static_cast<uint16_t>(~010));
+        m.writeByte(0177714, static_cast<uint8_t>(~017));
+        const uint16_t cl = b.az().reg(0177200), cr = b.az().reg(0177202);
+        for (int r = 0; r < 14; ++r) {
+            m.writeWord(0177714, static_cast<uint16_t>(~r));
+            m.writeByte(0177714, static_cast<uint8_t>(~(r == 7 ? 070 : r == 010 ? 017 : 0)));
+        }
+        CHECK(b.covoxMode() == Board::CovoxMode::AyMuted && b.az().reg(0177200) == cl && b.az().reg(0177202) == cr
+              && cl != 0 && b.ayChip(0).regs()[010] == 017,
+              "AZ/микшер: AY на 0177714 играет, отсчёт Covox держится");
+        // Covox слышен вместе с AY: меандр отсчётов на выходе, хотя в порт идёт и протокол AY.
+        b.runTicks(81920);
+        b.sound().clear();
+        for (int i = 0; i < 2000; ++i) {
+            if (i % 200 == 0) { m.writeWord(0177714, static_cast<uint16_t>(~010)); m.writeByte(0177714, static_cast<uint8_t>(~017)); }
+            m.writeWord(0177714, (i / 20) & 1 ? 0140300 : 0040100);
+            b.runTicks(100);
+        }
+        std::vector<int16_t> pcm(2 * b.sound().available());
+        pcm.resize(2 * b.sound().read(pcm.data(), pcm.size() / 2));
+        int lo = 0, hi = 0;
+        for (size_t i = pcm.size() / 2 & ~size_t(1); i < pcm.size(); i += 2) { lo = std::min<int>(lo, pcm[i]); hi = std::max<int>(hi, pcm[i]); }
+        CHECK(pcm.size() > 1000 && hi - lo > 6000, "AZ/микшер: Covox звучит, хотя в тот же порт идёт протокол AY");
+        // Разряд 1 — легаси-перехват выключен: порт в Covox не идёт.
+        m.writeWord(0177212, 3);
+        m.writeWord(0177714, 0);
+        CHECK(b.covoxMode() == Board::CovoxMode::Off && b.az().reg(0177200) != 0, "AZ/микшер: 0177212 разряд 1 — легаси-Covox выключен");
+        b.setAzbk(false);
+        CHECK(!b.ay2Active(), "AZ/микшер: без платы второй AY — снова с первого обращения");
+    }
+
     SECTION("AZБК: снимок состояния с платой")
     {
         azSetup();

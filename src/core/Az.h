@@ -102,6 +102,10 @@ public:
     bool timer48() const;                            // кадровый таймер AZ «48 Гц» (по кадру БК)
     void ar2Lat();                                   // АР2+ЛАТ: 512/256 точек в старых режимах
     bool legacyCovoxOff() const { return (cvxCsr_ & 2) != 0; }
+    bool legacyCovoxStereo() const { return (cvxCsr_ & 1) != 0; }
+    // Отсчёт легаси-Covox с порта 0177714 — в регистры 0177200/0177202 (какие записи порта —
+    // отсчёты, а какие — протокол AY, решает Board).
+    void legacyCovox(uint16_t wide, bool isByte, bool odd);
     bool ym() const { return !(cvxCsr_ & 010); }     // AY платы — YM2149 (иначе AY-3-8910)
     // 177662 на БК-0010 отвечает плата (эмуляция 11М): адрес и значение — у неё.
     bool emu11() const { return (mmu_ & (MMU_BK11EMU | MMU_BRDTYPE)) == (MMU_BK11EMU | MMU_BRDTYPE); }

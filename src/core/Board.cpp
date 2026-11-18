@@ -1226,6 +1226,7 @@ bool Board::setAzbk(bool on, const Azbk::Config& cfg, std::string* err) {
     ay_.setYm(true); ay2_.setYm(true);               // без платы — YM2149, как было
     mem_.setBasicOff(false);
     sound_.setAzbk(false);
+    syncSound();                                     // второй AY — снова с первого обращения
     setSmk512(smkBeforeAz_);
     bool floppy = false;
     for (int d = 0; d < Fdd::DRIVES; ++d) floppy |= kngmd_.fdd().attached(d);
@@ -1534,6 +1535,10 @@ void Board::loadAzTail(const std::vector<uint8_t>& in, size_t off, size_t end) {
     azVga_ = vga != 0;
     azIrqPending_ = pend & 1; azResetPending_ = pend & 2;
     updateMpi();                                     // доработка монитора — из снимка
+    // BKX1 читался раньше этого хвоста: второй AY под платой — в миксе, а отсчёт
+    // легаси-Covox живёт в регистрах платы, канал «Мультизвука» молчит.
+    syncSound();
+    sound_.setCovoxLevel(0.0);
 }
 
 void Board::loadBkx1(const std::vector<uint8_t>& in, size_t off, size_t end) {
@@ -2469,6 +2474,11 @@ void Board::ayWrite(uint16_t value, uint16_t wide, bool isByte) {
 // стерео Covox, и ЦАП щёлкал в такт музыке (leCSIcon, начало части 2 и конец части 3).
 // ПЛИС «Мультизвука» эти слова в историю пишет (она помнит четыре записи) и щёлкала бы
 // так же, но такие программы писали под платы без Covox.
+//
+// С AZБК отсчёт идёт в легаси-Covox платы (Azbk::legacyCovox), моно/стерео — по 0177212.
+// ПЛИС 19H15 сводит AY, Covox и пищалку в микшере, не прерывая ни один из них: запись,
+// которую автоопределение сочло протоколом AY, в ЦАП не попадает, но и не глушит его —
+// Covox держит последний отсчёт (до 19H15 на выходе платы был «AY, или Covox, или пищалка»).
 void Board::covoxWrite(uint16_t wide, bool isByte, bool odd, bool chipSelect) {
     if (!chipSelect) {
         covoxHist_ = static_cast<uint8_t>((covoxHist_ << 1) | (isByte ? 1 : 0));
@@ -2477,7 +2487,9 @@ void Board::covoxWrite(uint16_t wide, bool isByte, bool odd, bool chipSelect) {
     const uint8_t mask = static_cast<uint8_t>((1u << covoxN_) - 1);
     const uint8_t h = covoxHist_ & mask;
     auto mute = [&](CovoxMode m) {
-        if (covoxMode_ != m) { covoxMode_ = m; sound_.setCovoxLevel(0.0); }
+        if (covoxMode_ == m) return;
+        covoxMode_ = m;
+        if (!azOn_) sound_.setCovoxLevel(0.0);
     };
     if (ayOn_ && ((h != 0 && h != mask) || covoxN_ < 4)) { mute(CovoxMode::AyMuted); return; }
     // Covox — только выход. Программа, которая в это же время читает порт, работает с
@@ -2493,6 +2505,11 @@ void Board::covoxWrite(uint16_t wide, bool isByte, bool odd, bool chipSelect) {
     if (!isByte || !odd) covoxL_ = static_cast<uint8_t>(wide);
     if (!isByte || odd) covoxH_ = static_cast<uint8_t>(wide >> 8);
     covoxMode_ = CovoxMode::Active;
+    if (azOn_) {
+        covoxStereo_ = az_.legacyCovoxStereo();
+        az_.legacyCovox(wide, isByte, odd);
+        return;
+    }
     // Автоопределение «Мультизвука»: идут только слова — стерео Covox (левый/правый);
     // есть байты — моно Covox, левый отсчёт в оба канала (программы для простого Covox
     // пишут байт, а в старшем байте шины у них мусор).
@@ -2555,7 +2572,7 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
             // нечётному адресу приходит в старший байт, младший тогда 0 → данные 0377.
             ayWrite(value, wide, isByte);
         }
-        if (covoxOn_ && !(azOn_ && az_.legacyCovoxOff()))
+        if (portCovox())
             covoxWrite(wide, isByte, (addrIn & 1) != 0, ayOn_ && ay2On_ && !isByte && turboSelect(value));
         return true;
     case REG_KBD_STATUS: kbdStatus_ = (kbdStatus_ & ~0100) | (value & 0100); return true;
