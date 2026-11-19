@@ -472,6 +472,30 @@ int main(int argc, char** argv) {
         c.reset(01000, 0); c.r[6] = 02000;
         for (int i = 0; i < 4; ++i) c.step();
         CHECK(c.r[1] == 0177740, "MTPS #340: биты 5 и 6 записываются");
+
+        // Страница В-В БК-0010-01 (tests/hw/IOPAGE.BIN на машине пользователя): отвечают
+        // только 0177660–0177664 и 0177700–0177716, остальное — зависание и на чтение, и на запись.
+        auto ioTrap = [](uint16_t addr, bool write) {
+            Board b;
+            b.reset();
+            Memory& m = b.memory();
+            m.pokeWord(004, 03000); m.pokeWord(006, 0340);
+            m.pokeWord(03000, 000777);
+            const uint16_t rd[] = {005737, addr, 000777};             // TST @#addr
+            const uint16_t wr[] = {012737, 0, addr, 000777};          // MOV #0,@#addr
+            if (write) for (int i = 0; i < 4; ++i) m.pokeWord(01000 + 2 * i, wr[i]);
+            else       for (int i = 0; i < 3; ++i) m.pokeWord(01000 + 2 * i, rd[i]);
+            b.cpu().reset(01000, 0340); b.cpu().r[6] = 01000;
+            b.stepInstruction(); b.stepInstruction();
+            return b.cpu().pc() == 03000;
+        };
+        bool all = true;
+        for (uint16_t a = 0177600; a != 0; a += 2) {
+            const bool known = (a >= 0177660 && a <= 0177664) || (a >= 0177700 && a <= 0177716);
+            all &= ioTrap(a, false) == !known;
+            if (!known) all &= ioTrap(a, true);
+        }
+        CHECK(all, "страница В-В: неизвестный адрес — вектор 4 на чтение и запись, регистры отвечают");
         CHECK(c.r[2] == 0 && !(c.psw & 020), "MTPS #20: бит T не записывается");
     }
 
@@ -3252,6 +3276,7 @@ int main(int argc, char** argv) {
             CHECK(m.readWord(0100000) == 0123456, "11М+СМК: проверка наличия платы (как в leCSIcon) проходит");
             // «СТОП» возвращает плату в исходный режим машины.
             smkMode(0120);
+            b.cpu().r[6] = 01000;                                // стек в ОЗУ: 0177776 — ошибка шины
             b.pressStop();
             CHECK(b.smk().mode() == Smk512::STD11 && !m.window1Off(), "11М+СМК: «СТОП» — снова Std11");
             b.stepInstruction();                                 // забрать прерывание «СТОП»

@@ -2358,11 +2358,9 @@ bool Board::regValue(uint16_t addr, uint16_t& value) const {
 
 bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
     if (addr == REG_TIMER_CNT || addr == REG_TIMER_CSR) timerCheck();
-    if (!regValue(addr, value)) {
-        // Any other address in the I/O page: read as 0 (handled).
-        if (addr >= ADDR_IO_PAGE) { value = 0; return true; }
-        return false;
-    }
+    // Других регистров на странице В-В у БК нет: шина не отвечает — вектор 4
+    // (tests/hw/IOPAGE.BIN на БК-0010-01 пользователя, 2026-11-20).
+    if (!regValue(addr, value)) return false;
     // Побочные эффекты чтения.
     switch (addr) {
     case REG_KBD_DATA:
@@ -2624,8 +2622,7 @@ bool Board::ioWrite(uint16_t addrIn, uint16_t value, bool isByte) {
         // одна система с диска не поднимается.
         return false;
     default:
-        if (addr >= ADDR_IO_PAGE) return true; // swallow writes to I/O page
-        return false;
+        return false;   // нет регистра — зависание (IOPAGE.BIN), и на чтение, и на запись
     }
 }
 

@@ -127,6 +127,8 @@ uint16_t Memory::busRead(uint16_t raw) {
     if (io) {
         uint16_t v = 0;
         if (io_->ioRead(addr, v)) return v;
+        if (busError_) busError_(addr);   // страница В-В: никто не ответил
+        return 0;
     }
     // Пустой блок БК-0011М (нет ПЗУ в розетке): ответа на шине нет — зависание.
     if (attr_[addr >> 13] == Absent && addr < ADDR_IO_PAGE) {
