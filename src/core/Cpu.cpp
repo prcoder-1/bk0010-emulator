@@ -373,8 +373,8 @@ int Cpu::op_mark() {
 }
 int Cpu::op_mtps() {
     uint8_t data = loadbDst();
-    // BK-0010: bits C,V,Z,N,T (0..4) and bit 7 (keyboard mask) are writable.
-    psw = (psw & ~0217) | (data & 0217);
+    // Пишутся биты 0-3 и 5-7, T (бит 4) — нет (RTL ВМ1: MTPS #340 / MFPS дают 0340).
+    psw = (psw & ~0357) | (data & 0357);
     return OK;
 }
 int Cpu::op_mfps() {
@@ -529,15 +529,16 @@ int Cpu::op_sob() {
 }
 
 // ---- jumps / control ----
+// JMP/JSR с регистром — ловушка по вектору 4, а не 010 (RTL ВМ1; так же GID).
 int Cpu::op_jmp() {
     uint16_t a = loadEa();
-    if (eaIllegal_) return R_ILLEGAL;
+    if (eaIllegal_) return R_BUSERR;
     r[7] = a;
     return OK;
 }
 int Cpu::op_jsr() {
     uint16_t a = loadEa();
-    if (eaIllegal_) return R_ILLEGAL;
+    if (eaIllegal_) return R_BUSERR;
     push(r[srcReg()]);
     r[srcReg()] = r[7];
     r[7] = a;
@@ -576,6 +577,10 @@ int Cpu::op_sub000() {
     case 4: return op_iot();
     case 5: return op_reset();
     case 6: return op_rtt();
+    // START/STEP вне пультового режима читают сохранённые PC/PSW из 0177674/0177676;
+    // на БК там никого нет — зависание, вектор 4 (RTL ВМ1).
+    case 010: case 011: case 012: case 013:
+    case 014: case 015: case 016: case 017: return R_BUSERR;
     default: return R_ILLEGAL;
     }
 }
@@ -842,6 +847,7 @@ int Cpu::step() {
     case OK:
     case R_RTT:   break;
     case R_ILLEGAL: service(VEC_RESERVED); break;
+    case R_BUSERR:  service(VEC_BUS_ERROR); break;
     case R_EMT:
         // EMT 36 = tape/disk file I/O. If a hook handles it (file read/write to
         // the host), skip the ROM handler; PC already points past the EMT.

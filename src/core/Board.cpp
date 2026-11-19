@@ -569,7 +569,7 @@ int Board::busStep(const Vm1Sched& s, const uint8_t* cls, uint64_t ticks, bool f
     // мгновенным RPLY (хвост после быстрой записи ~11 полутактов). Иначе такая команда
     // теряет лишнее окно 037. Без обмена с ДОЗУ (всё в СМК) — прежний хвост: замеры F/G.
     const bool fastWAfterDram = bk11() && anyDram && s.n > 0 && fast && s.op[s.n - 1].kind == 'W';
-    const int64_t next = ref + (T / 2) * (s.tail + (fast ? s.pfXf : 0)) - (fastWAfterDram ? T : 0);
+    const int64_t next = ref + (T / 2) * (s.tail + (fast ? s.pfXf : 0) + s.refetch) - (fastWAfterDram ? T : 0);
     prevTeDram_ = s.early ? 2 : 0;
     prevTeFast_ = s.teFast;
     busFrac_ = static_cast<int>(next % T);

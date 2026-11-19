@@ -17,7 +17,7 @@ public:
     enum : uint16_t { CC_C = 001, CC_V = 002, CC_Z = 004, CC_N = 010, CC_T = 020, CC_PRI = 0200 };
 
     // Result codes from executing one instruction.
-    enum Result { OK = 0, R_ILLEGAL, R_HALT, R_WAIT, R_EMT, R_TRAP, R_IOT, R_BPT, R_RTT };
+    enum Result { OK = 0, R_ILLEGAL, R_HALT, R_WAIT, R_EMT, R_TRAP, R_IOT, R_BPT, R_RTT, R_BUSERR };
 
     // Standard interrupt/trap vectors (octal).
     enum : uint16_t {

@@ -111,8 +111,10 @@ bool vm1Schedule(uint16_t ir, Vm1Sched& s) {
         const bool swab = idx == 003, mfps = idx == 01067;
         if (dm == 0) {
             s.tail = mtps ? 6 : 8; s.early = true;
-            s.teFast = mtps ? 10 : mfps ? 8 : swab ? 4 : 2;
-            if (mtps) s.pfXf = 2;
+            s.teFast = mfps ? 8 : swab ? 4 : 2;
+            // MTPS R выбирает следующую команду, выбрасывает её и выбирает снова через
+            // 12 тактов после строба первой выборки (RTL ВМ1: две выборки по одному адресу).
+            if (mtps) s.refetch = 24;
             return true;
         }
         operand(b, dm, (dm == 4 || dm == 5) ? 14 : 12, true);

@@ -429,6 +429,34 @@ int main(int argc, char** argv) {
         CHECK(c.halted(), "HALT with no vector-0004 handler stops the CPU (no loop)");
     }
 
+    // ---- ВМ1 по RTL (OneChipBook vm1.v): JMP/JSR Rn, START/STEP, MTPS ----
+    SECTION("ВМ1: JMP/JSR Rn и START/STEP — вектор 4, MTPS пишет биты 0-3 и 5-7")
+    {
+        auto trapVector = [](uint16_t op) {
+            Memory m; Cpu c(m);
+            m.pokeWord(004, 03000); m.pokeWord(006, 0);
+            m.pokeWord(010, 04000); m.pokeWord(012, 0);
+            m.pokeWord(01000, op);
+            c.reset(01000, 0); c.r[6] = 02000;
+            c.step();
+            return c.pc() == 03000 ? 4 : c.pc() == 04000 ? 010 : -1;
+        };
+        CHECK(trapVector(0000100) == 4, "JMP R0 — вектор 4");
+        CHECK(trapVector(0004700) == 4, "JSR PC,R0 — вектор 4");
+        CHECK(trapVector(0000012) == 4, "START — чтение 0177674, зависание, вектор 4");
+        CHECK(trapVector(0000016) == 4, "STEP — вектор 4");
+        CHECK(trapVector(0000007) == 010, "0000007 — резервная команда, вектор 010");
+
+        Memory m; Cpu c(m);
+        const uint16_t prog[] = {0106427, 0340, 0106701,      // MTPS #340; MFPS R1
+                                 0106427, 0020, 0106702};     // MTPS #20;  MFPS R2
+        for (int i = 0; i < 6; ++i) m.pokeWord(01000 + 2 * i, prog[i]);
+        c.reset(01000, 0); c.r[6] = 02000;
+        for (int i = 0; i < 4; ++i) c.step();
+        CHECK(c.r[1] == 0177740, "MTPS #340: биты 5 и 6 записываются");
+        CHECK(c.r[2] == 0 && !(c.psw & 020), "MTPS #20: бит T не записывается");
+    }
+
     // ---- 1801VM1 programmable timer (0177706/0177710/0177712) ----
     // Bits: CONTINUOUS=002 ENBEND=004 ONCE=010 START=020 DIV16=040 DIV4=0100 END=0200
     SECTION("1801VM1 programmable timer (0177706/0177710/0177712)")
@@ -870,6 +898,35 @@ int main(int argc, char** argv) {
                 if (per != want) std::printf("  SOB в %s, фаза %d = %g\n", inRom ? "ПЗУ" : "ДОЗУ", ph, per);
                 CHECK(per == want, msg);
             }
+
+        // MTPS R отбрасывает предвыборку и выбирает следующую команду снова через 12
+        // тактов (RTL ВМ1, kromych/BK-0011M). RTL + нетлист 037: MTPS R0 = 23,35 при
+        // NOP = 12,65; из ПЗУ на RTL — NOP + 9…10.
+        auto mtps = [](bool bk11, int ph, uint16_t base, uint16_t op) {
+            Board b;
+            if (bk11) b.setMachine(Machine::Bk0011m);
+            b.loadRoms(BK_DEFAULT_ROM_DIR);
+            b.reset();
+            b.setCpuPhase(ph);
+            Memory& m = b.memory();
+            uint16_t a = base;
+            m.pokeWord(a, 012700); m.pokeWord(a + 2, 0340); a += 4;
+            for (int i = 0; i < 100; ++i, a += 2) m.pokeWord(a, op);
+            m.pokeWord(a, 000777);
+            b.cpu().reset(base, 0340);
+            b.stepInstruction();
+            const uint64_t t0 = b.totalTicks();
+            for (int i = 0; i < 1000 && b.cpu().pc() != a; ++i) b.stepInstruction();
+            return double(b.totalTicks() - t0) / 100;
+        };
+        for (int ph = 0; ph < 2; ++ph) {
+            CHECK(std::abs(mtps(false, ph, 01000, 0106400) - 24) < 0.05,
+                  "MTPS R0 в ДОЗУ БК-0010 — 24 такта (перевыборка)");
+            CHECK(std::abs(mtps(true, ph, 01000, 0106400) - 80.0 / 3) < 0.01,
+                  "MTPS R0 в ДОЗУ БК-0011М — 26,67 такта (5 окон 037)");
+        }
+        CHECK(std::abs(mtps(false, 0, 0110000, 0106400) - mtps(false, 0, 0110000, 0000240) - 10) < 0.05,
+              "MTPS R0 в ПЗУ — на 10 тактов дольше NOP");
     }
 
     // ---- Быстрая память в модели шины: ОЗУ СМК-512 -------------------------
