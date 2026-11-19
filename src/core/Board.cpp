@@ -311,6 +311,8 @@ void Board::resetDevices() {
 }
 
 Board::Board() {
+    romSyms_.setFallback(&sysSyms_);
+    mstdSyms_.setFallback(&sysSyms_);
     mem_.setIoBus(this);
     cpu_.setResetHook([this]() { resetDevices(); });
     cpu_.setHaltHook([this]() { consoleEntry(); });
@@ -654,6 +656,7 @@ bool Board::loadRoms(const std::string& romDir) {
             const bool got = mem_.loadRom11(r.slot, (romDir + "/" + r.file).c_str());
             if (r.slot == Memory::ROM_BOS) ok = got;
         }
+        loadSysSymbols();
         return ok;
     }
     bool ok = true;
@@ -669,6 +672,7 @@ bool Board::loadRoms(const std::string& romDir) {
         mem_.loadRomFile(ADDR_ROM_BASIC, (romDir + "/basic10.rom").c_str(), 24576);
         mem_.setAbsent10(0);
     }
+    loadSysSymbols();
     return ok;
 }
 
@@ -891,7 +895,7 @@ bool Board::MpiMux::mpiPoke(uint16_t raw, uint16_t value, bool isByte) {
 void Board::updateMpi() {
     mem_.setBosOff(azOn_ && az_.config().noMon);
     if (azOn_) {
-        symbols_.setFallback(nullptr);
+        symbols_.setFallback(romSymbols());
         mem_.setMpi(&az_);
         return;
     }
@@ -899,8 +903,7 @@ void Board::updateMpi() {
     mux_.fdc = diskOn_ ? &kngmd_ : nullptr;
     mux_.ide = (ide_.any() && (samara_ ? diskOn_ : smkOn_)) ? &ide_ : nullptr;
     mux_.samara = samara_;
-    // Имена из ПЗУ контроллера — только пока оно на шине (иначе там Бейсик или пусто).
-    symbols_.setFallback(diskOn_ ? &romSyms_ : nullptr);
+    symbols_.setFallback(romSymbols());
     mem_.setMpi(mux_.empty() ? nullptr : &mux_);
 }
 
@@ -908,6 +911,25 @@ void Board::updateMpi() {
 // машины: у платы СМК-512 своя прошивка (v2.05 с ROM-BIOS, roms/smk512.rom) — именно
 // её ждут системы для БК-0010 с расширением памяти; у простого КНГМД — драйвер 326.
 // Символы прошивки — файл с тем же именем и расширением .sym («имя = значение»).
+// Имена из ПЗУ контроллера — только пока оно на шине (иначе там Бейсик, тесты или пусто).
+// Под AZБК свои ПЗУ и окна — имён нет.
+const SymbolTable* Board::romSymbols() const {
+    if (azOn_) return nullptr;
+    if (diskOn_) return &romSyms_;
+    if (!mstdSyms_.empty()) return &mstdSyms_;
+    return sysSyms_.empty() ? nullptr : &sysSyms_;
+}
+
+// Имена системных ПЗУ (monit10.sym, bk10_019_mstd.sym, bk11m_324_bos.sym). EXT БК-0011М
+// не берём: оно видно лишь в окне 2, а в остальное время его имена легли бы на ОЗУ.
+void Board::loadSysSymbols() {
+    sysSyms_.clear();
+    mstdSyms_.clear();
+    sysSyms_.loadMap(romDir_ + (bk11() ? "/bk11m_324_bos.sym" : "/monit10.sym"));
+    if (!bk11() && focalRoms()) mstdSyms_.loadMap(romDir_ + "/bk10_019_mstd.sym");
+    symbols_.setFallback(romSymbols());
+}
+
 void Board::loadRomSymbols(const std::string& romPath) {
     romSyms_.clear();
     const size_t dot = romPath.find_last_of('.');

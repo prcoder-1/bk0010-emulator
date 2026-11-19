@@ -380,6 +380,24 @@ int main(int argc, char** argv) {
     }
 
     // ---- Save / restore state round-trip ----
+    // Имена системных ПЗУ (roms/monit10.sym, bk10_019_mstd.sym, bk11m_324_bos.sym — из
+    // аннотаций kromych/BK-0011M) — нижний слой таблицы символов, под ПЗУ контроллера.
+    SECTION("Имена системных ПЗУ: монитор, тесты МСТД, БОС")
+    {
+        auto name = [](Machine mach, uint16_t a) {
+            Board b;
+            b.setMachine(mach);
+            b.loadRoms(BK_DEFAULT_ROM_DIR);
+            const std::string* n = b.symbols().nameAt(a);
+            return n && b.symbols().all().empty() ? *n : std::string();
+        };
+        CHECK(name(Machine::Bk0010, 0100260) == "MONIT", "имена ПЗУ: монитор 017 — MONIT = 0100260");
+        CHECK(name(Machine::Bk0010, 0160000).empty(), "имена ПЗУ: тестов МСТД на БК-0010-01 нет (там Бейсик)");
+        CHECK(name(Machine::Bk0010Focal, 0160000) == "STARTT", "имена ПЗУ: тесты МСТД 019 — STARTT = 0160000");
+        CHECK(name(Machine::Bk0011m, 0140000) == "RESET", "имена ПЗУ: БОС — RESET = 0140000");
+        CHECK(name(Machine::Bk0011m, 0100260).empty(), "имена ПЗУ: на 11М имён монитора БК-0010 нет");
+    }
+
     SECTION("Save / restore state round-trip")
     {
         Board b;

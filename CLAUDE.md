@@ -435,6 +435,10 @@ Key cross-cutting facts to know before editing the CPU or screen:
   `McpServer::symAt/symAddrOf` (its own `bk_symbols` maps first, then `Board::romSymbols()`).
   The labels were bound to the ROM images by instruction-pattern matching against the
   commented sources (see `docs/floppy.md`) — regenerate the same way if a ROM changes.
+  Below them sits the system-ROM layer (`Board::loadSysSymbols`): `monit10.sym`, `bk10_019_mstd.sym`
+  (only while 0160000 holds the tests, not a controller) and `bk11m_324_bos.sym`, converted from
+  kromych/BK-0011M's `annotations/*.ann` (MIT; ROM images md5-identical) — ROM addresses only, no
+  RAM cells (`nearest` would name game code after them) and no EXT (visible only in window 2).
 - **AZБК controller** (`src/core/Az*.{h,cpp}`, `docs/azbk.md`): an `MpiDevice` with
   `fullBus()` — `Memory` asks it for EVERY address, not only A15=1. Active window answers
   instead of the BK, shadow window copies BK writes, an unclaimed window is the BK itself

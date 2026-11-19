@@ -378,10 +378,10 @@ public:
     SymbolTable& symbols() { return symbols_; }
     const SymbolTable& symbols() const { return symbols_; }
     int loadSymbols(const std::string& path) { return symbols_.loadMap(path); }
-    // Имена из ПЗУ контроллера дисковода (roms/<прошивка>.sym рядом с образом ПЗУ):
-    // точки входа и подпрограммы драйвера. Нижний слой symbols(): свои имена главнее.
-    // nullptr — контроллера на шине нет.
-    const SymbolTable* romSymbols() const { return diskOn_ ? &romSyms_ : nullptr; }
+    // Имена из ПЗУ (roms/<образ>.sym рядом с образом): прошивка контроллера дисковода,
+    // пока он на шине, под ней — монитор или БОС и тесты МСТД в 0160000. Нижний слой
+    // symbols(): свои имена главнее. nullptr — имён ПЗУ нет (или стоит AZБК).
+    const SymbolTable* romSymbols() const;
 
     // --- Comments (interactive disassembler annotations): address -> free text.
     void setComment(uint16_t a, const std::string& c) { if (c.empty()) comments_.erase(a); else comments_[a] = c; }
@@ -793,7 +793,10 @@ private:
     bool     breakHit_ = false;
     SymbolTable symbols_;                        // linker-map symbols (address <-> name)
     SymbolTable romSyms_;                        // имена из ПЗУ контроллера (нижний слой)
+    SymbolTable sysSyms_;                        // монитор 017 / БОС (под ним)
+    SymbolTable mstdSyms_;                       // тесты МСТД 019 в 0160000, пока там нет контроллера
     void loadRomSymbols(const std::string& romPath);
+    void loadSysSymbols();
     std::map<uint16_t, std::string> comments_;   // interactive per-address comments
     std::map<uint16_t, DataItem> data_;          // interactive code/data markup
 
