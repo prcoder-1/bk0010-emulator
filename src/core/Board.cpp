@@ -493,9 +493,8 @@ int Board::busTicks(uint16_t ir, int tableTicks) {
     return tableTicks + (dramRead ? Cpu::arbReadPenalty(ir) : 0);
 }
 
-// Сопоставляет обмены с шагами по порядку. Команды «чтение-модификация-запись»,
-// которые в эмуляторе только пишут (CLR, SXT, MFPS в память), чтения не делают —
-// тогда чтение берёт класс следующей за ним записи.
+// Сопоставляет обмены с шагами по порядку. Если у шага «чтение» перед записью
+// чтения в журнале нет, оно берёт класс следующей за ним записи.
 bool Board::mapAccesses(const Vm1Sched& s, int& from, uint8_t* cls) const {
     int i = from;
     for (int k = 0; k < s.n; ++k) {
@@ -2353,12 +2352,14 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
         keyIntPending_ = false;          // запрос чтение снимает сразу (нетлист 014)
         break;
     case REG_PORT:
+        // Чтение приёмника у CLR/SXT/MFPS — не опрос порта: CLR @#177714 пишет отсчёт Covox.
+        if (cpu_.dummyRead()) break;
         portReadAt_ = totalTicks_ + 1;   // для Covox: порт опрашивают
         mouse_.noteRead();
         break;
     case REG_SYS:
         sysWriteFlag_ = false;
-        if (tape_.loaded()) tape_.noteRead(totalTicks_, inTapeDriver(curInstrPc_));
+        if (tape_.loaded() && !cpu_.dummyRead()) tape_.noteRead(totalTicks_, inTapeDriver(curInstrPc_));
         break;
     default: break;
     }

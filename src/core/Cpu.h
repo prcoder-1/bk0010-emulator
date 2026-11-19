@@ -49,6 +49,9 @@ public:
     // (её предвыборку ловушка отбросила).
     bool traceTrapped() const { return traceTrap_; }
     uint16_t tracePc() const { return tracePc_; }
+    // Идёт чтение приёмника, результат которого команде не нужен (CLR, SXT, MFPS в память):
+    // побочные эффекты у регистров настоящие, эвристики платы его не считают опросом.
+    bool dummyRead() const { return dummyRead_; }
     void clearHalt() { halted_ = false; }
     void clearWait() { waiting_ = false; }
 
@@ -93,6 +96,7 @@ private:
     bool waiting_ = false;
     bool traceTrap_ = false;
     uint16_t tracePc_ = 0;
+    bool dummyRead_ = false;
     std::function<bool()> emt36Hook_;  // EMT 36 intercept (true = handled, skip ROM)
     std::function<void()> resetHook_;  // RESET: сброс периферии
     std::function<void()> haltHook_;   // HALT: запись микрокода в 177716
@@ -130,6 +134,9 @@ private:
     void     storebDst(uint8_t v);
     void     storebDst2(uint8_t v);
     uint16_t loadEa();                // for JMP/JSR (address, not value)
+    // ВМ1 пишет CLR/SXT/MFPS в память циклом чтение-модификация-запись: приёмник сперва читается.
+    void dummyLoadDst()  { if (dstMode()) { dummyRead_ = true; loadDst();  dummyRead_ = false; } }
+    void dummyLoadbDst() { if (dstMode()) { dummyRead_ = true; loadbDst(); dummyRead_ = false; } }
 
     void service(uint16_t vector);    // trap/interrupt dispatch
 

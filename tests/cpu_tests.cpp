@@ -627,6 +627,45 @@ int main(int argc, char** argv) {
         CHECK(c.cpu().pc() == 01000, "клавиатура: прочитанный при маске код не прерывает");
     }
 
+    // ---- CLR/SXT/MFPS в память — чтение-модификация-запись ----
+    // ВМ1 сперва читает приёмник (модель кристалла MiST в kromych/BK-0011M, GID
+    // ExecuteCLR), и у регистров с побочным эффектом чтения он настоящий: CLR @#177662
+    // на 11М (палитра) заодно забирает код клавиатуры.
+    SECTION("CLR/SXT/MFPS в память читают приёмник")
+    {
+        Board b;
+        b.setMachine(Machine::Bk0011m);
+        b.reset();
+        Memory& m = b.memory();
+        m.pokeWord(060, 02000); m.pokeWord(062, 0);
+        m.pokeWord(02000, 000777);
+        m.writeWord(0177660, 0);
+        const uint16_t prog[] = {005037, 0177662, 000777};   // CLR @#177662; BR .
+        for (int i = 0; i < 3; ++i) m.pokeWord(01000 + 2 * i, prog[i]);
+        b.cpu().reset(01000, 0);
+        b.cpu().r[6] = 0700;
+        b.pressKey(0101);
+        b.stepInstruction();
+        b.runTicks(b.ticksPerFrame());
+        CHECK(b.cpu().pc() == 01004, "CLR @#177662: чтение сняло запрос клавиатуры");
+        CHECK(!b.keyReady(), "CLR @#177662: чтение погасило готовность");
+
+        Board c;
+        c.reset();
+        Memory& n = c.memory();
+        n.pokeWord(01000, 005037); n.pokeWord(01002, 0177662);   // CLR @#177662 на БК-0010 —
+        n.pokeWord(01004, 000777);                              // запись в 0177662 — ошибка шины,
+        n.pokeWord(04, 03000); n.pokeWord(06, 0340);            // но код читается до неё
+        n.pokeWord(03000, 000777);
+        c.cpu().reset(01000, 0);
+        c.cpu().r[6] = 0700;
+        c.pressKey(0102);
+        c.stepInstruction();
+        c.runTicks(2000);
+        CHECK(!c.keyReady(), "CLR @#177662 на БК-0010: код прочитан до ошибки записи");
+        CHECK(c.cpu().pc() == 03000, "CLR @#177662 на БК-0010: запись — ошибка шины");
+    }
+
     // ---- Vp037: геометрия развёртки (порт va_037.v) ----
     SECTION("Vp037: геометрия развёртки (порт va_037.v)")
     {

@@ -256,7 +256,7 @@ int Cpu::op_xor() {
 }
 
 // ---- single operand (word) ----
-int Cpu::op_clr() { clrAll(); setZ(); storeDst(0); return OK; }
+int Cpu::op_clr() { dummyLoadDst(); clrAll(); setZ(); storeDst2(0); return OK; }
 int Cpu::op_com() {
     uint16_t d = ~loadDst();
     chgN(d); chgZ(d); clrV(); setC();
@@ -361,7 +361,8 @@ int Cpu::op_sxt() {
     if (psw & CC_N) { data = 0177777; clrZ(); }
     else { data = 0; setZ(); }
     clrV();
-    storeDst(data);
+    dummyLoadDst();
+    storeDst2(data);
     return OK;
 }
 int Cpu::op_mark() {
@@ -379,13 +380,13 @@ int Cpu::op_mtps() {
 int Cpu::op_mfps() {
     uint8_t data = psw & 0377;
     chgNb(data); chgZb(data); clrV();
-    if (dstMode()) storebDst(data);
+    if (dstMode()) { dummyLoadbDst(); storebDst2(data); }
     else { r[dstReg()] = (data & 0200) ? (0177400 + data) : data; cBugArmed_ = true; }
     return OK;
 }
 
 // ---- single operand (byte) ----
-int Cpu::op_clrb() { clrAll(); setZ(); storebDst(0); return OK; }
+int Cpu::op_clrb() { dummyLoadbDst(); clrAll(); setZ(); storebDst2(0); return OK; }
 int Cpu::op_comb() {
     uint8_t d = ~loadbDst();
     chgNb(d); chgZb(d); clrV(); setC();
