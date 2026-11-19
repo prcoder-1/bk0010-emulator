@@ -571,7 +571,8 @@ int main(int argc, char** argv) {
         b.memory().pokeWord(Cpu::VEC_KEYBOARD + 2, 0);      // ССП обработчика
         b.memory().pokeWord(01000, 000777);                 // BR . — крутимся на месте
         b.memory().pokeWord(02000, 000777);                 // и в «обработчике» тоже
-        b.cpu().reset(01000, 0);                            // маска открыта
+        b.memory().writeWord(0177660, 0);                   // маска клавиатуры открыта
+        b.cpu().reset(01000, 0);                            // маска ЦП открыта
         b.pressKey(0101);
         b.runTicks(2000);
         CHECK(b.cpu().pc() == 01000, "клавиатура: свежий код не прерывает сразу");
@@ -590,6 +591,40 @@ int main(int argc, char** argv) {
         CHECK((c.memory().readWord(0177662) & 0177) == 0101, "клавиатура: опрос успел прочитать код");
         c.runTicks(c.ticksPerFrame());
         CHECK(c.cpu().pc() == 01000, "клавиатура: прочитанный код прерывание отменяет");
+    }
+
+    // ---- Клавиатура: маска 0177660 держит запрос, а не теряет его ----
+    // Нетлист 1801ВП1-014 (OneChipBook sim/ref014, ref014_scenario.v phase 3/4): нажатие
+    // при маске взводит запрос, маска лишь не пускает его на вывод; снятие маски до
+    // чтения кода выдаёт прерывание, чтение 0177662 запрос снимает. INIT маску ставит.
+    SECTION("Клавиатура: запрос при маске ждёт снятия маски (нетлист 014)")
+    {
+        auto setup = [](Board& b) {
+            b.reset();
+            b.memory().pokeWord(Cpu::VEC_KEYBOARD, 02000);
+            b.memory().pokeWord(Cpu::VEC_KEYBOARD + 2, 0);
+            b.memory().pokeWord(01000, 000777);
+            b.memory().pokeWord(02000, 000777);
+            b.cpu().reset(01000, 0);
+        };
+        Board b;
+        setup(b);
+        CHECK((b.peekReg(0177660) & 0100) != 0, "клавиатура: после включения маска стоит");
+        b.pressKey(0101);
+        b.runTicks(b.ticksPerFrame());
+        CHECK(b.cpu().pc() == 01000, "клавиатура: при маске прерывания нет");
+        b.memory().writeWord(0177660, 0);
+        b.runTicks(100);
+        CHECK(b.cpu().pc() == 02000, "клавиатура: снятие маски выдаёт отложенное прерывание");
+
+        Board c;
+        setup(c);
+        c.pressKey(0101);
+        c.runTicks(c.ticksPerFrame());
+        CHECK((c.memory().readWord(0177662) & 0177) == 0101, "клавиатура: код прочитан при маске");
+        c.memory().writeWord(0177660, 0);
+        c.runTicks(c.ticksPerFrame());
+        CHECK(c.cpu().pc() == 01000, "клавиатура: прочитанный при маске код не прерывает");
     }
 
     // ---- Vp037: геометрия развёртки (порт va_037.v) ----
@@ -873,6 +908,7 @@ int main(int argc, char** argv) {
             m.pokeWord(02000, 0000002);                  // RTI
             m.pokeWord(0100, 02000); m.pokeWord(0102, 0);
             m.pokeWord(060, 02000);  m.pokeWord(062, 0);
+            m.writeWord(0177660, 0);                     // маска клавиатуры открыта
             b.cpu().reset(01000, 0);
             b.cpu().r[6] = 01000;
             for (int i = 0; i < 8; ++i) b.stepInstruction();
@@ -1083,6 +1119,7 @@ int main(int argc, char** argv) {
         m.pokeWord(01000, 0000777);                     // BR .
         m.pokeWord(02000, 0000777); m.pokeWord(0274, 02000);
         m.pokeWord(03000, 0000777); m.pokeWord(060, 03000);
+        m.writeWord(0177660, 0);                        // маска клавиатуры открыта
         b.cpu().reset(01000, 0340);
         b.setAy(true); b.setAy2(true); b.setCovox(true);
         b.ayChip(0).writeReg(8, 13);

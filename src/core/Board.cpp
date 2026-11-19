@@ -709,7 +709,7 @@ void Board::reset() {
     cpu_.reset(start, 0340);
     scroll_ = 01330;   // 0330 + бит 9: полный экран (256 строк) по умолчанию
     rasterScroll_ = scroll_; scrollLatched_ = false;
-    kbdStatus_ = 0;    // bit 6 (0100) = interrupt MASK (0 => enabled), bit 7 = ready
+    kbdStatus_ = 0100; // bit 6 = interrupt MASK (1 = masked): power-on INIT sets it (netlist 014)
     kbdData_ = 0;
     keyIntPending_ = false;
     keyIntDeferAt_ = 0;
@@ -1805,12 +1805,14 @@ int Board::tryDeliverInterrupts() {
     // Поэтому свежий код придерживается до keyIntDeferAt_ — примерно четверть кадра,
     // как в референсном bk, где прерывание клавиатуры планируется отложенным
     // событием. Успели прочитать за это время — запрос снимается без прерывания.
+    // Маска закрывает только вывод запроса: сам запрос ждёт, и снятие маски до
+    // чтения кода выдаёт прерывание (нетлист 014, ref014_scenario.v phase 3).
     if (keyIntPending_) {
         if (!(kbdStatus_ & 0200)) {
             keyIntPending_ = false;                  // код уже прочитан — прерывать незачем
-        } else if (totalTicks_ >= keyIntDeferAt_) {
+        } else if (totalTicks_ >= keyIntDeferAt_ && !(kbdStatus_ & 0100)) {
             keyIntPending_ = false;
-            if (!(kbdStatus_ & 0100) && mem_.peekWord(keyIntVec_) != 0) {
+            if (mem_.peekWord(keyIntVec_) != 0) {
                 const int t = enterInterrupt(keyIntVec_, true);
                 trace_.profileInterrupt(cpu_.pc(), cpu_.sp());  // ISR frame for the flame graph
                 return t;
@@ -2348,6 +2350,7 @@ bool Board::ioReadRaw(uint16_t addr, uint16_t& value) {
         // (GID: devemu/Board.cpp:1081-1084, отсчёт :1855-1857). Программа, которая
         // читает код и тут же перепроверяет готовность, на железе видит её ещё раз.
         if (!kbdReadyClearAt_) kbdReadyClearAt_ = totalTicks_ + KBD_READY_CLEAR_TICKS;
+        keyIntPending_ = false;          // запрос чтение снимает сразу (нетлист 014)
         break;
     case REG_PORT:
         portReadAt_ = totalTicks_ + 1;   // для Covox: порт опрашивают
