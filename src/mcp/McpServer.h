@@ -57,6 +57,7 @@ private:
     // --- отладка игр ---
     bk::JoyStandard joyStd_ = bk::JoyStandard::Standard;  // липкая раскладка джойстика
     bool    cyrState_ = false;                 // текущий регистр РУС/ЛАТ машины
+    void    syncCyrState();                    // взять его у монитора/БОС, если клавиатура у них
     QString protoVer_ = "2024-11-05";          // согласованная версия MCP (для audio-блока)
     std::map<QString, std::vector<uint8_t>> stateSlots_;  // чекпоинты в памяти
 

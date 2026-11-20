@@ -34,6 +34,7 @@ add_library(bkcore STATIC
     src/core/Kngmd.cpp
     src/core/Board.cpp
     src/core/Tape.cpp
+    src/core/Typist.cpp
     src/core/Az.cpp
     src/core/AzVideo.cpp
     src/core/AzSound.cpp

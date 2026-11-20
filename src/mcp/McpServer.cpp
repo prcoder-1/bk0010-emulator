@@ -4,6 +4,7 @@
 #include "Instr.h"
 #include "Screen.h"
 #include "BkKeys.h"
+#include "Typist.h"
 #include "ScreenOcr.h"
 #include <QJsonDocument>
 #include <QFile>
@@ -597,9 +598,13 @@ QJsonArray McpServer::toolDefs() const {
                 {"max", P("integer", "Max changed cells to list (default 64)")}})));
     t.append(tool("bk_type", "Type a string through the keyboard (a few frames per character, like "
                   "real typing), holding each key down so games that poll 0177716 see it. Cyrillic "
-                  "works — the РУС/ЛАТ switch codes are inserted automatically. Newline = Enter.",
+                  "works — the РУС/ЛАТ switch codes are inserted automatically, checked against the real "
+                  "case flag of the BK-0010 monitor / BOS before every letter. Newline = Enter.",
         schema({{"text", P("string", "String to type")},
                 {"hold_frames", P("integer", "Frames each key stays held (default 2)")},
+                {"gap_frames", P("integer", "Frames after each release before the next key (default 2). "
+                                             "While the BK-0010 monitor runs the keyboard, each key also waits "
+                                             "until the program is back in EMT 6 (its entry drops an earlier key)")},
                 {"max_frames", P("integer", "Frame budget (default 600)")}}, {"text"})));
     t.append(tool("bk_callers", "List subroutines that call a function (from the recorded call edges), "
                   "with call counts.", schema({{"addr", addrArg}}, {"addr"})));
@@ -906,6 +911,7 @@ bool McpServer::resolveKey(const QJsonObject& args, std::vector<uint16_t>& codes
             codes.push_back(c);
         } else if (ks.size() == 1) {
             // Одиночный символ: кодируем как текст (для кириллицы добавится РУС/ЛАТ).
+            syncCyrState();
             codes = bk::bkEncodeText(ks.toStdString(), cyrState_);
             if (codes.empty()) { err = "непредставимый символ: '" + ks + "'"; return false; }
         } else {
@@ -1958,29 +1964,18 @@ QJsonObject McpServer::tool_bk_diff_mem(const QJsonObject& args) {
     return textContent(out);
 }
 
+void McpServer::syncCyrState() {
+    if (const int st = bk::systemCyrillic(board_); st >= 0) cyrState_ = st;
+}
+
 QJsonObject McpServer::tool_bk_type(const QJsonObject& args) {
-    // Текст в КОИ-7 (кириллица тоже — с автоматической вставкой РУС/ЛАТ).
-    // Клавиша на время символа считается физически нажатой: игры, опрашивающие
-    // бит 6 регистра 0177716 (Digger, PITON), иначе ввода не увидят.
-    const std::vector<uint16_t> codes =
-        bk::bkEncodeText(args.value("text").toString().toStdString(), cyrState_);
-    const int budget = args.value("max_frames").toInt(600);
-    const int holdFrames = std::max(1, args.value("hold_frames").toInt(2));
-    size_t idx = 0;
-    int frames = 0;
-    while (idx < codes.size() && frames < budget) {
-        if (!board_.keyReady()) {
-            board_.pressKey(codes[idx++]);
-            board_.setKeyHeld(true);
-            for (int k = 0; k < holdFrames && frames < budget; ++k) { board_.runFrame(); ++frames; }
-            board_.setKeyHeld(false);
-        }
-        board_.runFrame(); ++frames;
-    }
-    for (int k = 0; k < 12 && board_.keyReady() && frames < budget; ++k) { board_.runFrame(); ++frames; }
-    board_.setKeyHeld(false);
-    return textContent(QString("Набрано %1/%2 кодов за %3 кадров (регистр: %4).\n%5")
-        .arg(idx).arg(codes.size()).arg(frames).arg(cyrState_ ? "РУС" : "ЛАТ").arg(regsText()));
+    // Набор как у человека — см. bk::typeText (Typist.h): удержание клавиши, пауза,
+    // ожидание EMT 6 монитора, РУС/ЛАТ по признаку системы.
+    const bk::TypeResult r = bk::typeText(board_, args.value("text").toString().toStdString(), cyrState_,
+                                          args.value("hold_frames").toInt(2), args.value("gap_frames").toInt(2),
+                                          args.value("max_frames").toInt(600));
+    return textContent(QString("Набрано %1/%2 символов (%3 кодов) за %4 кадров (регистр: %5).\n%6")
+        .arg(r.chars).arg(r.total).arg(r.codes).arg(r.frames).arg(cyrState_ ? "РУС" : "ЛАТ").arg(regsText()));
 }
 
 QJsonObject McpServer::callersOrCallees(const QJsonObject& args, const QString& name) {
