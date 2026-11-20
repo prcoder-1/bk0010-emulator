@@ -31,7 +31,9 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/cpu_tests                      # unit tests (CPU decode, flags, save/restore)
 ./build/cpu_tests Covox BKX1           # only sections whose title contains these words
-ctest --test-dir build                 # same, via ctest
+ctest --test-dir build                 # same, via ctest (+ tape_tests)
+./build/tape_tests [Planet ...]        # 19 protected tapes vs tests/data/protected (slow, ~30 s;
+                                       # tapes in ~/emulators/БК-0010-01/tapes/protected, else skipped)
 ./build/bk0010-emulator game.bin       # GUI
 ```
 

@@ -125,3 +125,14 @@ target_compile_definitions(cpu_tests PRIVATE
     BK_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
 )
 add_test(NAME cpu_tests COMMAND cpu_tests)
+
+# Защищённые кассеты (19 игр, медленно): кассеты вне репозитория — BK_PROTECTED_TAPES или
+# ~/emulators/БК-0010-01/tapes/protected; без них тест пропускается (код 77).
+add_executable(tape_tests tests/tape_tests.cpp)
+target_link_libraries(tape_tests PRIVATE bkcore)
+target_compile_definitions(tape_tests PRIVATE
+    BK_DEFAULT_ROM_DIR="${CMAKE_CURRENT_SOURCE_DIR}/roms"
+    BK_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
+)
+add_test(NAME tape_tests COMMAND tape_tests)
+set_tests_properties(tape_tests PROPERTIES SKIP_RETURN_CODE 77 LABELS slow TIMEOUT 1800)
